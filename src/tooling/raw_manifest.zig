@@ -48,7 +48,14 @@ pub const RawManifest = struct {
     shortcuts: []const RawShortcut = &.{},
     file_associations: []const RawFileAssociation = &.{},
     url_schemes: []const RawUrlScheme = &.{},
+    updates: RawUpdates = .{},
     dmg: RawDmg = .{},
+};
+
+pub const RawUpdates = struct {
+    feed_url: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    check_on_start: bool = false,
 };
 
 pub const RawImages = struct {
@@ -112,6 +119,12 @@ pub const RawSecurity = struct {
 /// reference.
 pub const RawAssets = struct {
     images: []const RawImageAsset = &.{},
+    fonts: []const RawFontAsset = &.{},
+};
+
+pub const RawFontAsset = struct {
+    id: u64,
+    path: []const u8,
 };
 
 pub const RawImageAsset = struct {

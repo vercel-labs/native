@@ -1,4 +1,5 @@
 #include "gtk_host.h"
+#include "gtk_pixels.h"
 
 #include <gtk/gtk.h>
 #include <glib/gstdio.h>
@@ -937,6 +938,7 @@ static GtkWidget *native_sdk_make_native_widget(int kind, const char *label, con
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_COMMIT_COMPOSITION 9
 #define NATIVE_SDK_GTK_GPU_INPUT_IME_CANCEL_COMPOSITION 10
 #define NATIVE_SDK_GTK_GPU_INPUT_POINTER_CANCEL 11
+#define NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL 15
 
 static uint64_t native_sdk_gpu_timestamp_ns(void) {
     return (uint64_t)g_get_monotonic_time() * 1000ull;
@@ -1499,17 +1501,20 @@ static gboolean native_sdk_gpu_scroll(GtkEventControllerScroll *controller, doub
     if (!view) return FALSE;
     double delta_x = dx;
     double delta_y = dy;
+    int input_kind = NATIVE_SDK_GTK_GPU_INPUT_SCROLL;
 #if GTK_CHECK_VERSION(4, 8, 0)
     if (gtk_event_controller_scroll_get_unit(controller) == GDK_SCROLL_UNIT_WHEEL) {
         delta_x *= 40.0;
         delta_y *= 40.0;
+        input_kind = NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL;
     }
 #else
     delta_x *= 40.0;
     delta_y *= 40.0;
+    input_kind = NATIVE_SDK_GTK_GPU_INPUT_DETENTED_SCROLL;
 #endif
     const uint32_t modifiers = native_sdk_gpu_modifier_flags(gtk_event_controller_get_current_event_state(GTK_EVENT_CONTROLLER(controller)));
-    native_sdk_emit_gpu_surface_input(view, NATIVE_SDK_GTK_GPU_INPUT_SCROLL, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", modifiers);
+    native_sdk_emit_gpu_surface_input(view, input_kind, view->gpu_pointer_x, view->gpu_pointer_y, 0, delta_x, delta_y, "", "", modifiers);
     return TRUE;
 }
 
@@ -4441,12 +4446,6 @@ int native_sdk_gtk_request_gpu_surface_frame(native_sdk_gtk_host_t *host, uint64
 }
 
 int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint64_t window_id, const char *label, size_t label_len, size_t width, size_t height, double scale, int has_dirty_rect, double dirty_x, double dirty_y, double dirty_width, double dirty_height, const uint8_t *rgba8, size_t rgba8_len) {
-    (void)scale;
-    (void)has_dirty_rect;
-    (void)dirty_x;
-    (void)dirty_y;
-    (void)dirty_width;
-    (void)dirty_height;
     native_sdk_gtk_window_t *win = native_sdk_find_window(host, window_id);
     char *label_copy = label_len > 0 ? native_sdk_strndup(label, label_len) : NULL;
     native_sdk_gtk_native_view_t *view = native_sdk_find_native_view(win, label_copy);
@@ -4454,11 +4453,24 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
     if (!view || view->kind != NATIVE_SDK_GTK_VIEW_GPU_SURFACE || !view->widget) return 0;
     if (!rgba8 || width == 0 || height == 0) return 0;
     if (width > INT_MAX || height > INT_MAX) return 0;
-    if (rgba8_len != width * height * 4) return 0;
+    if (width > SIZE_MAX / height || width * height > SIZE_MAX / 4 || rgba8_len != width * height * 4) return 0;
 
     const int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, (int)width);
     if (stride <= 0) return 0;
-    if (view->gpu_buf_width != (int)width || view->gpu_buf_height != (int)height || view->gpu_buf_stride != stride || !view->gpu_argb) {
+    /* Decide whether retained pixels are complete before changing the
+     * allocation or its metadata. A first or resized present must convert
+     * the entire surface even if its producer supplies incremental damage. */
+    const int retained_contents = native_sdk_gtk_pixels_can_reuse_buffer(
+        view->gpu_argb,
+        view->gpu_buf_width,
+        view->gpu_buf_height,
+        view->gpu_buf_stride,
+        width,
+        height,
+        stride
+    );
+    if (!retained_contents) {
+        if ((size_t)stride > SIZE_MAX / height) return 0;
         unsigned char *buffer = malloc((size_t)stride * height);
         if (!buffer) return 0;
         free(view->gpu_argb);
@@ -4468,21 +4480,21 @@ int native_sdk_gtk_present_gpu_surface_pixels(native_sdk_gtk_host_t *host, uint6
         view->gpu_buf_stride = stride;
     }
 
-    /* Straight RGBA8 -> premultiplied native-endian ARGB32 for cairo. */
-    for (size_t row = 0; row < height; row++) {
-        const uint8_t *src = rgba8 + row * width * 4;
-        uint32_t *dst = (uint32_t *)(view->gpu_argb + (size_t)row * (size_t)stride);
-        for (size_t col = 0; col < width; col++) {
-            const uint32_t r = src[col * 4 + 0];
-            const uint32_t g = src[col * 4 + 1];
-            const uint32_t b = src[col * 4 + 2];
-            const uint32_t a = src[col * 4 + 3];
-            const uint32_t pr = (r * a + 127) / 255;
-            const uint32_t pg = (g * a + 127) / 255;
-            const uint32_t pb = (b * a + 127) / 255;
-            dst[col] = (a << 24) | (pr << 16) | (pg << 8) | pb;
-        }
+    native_sdk_gtk_pixel_bounds_t conversion_bounds = native_sdk_gtk_pixels_full_bounds(width, height);
+    if (retained_contents) {
+        (void)native_sdk_gtk_pixels_dirty_bounds(
+            width,
+            height,
+            has_dirty_rect,
+            scale,
+            dirty_x,
+            dirty_y,
+            dirty_width,
+            dirty_height,
+            &conversion_bounds
+        );
     }
+    native_sdk_gtk_pixels_convert(view->gpu_argb, (size_t)stride, rgba8, width, conversion_bounds);
 
     const size_t sample_index = ((height / 2) * width + width / 2) * 4;
     const uint8_t sr = rgba8[sample_index + 0];

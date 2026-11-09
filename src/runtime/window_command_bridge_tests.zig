@@ -680,3 +680,66 @@ test "runtime handles built-in JavaScript platform support commands" {
     try std.testing.expect(std.mem.indexOf(u8, chromium_platform.lastBridgeResponse(), "\"invalid_request\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, chromium_platform.lastBridgeResponse(), "Platform feature is invalid") != null);
 }
+
+test "reusing a closed window slot preserves every shifted window's owned fields" {
+    const TestApp = struct {
+        fn app(self: *@This()) App {
+            return .{ .context = self, .name = "window-storage", .source = platform.WebViewSource.html("<p>Main</p>") };
+        }
+    };
+    const harness = try TestHarness().create(std.testing.allocator, .{});
+    defer harness.destroy(std.testing.allocator);
+    var app_state: TestApp = .{};
+    try harness.start(app_state.app());
+    const old = try harness.runtime.createWindow(.{ .label = "old", .title = "Old" });
+    const assets = try harness.runtime.createWindow(.{
+        .label = "assets-window",
+        .title = "Asset window title",
+        .source = platform.WebViewSource.assets(.{ .root_path = "assets/root", .entry = "page.html", .origin = "zero://panels", .spa_fallback = false }),
+    });
+    const html = try harness.runtime.createWindow(.{ .label = "html-window", .title = "HTML window title", .source = platform.WebViewSource.html("<p>Surviving HTML</p>") });
+    try harness.runtime.createShellViews(old.id, &.{.{ .label = "old-view", .kind = .toolbar }}, geometry.RectF.init(0, 0, 400, 300));
+    try harness.runtime.createShellViews(assets.id, &.{
+        .{ .label = "asset-parent", .kind = .toolbar },
+        .{ .label = "asset-child", .kind = .button, .parent = "asset-parent" },
+    }, geometry.RectF.init(0, 0, 400, 300));
+    try harness.runtime.createShellViews(html.id, &.{.{ .label = "html-view", .kind = .toolbar }}, geometry.RectF.init(0, 0, 400, 300));
+    const parent = "owned-parent";
+    @memcpy(harness.runtime.windows[2].main_parent_storage[0..parent.len], parent);
+    harness.runtime.windows[2].main_parent = harness.runtime.windows[2].main_parent_storage[0..parent.len];
+    try harness.runtime.closeWindow(old.id);
+    const replacement = try harness.runtime.createWindow(.{ .label = "old", .title = "Replacement title", .source = platform.WebViewSource.html("replacement bytes") });
+    try harness.runtime.createShellViews(replacement.id, &.{.{ .label = "replacement-view", .kind = .toolbar }}, geometry.RectF.init(0, 0, 400, 300));
+    const shifted_assets = &harness.runtime.windows[1];
+    const shifted_html = &harness.runtime.windows[2];
+    try std.testing.expectEqual(assets.id, shifted_assets.info.id);
+    try std.testing.expectEqual(html.id, shifted_html.info.id);
+    try std.testing.expectEqualStrings("assets-window", shifted_assets.info.label);
+    try std.testing.expectEqualStrings("Asset window title", shifted_assets.info.title);
+    try std.testing.expectEqualStrings(parent, shifted_assets.main_parent.?);
+    const source = shifted_assets.source.?;
+    try std.testing.expectEqualStrings("zero://panels", source.bytes);
+    try std.testing.expectEqualStrings("assets/root", source.asset_options.?.root_path);
+    try std.testing.expectEqualStrings("page.html", source.asset_options.?.entry);
+    try std.testing.expectEqualStrings("zero://panels", source.asset_options.?.origin);
+    try std.testing.expect(!source.asset_options.?.spa_fallback);
+    try std.testing.expectEqualStrings("html-window", shifted_html.info.label);
+    try std.testing.expectEqualStrings("HTML window title", shifted_html.info.title);
+    try std.testing.expectEqualStrings("<p>Surviving HTML</p>", shifted_html.source.?.bytes);
+    try std.testing.expectEqual(@intFromPtr(&shifted_assets.label_storage), @intFromPtr(shifted_assets.info.label.ptr));
+    try std.testing.expectEqual(@intFromPtr(&shifted_assets.source_storage.asset_entry), @intFromPtr(source.asset_options.?.entry.ptr));
+    try std.testing.expectEqual(@intFromPtr(&shifted_html.source_storage.bytes), @intFromPtr(shifted_html.source.?.bytes.ptr));
+    try std.testing.expectEqualStrings("assets-window", harness.null_platform.windows[1].label);
+    try std.testing.expectEqualStrings("Asset window title", harness.null_platform.windows[1].title);
+    try std.testing.expectEqualStrings("html-window", harness.null_platform.windows[2].label);
+    try std.testing.expectEqualStrings("HTML window title", harness.null_platform.windows[2].title);
+    const layout = &harness.runtime.shell_layouts[0];
+    try std.testing.expectEqual(assets.id, layout.window_id);
+    try std.testing.expectEqualStrings("asset-parent", layout.views[0].label);
+    try std.testing.expectEqualStrings("asset-child", layout.views[1].label);
+    try std.testing.expectEqualStrings("asset-parent", layout.views[1].parent.?);
+    try std.testing.expectEqual(@intFromPtr(&layout.label_storage[1]), @intFromPtr(layout.views[1].label.ptr));
+    try std.testing.expectEqual(@intFromPtr(&layout.parent_storage[1]), @intFromPtr(layout.views[1].parent.?.ptr));
+    try std.testing.expectEqual(html.id, harness.runtime.shell_layouts[1].window_id);
+    try std.testing.expectEqualStrings("html-view", harness.runtime.shell_layouts[1].views[0].label);
+}

@@ -708,6 +708,90 @@ function generatePageDecoder(query: DeclaredQuery, stem: string): string {
   return out.join("\n");
 }
 
+/// The declaration form of `generatedFragments`, as declaration emit prints
+/// it: four-space indentation, bodies dropped, private page helpers omitted.
+export function generatedDeclarationFragments(analysis: SqliteAnalysis): { types: string[]; cmds: string[]; subs: string[] } {
+  const types: string[] = [];
+  const cmds: string[] = [];
+  const subs: string[] = [];
+  if (analysis.queries.some((query) => query.kind === "query")) types.push("export type DbDecodedValue = null | number | Uint8Array;");
+  for (const query of analysis.queries) {
+    const stem = pascal(query.name);
+    types.push(`export interface ${stem}Params {`);
+    for (const param of query.params) types.push(`    readonly ${param.name}: ${tsType(param, true)};`);
+    types.push("}");
+    if (query.kind === "query") {
+      types.push(`export interface ${stem}Row {`);
+      for (const column of query.columns) types.push(`    readonly ${ident.test(column.name) ? column.name : js(column.name)}: ${tsType(column)};`);
+      types.push("}");
+      types.push(`export declare function decode${stem}Page(bytes: Uint8Array): ReadonlyArray<${stem}Row>;`);
+    }
+  }
+  for (const query of analysis.queries) {
+    const stem = pascal(query.name);
+    cmds.push(query.kind === "query"
+      ? `    q${stem}<M extends Msgish>(params: ${stem}Params, route: TypedRowsRoute<${stem}Row, M>): Cmd<M>;`
+      : `    q${stem}(params: ${stem}Params): TypedDbStatement;`);
+  }
+  if (analysis.queries.some((query) => query.kind === "exec")) cmds.push("    qTx<M extends Msgish>(statements: ReadonlyArray<TypedDbStatement>, route: WriteRoute<M>): Cmd<M>;");
+  for (const query of analysis.queries.filter((q) => q.live)) {
+    const stem = pascal(query.name);
+    subs.push(`    q${stem}<M extends Msgish>(key: string, params: ${stem}Params, route: TypedRowsRoute<${stem}Row, M>): Sub<M>;`);
+  }
+  return { types, cmds, subs };
+}
+
+/// The declaration file for `generateCoreSurface(base, analysis)`: the
+/// shipped declarations of `base` with the generated declarations inserted
+/// where the generated source lands. Each insertion point is the
+/// declaration that follows the marker in `base`. A marker whose anchor
+/// cannot be found is an SDK bug, never a silent omission.
+export function generateCoreDeclarations(base: string, baseDeclarations: string, analysis: SqliteAnalysis): string {
+  const fragments = generatedDeclarationFragments(analysis);
+  const lines = baseDeclarations.split("\n");
+  const insertions: { at: number; lines: string[] }[] = [];
+  for (const [marker, generated] of [
+    ["// @native-sqlite-generated-types", fragments.types],
+    ["// @native-sqlite-generated-cmds", fragments.cmds],
+    ["// @native-sqlite-generated-subs", fragments.subs],
+  ] as const) {
+    if (generated.length === 0) continue;
+    insertions.push({ at: declarationAnchor(base, lines, marker), lines: generated });
+  }
+  for (const insertion of insertions.sort((a, b) => b.at - a.at)) lines.splice(insertion.at, 0, ...insertion.lines);
+  return lines.join("\n");
+}
+
+function declarationAnchor(base: string, lines: readonly string[], marker: string): number {
+  const markerAt = base.indexOf(marker);
+  if (markerAt < 0) throw new Error(`the SDK core module has no ${marker} marker`);
+  const after = base.slice(markerAt + marker.length).split("\n").map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("//"));
+  const topLevel = /^export (?:declare )?(?:interface|type|function|const|class|enum) ([A-Za-z_$][A-Za-z0-9_$]*)/.exec(after ?? "");
+  const member = /^([A-Za-z_$][A-Za-z0-9_$]*)\s*[:<(]/.exec(after ?? "");
+  let at = -1;
+  if (topLevel) {
+    const declaration = new RegExp(`^export (?:declare )?(?:interface|type|function|const|class|enum) ${topLevel[1]}\\b`);
+    at = lines.findIndex((line) => declaration.test(line));
+  } else if (member) {
+    const owner = [...base.slice(0, markerAt).matchAll(/^export const ([A-Za-z_$][A-Za-z0-9_$]*) = \{/gm)].at(-1)?.[1];
+    const start = owner === undefined ? -1 : lines.findIndex((line) => line.startsWith(`export declare const ${owner}: {`));
+    if (start >= 0) {
+      const memberLine = new RegExp(`^    ${member[1]}[?]?[:<(]`);
+      const end = lines.findIndex((line, index) => index > start && line === "};");
+      at = lines.findIndex((line, index) => index > start && index < end && memberLine.test(line));
+    }
+  }
+  if (at < 0) throw new Error(`the SDK core declarations have no anchor for ${marker}`);
+  // A documented anchor keeps its JSDoc block attached.
+  while (at > 0 && lines[at - 1]!.trim().endsWith("*/")) {
+    let open = at - 1;
+    while (open > 0 && !lines[open]!.trim().startsWith("/**")) open--;
+    at = open;
+  }
+  return at;
+}
+
 export function generateCoreSurface(base: string, analysis: SqliteAnalysis): string {
   const fragments = generatedFragments(analysis);
   return base

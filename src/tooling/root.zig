@@ -20,6 +20,7 @@ pub const ios = @import("ios.zig");
 pub const android = @import("android.zig");
 pub const xcodeproj = @import("xcodeproj.zig");
 pub const db = @import("db.zig");
+pub const update = @import("update.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());

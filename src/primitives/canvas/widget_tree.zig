@@ -275,7 +275,8 @@ const disclosure_settle_slack: f32 = 0.5;
 
 /// The bottom edge the disclosure widget's content REACHES: the deepest
 /// maxY among its in-flow children's subtrees. Window-level surfaces float
-/// outside the flow and never count.
+/// outside the flow and never count. A nested disclosure's own extent
+/// bounds its body, including concealed children laid out below its frame.
 pub fn disclosureContentBottom(layout: anytype, node_index: usize) f32 {
     const node = layout.nodes[node_index];
     var bottom = -std.math.inf(f32);
@@ -289,6 +290,12 @@ pub fn disclosureContentBottom(layout: anytype, node_index: usize) f32 {
             continue;
         }
         bottom = @max(bottom, child.frame.normalized().maxY());
+        if (widgetKindDisclosureAnimated(child.widget.kind)) {
+            const subtree_depth = child.depth;
+            index += 1;
+            while (index < layout.nodes.len and layout.nodes[index].depth > subtree_depth) : (index += 1) {}
+            continue;
+        }
         index += 1;
     }
     return bottom;

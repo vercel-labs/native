@@ -23,6 +23,8 @@ const Bridge = Adapter.Host;
 const ServiceCarrier = native_sdk.ServicePool(registry);
 const runtime_ns = native_sdk.runtime;
 
+const TrapServiceCarrier = native_sdk.ServicePool(@import("trap_service_registry.zig"));
+
 /// Pools allocate from the page allocator in this suite: poisoning tests
 /// deliberately abandon worker/instance allocations, and the leak-checking
 /// test allocator would report those documented leaks as failures.
@@ -100,13 +102,12 @@ const Harness = struct {
         self.harness.null_platform.gpu_surfaces = true;
         self.harness.runtime.options.session_recorder = recorder;
 
-        self.app_state = try std.testing.allocator.create(App);
-        errdefer std.testing.allocator.destroy(self.app_state);
-        self.app_state.* = Adapter.init(std.heap.page_allocator, .{
+        // Construct in place: a by-value App can overflow the test stack.
+        self.app_state = try Adapter.create(std.testing.allocator, .{
             .host_calls = self.transport.binding(),
             .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
         }, appOptions());
-        errdefer self.app_state.deinit();
+        errdefer self.app_state.destroy();
         self.app = self.app_state.app();
         try self.harness.start(self.app);
         try self.harness.runtime.dispatchPlatformEvent(self.app, .{ .gpu_surface_frame = .{
@@ -120,8 +121,7 @@ const Harness = struct {
     }
 
     fn destroy(self: *Harness) void {
-        self.app_state.deinit();
-        std.testing.allocator.destroy(self.app_state);
+        self.app_state.destroy();
         self.harness.destroy(std.testing.allocator);
         self.transport.deinit();
         std.testing.allocator.destroy(self);
@@ -552,18 +552,43 @@ test "same-key requests run FIFO with no interleaving" {
     try std.testing.expectEqualStrings("s0;e0;s1;e1;s2;e2;s3;e3;s4;e4;s5;e5;", log);
 }
 
-test "a trapping operation poisons only its instance and routes service_trap" {
-    const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 2 });
+test "out-of-range service reads are catchable and do not poison the instance" {
+    const d = try DirectPool(ServiceCarrier).create(.{ .max_workers = 1 });
+    defer d.destroy();
+    d.request("feeds.trap", 41, "");
+    try d.awaitCompletions(1);
+    const completion = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(completion);
+    try std.testing.expectEqual(@as(u64, 41), completion[0].key);
+    try std.testing.expect(!completion[0].ok);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"TypeError\",\"message\":\"undefined is not representable in the target union (a value narrowed or asserted past it still held it)\"}",
+        completion[0].bytes,
+    );
+    try std.testing.expectEqual(@as(u64, 0), d.pool.poisonedCount());
+    var payload_buffer: [64]u8 = undefined;
+    d.request("feeds.parse", 42, encodeParseRequest(&payload_buffer, "feed"));
+    try d.awaitCompletions(1);
+    const after = d.takeCompletions();
+    defer DirectPool(ServiceCarrier).freeCompletions(after);
+    try std.testing.expectEqual(@as(u64, 42), after[0].key);
+    try std.testing.expect(after[0].ok);
+    try std.testing.expectEqual(@as(u64, 0), d.pool.poisonedCount());
+}
+
+test "a detected ABI trap poisons only its instance and routes service_trap" {
+    const d = try DirectPool(TrapServiceCarrier).create(.{ .max_workers = 2 });
     defer d.destroy();
 
     d.request("feeds.trap", 1, "");
     try d.awaitCompletions(1);
     const trapped = d.takeCompletions();
-    defer DirectPool(ServiceCarrier).freeCompletions(trapped);
+    defer DirectPool(TrapServiceCarrier).freeCompletions(trapped);
     try std.testing.expectEqual(@as(u64, 1), trapped[0].key);
     try std.testing.expect(!trapped[0].ok);
     try std.testing.expect(std.mem.indexOf(u8, trapped[0].bytes, "\"kind\":\"service_trap\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, trapped[0].bytes, "SC4014") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trapped[0].bytes, "library inbound bytes length out of range") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trapped[0].bytes, "SC4012") != null);
     try std.testing.expectEqual(@as(u64, 1), d.pool.poisonedCount());
 
     // Other instances keep answering, in parallel, after the poisoning.
@@ -572,7 +597,7 @@ test "a trapping operation poisons only its instance and routes service_trap" {
     for (0..3) |index| d.request("feeds.slow", 20 + @as(u64, index), payload);
     try d.awaitCompletions(3);
     const after = d.takeCompletions();
-    defer DirectPool(ServiceCarrier).freeCompletions(after);
+    defer DirectPool(TrapServiceCarrier).freeCompletions(after);
     for (after) |completion| try std.testing.expect(completion.ok);
     try std.testing.expectEqual(@as(u64, 1), d.pool.poisonedCount());
 }
@@ -822,13 +847,11 @@ test "journal replay reproduces in-process service results without initializing 
     });
     defer harness.destroy(std.testing.allocator);
     harness.null_platform.gpu_surfaces = true;
-    const app_state = try std.testing.allocator.create(App);
-    defer std.testing.allocator.destroy(app_state);
-    app_state.* = Adapter.init(std.heap.page_allocator, .{
+    const app_state = try Adapter.create(std.testing.allocator, .{
         .host_calls = replay_pool.binding(),
         .service_results = .{ .index_fn = registry.indexOf, .streaming_fn = registry.isStreaming, .decode_fn = registry.resultDecoder(core) },
     }, appOptions());
-    defer app_state.deinit();
+    defer app_state.destroy();
 
     const report = try runtime_ns.replaySession(&harness.runtime, app_state.app(), buffer.journalBytes(), .{
         .verify = true,

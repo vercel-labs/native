@@ -1415,6 +1415,64 @@ test "reference renderer blurs transparent colors without dark fringes" {
     try expectPixelRgba8(.{ 0, 0, 0, 0 }, surface, 2, 0);
 }
 
+test "bundled sans weights render matching glyph faces" {
+    const font_ttf = canvas.font_ttf;
+    const width = 64;
+    const height = 48;
+    const bounds = geometry.RectF.init(0, 0, width, height);
+    var actual: [width * height * 4]u8 = undefined;
+    var expected: [width * height * 4]u8 = undefined;
+    var coverage: [3]u64 = undefined;
+    const cases = .{
+        .{ canvas.default_sans_font_id, &font_ttf.geist_regular },
+        .{ canvas.default_sans_medium_font_id, &font_ttf.geist_medium },
+        .{ canvas.default_sans_bold_font_id, &font_ttf.geist_bold },
+    };
+    inline for (cases, 0..) |case, index| {
+        // Explicit glyph placement isolates face selection from measurement.
+        // The expected pixels use the same face as an application-registered
+        // resource, independently of the reserved-id fallback mapping.
+        const glyphs = [_]Glyph{.{
+            .id = case[1].glyphIndex('H'),
+            .x = 0,
+            .y = 0,
+            .advance = 32 * case[1].advance(case[1].glyphIndex('H')) / case[1].units_per_em,
+            .text_len = 1,
+        }};
+        var commands = [_]RenderCommand{.{
+            .command = .{ .draw_text = .{
+                .id = 1,
+                .font_id = case[0],
+                .size = 32,
+                .origin = geometry.PointF.init(8, 36),
+                .color = Color.rgb8(255, 255, 255),
+                .text = "H",
+                .glyphs = &glyphs,
+            } },
+            .local_bounds = bounds,
+            .bounds = bounds,
+        }};
+        const pass = canvas.CanvasRenderPass{
+            .surface_size = geometry.SizeF.init(width, height),
+            .full_repaint = true,
+            .commands = &commands,
+        };
+        const surface = try ReferenceRenderSurface.init(width, height, &actual);
+        try surface.renderPass(pass, Color.rgba8(0, 0, 0, 0));
+
+        commands[0].command.draw_text.font_id = canvas.min_registered_font_id;
+        const fonts = [_]canvas.ReferenceFont{.{ .id = canvas.min_registered_font_id, .face = case[1] }};
+        const control = (try ReferenceRenderSurface.init(width, height, &expected)).withFonts(&fonts);
+        try control.renderPass(pass, Color.rgba8(0, 0, 0, 0));
+        try std.testing.expectEqualSlices(u8, &expected, &actual);
+        coverage[index] = 0;
+        for (0..width * height) |pixel| coverage[index] += actual[pixel * 4 + 3];
+    }
+    try std.testing.expect(coverage[0] > 0);
+    try std.testing.expect(coverage[1] > coverage[0]);
+    try std.testing.expect(coverage[2] > coverage[1]);
+}
+
 test "reference renderer draws proxy text runs" {
     const commands = [_]CanvasCommand{.{ .draw_text = .{
         .id = 1,

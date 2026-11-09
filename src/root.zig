@@ -1,3 +1,5 @@
+const builtin = @import("builtin");
+
 pub const geometry = @import("geometry");
 pub const assets = @import("assets");
 pub const app_dirs = @import("app_dirs");
@@ -21,6 +23,18 @@ pub const js = @import("js/root.zig");
 pub const bridge = @import("bridge/root.zig");
 pub const frontend = @import("frontend/root.zig");
 pub const security = @import("security/root.zig");
+pub const updater = @import("updater/root.zig");
+pub const update_check_command = platform.update_check_command;
+
+// App test and model-contract binaries can link the AppKit host without
+// analyzing platform.macos. Keep its Zig C exports in every macOS SDK module
+// so those binaries can resolve the host's updater calls too.
+comptime {
+    if (builtin.os.tag == .macos) {
+        _ = updater.c_api.native_sdk_update_verify_feed;
+        _ = updater.c_api.native_sdk_update_verify_archive;
+    }
+}
 
 pub const Runtime = runtime.Runtime;
 pub const RuntimeOptions = runtime.Options;
@@ -31,6 +45,7 @@ pub const Command = runtime.Command;
 pub const CommandEvent = runtime.CommandEvent;
 pub const CommandSource = runtime.CommandSource;
 pub const TestHarness = runtime.TestHarness;
+pub const native_testing = @import("runtime/ts_test_host.zig");
 pub const UiApp = runtime.UiApp;
 pub const UiAppWithFeatures = runtime.UiAppWithFeatures;
 pub const UiAppFeatures = runtime.UiAppFeatures;
@@ -121,6 +136,8 @@ pub const EffectAudioEventKind = runtime.EffectAudioEventKind;
 pub const EffectAudioCaptureEvent = runtime.EffectAudioCaptureEvent;
 pub const EffectAudioCaptureEventKind = runtime.EffectAudioCaptureEventKind;
 pub const decodeAudioCaptureChannelEvent = runtime.decodeAudioCaptureChannelEvent;
+pub const EffectGlobalShortcutEvent = runtime.EffectGlobalShortcutEvent;
+pub const EffectGlobalShortcutEventKind = runtime.EffectGlobalShortcutEventKind;
 pub const EffectAudioSource = runtime.EffectAudioSource;
 pub const audioCachePath = runtime.audioCachePath;
 pub const max_effect_audio_path_bytes = runtime.max_effect_audio_path_bytes;
@@ -137,6 +154,10 @@ pub const max_effect_image_source_bytes = runtime.max_effect_image_source_bytes;
 pub const effect_image_blob_hash_len = runtime.effect_image_blob_hash_len;
 pub const EffectChannelEvent = runtime.EffectChannelEvent;
 pub const EffectChannelEventKind = runtime.EffectChannelEventKind;
+pub const HostChannelSourceBinding = runtime.HostChannelSourceBinding;
+pub const EffectChannelSourceState = runtime.EffectChannelSourceState;
+pub const EffectChannelSourceResult = runtime.EffectChannelSourceResult;
+pub const max_channel_source_payload = runtime.max_channel_source_payload;
 pub const ChannelHandle = runtime.ChannelHandle;
 pub const max_effect_channels = runtime.max_effect_channels;
 pub const max_effect_channel_bytes = runtime.max_effect_channel_bytes;
@@ -158,7 +179,10 @@ pub const max_effect_host_name_bytes = runtime.max_effect_host_name_bytes;
 pub const max_effect_host_payload_bytes = runtime.max_effect_host_payload_bytes;
 pub const max_effect_host_result_bytes = runtime.max_effect_host_result_bytes;
 pub const TsCoreHost = runtime.TsCoreHost;
+pub const TsCoreHostWithRuntimeModel = runtime.TsCoreHostWithRuntimeModel;
 pub const TsUiApp = runtime.TsUiApp;
+pub const TsUiAppWithFeatures = runtime.TsUiAppWithFeatures;
+pub const view_reload = runtime.view_reload;
 pub const Clock = runtime.Clock;
 pub const TestClock = runtime.TestClock;
 pub const nowMs = runtime.nowMs;
@@ -167,6 +191,8 @@ pub const monotonicMs = runtime.monotonicMs;
 pub const monotonicNanoseconds = runtime.monotonicNanoseconds;
 pub const setFreestandingMonotonicNanoseconds = runtime.setFreestandingMonotonicNanoseconds;
 pub const RegisteredImage = runtime.RegisteredImage;
+pub const max_registered_canvas_fonts = runtime.max_registered_canvas_fonts;
+pub const max_registered_canvas_font_bytes = runtime.max_registered_canvas_font_bytes;
 pub const max_registered_canvas_images = runtime.max_registered_canvas_images;
 pub const max_registered_canvas_image_pixel_bytes = runtime.max_registered_canvas_image_pixel_bytes;
 pub const max_registered_canvas_image_pixel_bytes_ceiling = runtime.max_registered_canvas_image_pixel_bytes_ceiling;
@@ -229,6 +255,8 @@ pub const MenuItem = platform.MenuItem;
 pub const Shortcut = platform.Shortcut;
 pub const ShortcutModifiers = platform.ShortcutModifiers;
 pub const ShortcutEvent = platform.ShortcutEvent;
+pub const KeyChord = platform.KeyChord;
+pub const KeyboardInputAccess = platform.KeyboardInputAccess;
 pub const TimerEvent = platform.TimerEvent;
 pub const reserved_timer_id_base = platform.reserved_timer_id_base;
 pub const ColorScheme = platform.ColorScheme;

@@ -712,9 +712,11 @@ test "the image attribute validates as one binding on avatar and image" {
         // attribute would be silently inert.
         .{ .source = "<row>\n  <badge image=\"{user_image}\">3</badge>\n</row>", .message = markup.image_binding_element_message },
         .{ .source = "<column>\n  <panel image=\"{user_image}\" />\n</column>", .message = markup.image_binding_element_message },
+        .{ .source = "<row>\n  <button image=\"{user_image}\" label=\"Preview\" />\n</row>", .message = markup.image_binding_element_message },
         // Source rectangles are image/avatar-only, require an image, and
         // are atomic so a missing coordinate never defaults silently.
         .{ .source = "<row>\n  <badge source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">3</badge>\n</row>", .message = markup.image_source_element_message },
+        .{ .source = "<row>\n  <button source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\" label=\"Preview\" />\n</row>", .message = markup.image_source_element_message },
         .{ .source = "<row>\n  <avatar source-x=\"0\" source-y=\"0\" source-width=\"16\" source-height=\"16\">CT</avatar>\n</row>", .message = markup.image_source_binding_message },
         .{ .source = "<row>\n  <image image=\"{atlas}\" source-x=\"0\" source-y=\"0\" source-width=\"16\" label=\"Tile\" />\n</row>", .message = markup.image_source_complete_message },
         // ...and required on the leaf: an unbound image is statically
@@ -1254,6 +1256,31 @@ test "stepper and timeline validate structure with teaching messages" {
     }
 }
 
+test "segmented-control validates as a named text control" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const valid_sources = [_][]const u8{
+        "<row>\n  <segmented-control selected=\"true\" icon=\"settings\" on-press=\"choose\">Settings</segmented-control>\n</row>",
+        "<row>\n  <segmented-control selected=\"{active}\" label=\"View\" on-press=\"choose\" />\n</row>",
+    };
+    for (valid_sources) |source| {
+        var parser = markup.Parser.init(arena, source);
+        try testing.expectEqual(@as(?markup.MarkupErrorInfo, null), markup.validate(try parser.parse()));
+    }
+
+    const cases = [_]struct { source: []const u8, message: []const u8 }{
+        .{ .source = "<row>\n  <segmented-control icon=\"not-an-icon\">Settings</segmented-control>\n</row>", .message = markup.button_icon_message },
+        .{ .source = "<row>\n  <segmented-control>\n    <text>Settings</text>\n  </segmented-control>\n</row>", .message = markup.text_leaf_children_message },
+    };
+    for (cases) |case| {
+        var parser = markup.Parser.init(arena, case.source);
+        const info = markup.validate(try parser.parse()) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(case.message, info.message);
+    }
+}
+
 test "chart and series validate structure with teaching messages" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -1450,6 +1477,73 @@ test "an absolute root path resolves imports the same as a relative one" {
     try testing.expectEqualStrings(markup.import_src_escape_message, escaped.message);
 }
 
+test "a UNC root path preserves both leading slashes while resolving imports" {
+    var buffer: [markup.max_import_path_len]u8 = undefined;
+    const resolved = markup.resolveImportPath(
+        "//server/share/src",
+        "//server/share/src/view.native",
+        "components/card.native",
+        &buffer,
+    );
+    try testing.expectEqualStrings("//server/share/src/components/card.native", resolved.path);
+
+    const escaped = markup.resolveImportPath(
+        "//server/share/src",
+        "//server/share/src/view.native",
+        "../other.native",
+        &buffer,
+    );
+    try testing.expectEqualStrings(markup.import_src_escape_message, escaped.message);
+}
+
+test "a relative importer with a one-character directory is not treated as UNC" {
+    var buffer: [markup.max_import_path_len]u8 = undefined;
+    const resolved = markup.resolveImportPath(
+        "a",
+        "a/view.native",
+        "components/card.native",
+        &buffer,
+    );
+    try testing.expectEqualStrings("a/components/card.native", resolved.path);
+}
+
+test "an explicit app root lets an independently checked component import a sibling directory" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const set = [_]markup.SourceFile{
+        .{
+            .path = "src/components/card.native",
+            .source = "<import src=\"../shared/base.native\"/>\n<template name=\"card\"><use template=\"base\" /></template>",
+        },
+        .{
+            .path = "src/shared/base.native",
+            .source = "<template name=\"base\"><text>shared</text></template>",
+        },
+    };
+    var loader = markup.SourceSetLoader{ .set = &set };
+    var diagnostic: markup.MarkupErrorInfo = .{};
+    const document = try markup.resolveImportsFromRoot(
+        arena,
+        "src",
+        set[0].path,
+        set[0].source,
+        loader.loader(),
+        &diagnostic,
+    );
+    try testing.expectEqual(@as(usize, 2), document.templates.len);
+    try testing.expectEqualStrings("base", document.templates[0].attr("name").?);
+    try testing.expectEqualStrings("card", document.templates[1].attr("name").?);
+
+    // The direct-file resolver deliberately retains its narrower boundary.
+    try testing.expectError(
+        error.MarkupImport,
+        markup.resolveImports(arena, set[0].path, set[0].source, loader.loader(), &diagnostic),
+    );
+    try testing.expectEqualStrings(markup.import_src_escape_message, diagnostic.message);
+}
+
 test ".native is the one markup extension" {
     try testing.expect(markup.hasMarkupExtension("view.native"));
     try testing.expect(!markup.hasMarkupExtension("view.html"));
@@ -1593,6 +1687,7 @@ test "slot placement rules validate with teaching messages" {
         .{ .source = "<row>\n  <slot/>\n</row>", .message = markup.slot_outside_template_message },
         .{ .source = "<template name=\"t\"><column><slot gap=\"2\"/></column></template>\n<row />", .message = markup.slot_attrs_message },
         .{ .source = "<template name=\"t\"><column><slot><text>x</text></slot></column></template>\n<row />", .message = markup.slot_children_message },
+        .{ .source = "<template name=\"t\"><text>x</text></template>\n<use template=\"t\" on-toggle=\"toggle\" />", .message = markup.use_forwarded_event_message },
         .{ .source = "<template name=\"a\"><column><slot/></column></template>\n<template name=\"b\"><column><use template=\"a\"><slot/></use></column></template>\n<row />", .message = markup.slot_in_use_children_message },
     };
     for (cases) |case| {
@@ -1804,4 +1899,25 @@ test "whitespace between a span paragraph's runs collapses to one spliced space"
     var comment_parser = markup.Parser.init(arena, "<column><text><span>a</span><!-- glue --><span>b</span></text></column>");
     const commented = try comment_parser.parse();
     try testing.expectEqual(@as(usize, 2), commented.root.?.children[0].children.len);
+}
+
+test "virtual markup rejects repeated attributes at their second source position" {
+    for ([_][]const u8{ "virtual-window", "virtual-list" }) |name| {
+        const allowed: []const []const u8 = if (std.mem.eql(u8, name, "virtual-window")) &markup.virtual_window_attrs else &markup.virtual_list_attrs;
+        for (allowed) |attribute| {
+            const attrs = [_]markup.MarkupAttr{
+                .{ .name = attribute, .value = "1", .line = 2, .column = 3 },
+                .{ .name = attribute, .value = "2", .line = 4, .column = 5 },
+            };
+            const node = markup.MarkupNode{ .kind = .element, .name = name, .attrs = &attrs, .src_path = "view.native" };
+            const info = markup.validate(.{ .root = node }).?;
+            try testing.expectEqualStrings("duplicate virtual markup attribute", info.message);
+            try testing.expectEqual(@as(usize, 4), info.line);
+            try testing.expectEqual(@as(usize, 5), info.column);
+            try testing.expectEqualStrings("view.native", info.path);
+        }
+        var attrs: [markup.virtual_list_attrs.len]markup.MarkupAttr = undefined;
+        for (allowed, 0..) |attribute, i| attrs[i] = .{ .name = attribute, .value = "1", .line = 1, .column = 1 };
+        try testing.expect(markup.virtualAttributeError(.{ .kind = .element, .name = name, .attrs = attrs[0..allowed.len] }) == null);
+    }
 }

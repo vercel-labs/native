@@ -14,6 +14,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { scriptcPin } from "./helpers.ts";
+import { compilerSurfacePath } from "../scripts/scriptc_toolchain.mjs";
 
 const pkg = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const repo = path.resolve(pkg, "..", "..");
@@ -28,23 +29,25 @@ function writeManifest(
   version: string,
   entries: unknown[],
   coverage: string[] = [],
+  schemaVersion = 1,
 ): string {
   const file = path.join(dir, name);
-  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, compilerVersion: version, coverage, entries }));
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion, compilerVersion: version, coverage, entries }));
   return file;
 }
 
-function generatorFixture(entries: unknown[]) {
+function generatorFixture(entries: unknown[], schemaVersion = 1) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "surface-generator-"));
   const core = path.join(root, "packages", "core");
   const scriptDir = path.join(core, "scripts");
   const manifestDir = path.join(core, "node_modules", "@scriptc", "compiler");
   fs.mkdirSync(scriptDir, { recursive: true });
+  fs.copyFileSync(path.join(pkg, "scripts", "scriptc_toolchain.mjs"), path.join(scriptDir, "scriptc_toolchain.mjs"));
   fs.mkdirSync(manifestDir, { recursive: true });
   fs.copyFileSync(genScript, path.join(scriptDir, "gen_service_surface.mjs"));
   fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ dependencies: { scriptc: scriptcPin } }));
   fs.writeFileSync(path.join(manifestDir, "surface-manifest.json"), JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion,
     compilerVersion: scriptcPin,
     coverage: [],
     entries,
@@ -62,6 +65,7 @@ function diffToolFixture(pin: string, manifestVersion: string) {
   const scriptDir = path.join(core, "scripts");
   const manifestDir = path.join(core, "node_modules", "@scriptc", "compiler");
   fs.mkdirSync(scriptDir, { recursive: true });
+  fs.copyFileSync(path.join(pkg, "scripts", "scriptc_toolchain.mjs"), path.join(scriptDir, "scriptc_toolchain.mjs"));
   fs.mkdirSync(manifestDir, { recursive: true });
   fs.copyFileSync(diffScript, path.join(scriptDir, "surface_manifest_diff.mjs"));
   fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ dependencies: { scriptc: pin } }));
@@ -73,6 +77,22 @@ function diffToolFixture(pin: string, manifestVersion: string) {
   }));
   return path.join(scriptDir, "surface_manifest_diff.mjs");
 }
+
+test("surface tools report an absent release cache with exit 2 and no stack trace", () => {
+  const fixture = generatorFixture([]);
+  try {
+    const core = path.join(fixture.root, "packages", "core");
+    fs.copyFileSync(diffScript, path.join(core, "scripts", "surface_manifest_diff.mjs"));
+    fs.writeFileSync(path.join(core, "package.json"), JSON.stringify({ nativeToolchain: { scriptc: scriptcPin } }));
+    fs.copyFileSync(path.join(pkg, "scripts", "scriptc-toolchain.json"), path.join(core, "scripts", "scriptc-toolchain.json"));
+    for (const script of [fixture.script, path.join(core, "scripts", "surface_manifest_diff.mjs")]) {
+      const result = spawnSync(process.execPath, [script, "--check"], { encoding: "utf8", env: { ...process.env, NATIVE_SDK_SCRIPTC_CACHE: path.join(fixture.root, "missing-cache") } });
+      assert.equal(result.status, 2, result.stderr);
+      assert.match(result.stderr, /scriptc.*not installed/);
+      assert.doesNotMatch(result.stderr, /\n\s+at /);
+    }
+  } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+});
 
 test("surface_manifest_diff categorizes every change class by stable id", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-diff-"));
@@ -134,10 +154,56 @@ test("surface_manifest_diff refuses unknown schema versions", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-diff-"));
   const good = writeManifest(dir, "good.json", "0.0.1", []);
   const bad = path.join(dir, "bad.json");
-  fs.writeFileSync(bad, JSON.stringify({ schemaVersion: 2, compilerVersion: "9.9.9", entries: [] }));
+  fs.writeFileSync(bad, JSON.stringify({ schemaVersion: 3, compilerVersion: "9.9.9", entries: [] }));
   const run = spawnSync(process.execPath, [diffScript, good, bad], { encoding: "utf8" });
   assert.equal(run.status, 2);
-  assert.match(run.stderr, /schemaVersion 2/);
+  assert.match(run.stderr, /schemaVersion 3/);
+});
+
+test("schema 1 to 2 keeps stable-id changes and removed dynamic entries visible", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-schema-upgrade-"));
+  try {
+    const oldManifest = writeManifest(dir, "old.json", "0.2.10", [
+      { id: "stdlib.lookup", kind: "stdlib", name: "lookup", status: "static" },
+      { id: "syntax.fallback", kind: "syntax", name: "fallback", status: "dynamic-only" },
+    ]);
+    const newManifest = writeManifest(dir, "new.json", "0.3.0", [
+      { id: "stdlib.lookup", kind: "stdlib", name: "lookup", status: "static", note: "native lookup" },
+    ], ["Compilation is native-only."], 2);
+    const run = spawnSync(process.execPath, [diffScript, oldManifest, newManifest, "--json"], { encoding: "utf8" });
+    assert.equal(run.status, 0, run.stderr);
+    const diff = JSON.parse(run.stdout);
+    assert.equal(diff.old.schemaVersion, 1);
+    assert.equal(diff.new.schemaVersion, 2);
+    assert.deepEqual(diff.removed.map((entry: { id: string }) => entry.id), ["syntax.fallback"]);
+    assert.deepEqual(diff.noteChanges.map((entry: { id: string }) => entry.id), ["stdlib.lookup"]);
+    assert.deepEqual(diff.tierRegressions, []);
+    assert.deepEqual(diff.coverageChanges.added, ["Compilation is native-only."]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("schema 2 reference describes native compilation and rejects dynamic-only entries", () => {
+  for (const status of ["static", "dynamic-only"]) {
+    const fixture = generatorFixture([{ id: "stdlib.lookup", kind: "stdlib", name: "lookup", status }], 2);
+    try {
+      const run = spawnSync(process.execPath, [fixture.script], { encoding: "utf8" });
+      if (status === "static") {
+        assert.equal(run.status, 0, run.stderr);
+        const rendered = fs.readFileSync(fixture.output, "utf8");
+        assert.match(rendered, /schema 2, 1 entries/);
+        assert.match(rendered, /1 static, 0 unsupported/);
+        assert.match(rendered, /Compilation is native-only/);
+        assert.doesNotMatch(rendered, /dynamic-only|--dynamic|embedded dynamic engine/);
+      } else {
+        assert.equal(run.status, 2);
+        assert.match(run.stderr, /invalid entries or status for schemaVersion 2/);
+        const manifest = path.join(fixture.root, "packages/core/node_modules/@scriptc/compiler/surface-manifest.json");
+        const diff = spawnSync(process.execPath, [diffScript, manifest, manifest], { encoding: "utf8" });
+        assert.equal(diff.status, 2);
+        assert.match(diff.stderr, /invalid status for schemaVersion 2/);
+      }
+    } finally { fs.rmSync(fixture.root, { recursive: true, force: true }); }
+  }
 });
 
 test("surface_manifest_diff refuses a stale install for the pinned spec", () => {
@@ -321,7 +387,7 @@ test("the claim scan covers Markdown formatting and docs while ignoring unrelate
 
 test("every recognized built-in module is in the committed module table", () => {
   const manifest = JSON.parse(fs.readFileSync(
-    path.join(pkg, "node_modules", "@scriptc", "compiler", "surface-manifest.json"),
+    compilerSurfacePath(path.join(pkg, "package.json")),
     "utf8",
   ));
   const rendered = fs.readFileSync(surfaceReference, "utf8");

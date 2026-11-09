@@ -78,7 +78,7 @@ export interface ContractInput {
 
 /// A JSON string literal: quoted and escaped exactly as the extractor's
 /// `js` helper spells it (JSON.stringify would spell control characters
-/// differently — \b instead of ).
+/// differently, such as the short escape for a backspace byte).
 function js(text: string): string {
   let out = '"';
   for (const ch of text) {
@@ -167,7 +167,7 @@ class ContractEmitter {
       case "optional":
         return { k: "optional", inner: this.reflect(t.inner, decl, top) };
       case "void":
-        throw new ContractError("a contract slot resolved to no subset type (internal)", this.entryFile);
+        throw new ContractError(`a contract slot resolved to no subset type: ${decl?.getText() ?? "unnamed slot"}`, decl ?? this.entryFile);
     }
   }
 
@@ -465,6 +465,10 @@ class ContractEmitter {
     if (helperNames.includes("statusItem") && !model.includes("statusItem")) model.push("statusItem");
     if (helperNames.includes("statusItems") && !model.includes("statusItems")) model.push("statusItems");
     if (helperNames.includes("windows") && !model.includes("windows")) model.push("windows");
+    if (helperNames.includes("webPanes") && !model.includes("webPanes")) model.push("webPanes");
+    for (const name of ["canvasIcons", "canvasFrameMsg", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "bootImageMsg", "sliderStateMsg"]) {
+      if (helperNames.includes(name) && !model.includes(name)) model.push(name);
+    }
     return { model, msg };
   }
 
@@ -528,7 +532,9 @@ class ContractEmitter {
     const helperReturns = helperDecls.map((h) => {
       const ret = this.table.resolveTypeNode(h.decl.type!);
       this.collect(ret, h.decl, "helpers", h.name);
-      return { name: h.name, decl: h.decl, ret };
+      const params = h.decl.parameters.slice(1).map(p => ({ decl: p, type: this.table.resolveTypeNode(p.type!) }));
+      for (const p of params) this.collect(p.type, p.decl, "helpers", h.name);
+      return { name: h.name, decl: h.decl, ret, params };
     });
 
     // Phase 2: sections.
@@ -588,7 +594,12 @@ class ContractEmitter {
       if (helperCount > 0) helpers += ",\n    ";
       const reflected = this.reflect(h.ret, h.decl, true);
       if (this.spellsI64(reflected)) this.appendSlot(`helpers.${h.name}.return`);
-      helpers += `{"name": ${js(h.name)}, "params": [], "returns": ${this.typeRefJson(reflected)}, "arena": false}`;
+      const params = h.params.map((p, index) => {
+        const ref = this.reflect(p.type, p.decl, true);
+        if (this.spellsI64(ref)) this.appendSlot(`helpers.${h.name}.params[${index}]`);
+        return this.typeRefJson(ref);
+      });
+      helpers += `{"name": ${js(h.name)}, "params": [${params.join(", ")}], "returns": ${this.typeRefJson(reflected)}, "arena": false}`;
       helperCount += 1;
     }
 
@@ -597,7 +608,13 @@ class ContractEmitter {
     const msgUnbound = unbound.msg.map((n) => js(n)).join(", ");
 
     // Channels: export presence IS the wiring decision.
-    const hasCommand = this.entryExportedFunction("commandMsg") !== null;
+    const command = this.entryExportedFunction("commandMsg");
+    const hasCommand = command !== null;
+    const commandParam = command?.parameters[0]?.type;
+    const commandInput = commandParam ? this.table.resolveTypeNode(commandParam).k : null;
+    if (command && (command.parameters.length !== 1 || (commandInput !== "bytes" && commandInput !== "string")))
+      throw new ContractError("commandMsg requires one string or Uint8Array command name", command);
+    const commandBytes = commandInput === "bytes";
     const hasFrame = this.entryExportedFunction("frameMsg") !== null;
     const hasKey = this.entryExportedFunction("keyMsg") !== null;
     const hasPinch = this.entryExportedFunction("pinchMsg") !== null;
@@ -626,7 +643,7 @@ class ContractEmitter {
       '"dispatch_record", "dispatch_text_input", "dispatch_scroll_state", ' +
       '"subscriptions", "model_snapshot", "persist_snapshot", "restore_model", "migrate_model", "helper_call"';
     if (hasCommand) abiExports += ', "command_msg"';
-    if (hasFrame) abiExports += ', "frame_msg"';
+    if (hasFrame) abiExports += ', "frame_msg", "frame_msg_ns"';
     if (hasKey) abiExports += ', "key_msg"';
     if (hasPinch) abiExports += ', "pinch_msg"';
     if (hasDrop) abiExports += ', "drop_msg"';
@@ -669,7 +686,7 @@ class ContractEmitter {
     return (
       "{\n" +
       '  "format": 1,\n' +
-      '  "wire_version": 7,\n' +
+      '  "wire_version": 10,\n' +
       '  "abi_version": 2,\n' +
       '  "compiler_version": "0.0.1",\n' +
       `  "entry": ${js(this.entry)},\n` +
@@ -689,6 +706,7 @@ class ContractEmitter {
       `  "has_migrate": ${boolJson(hasMigrate)},\n` +
       '  "channels": {\n' +
       `    "command_msg": ${boolJson(hasCommand)},\n` +
+      (commandBytes ? '    "command_bytes": true,\n' : "") +
       `    "frame_msg": ${boolJson(hasFrame)},\n` +
       `    "key_msg": ${boolJson(hasKey)},\n` +
       `    "pinch_msg": ${boolJson(hasPinch)},\n` +

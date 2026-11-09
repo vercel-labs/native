@@ -5,7 +5,7 @@
 // runs as-is — byte for byte the same results.
 //
 // This is the TS counterpart of the runtime's TextBuffer, extracted from
-// the soundboard-ts and system-monitor-ts ports (which carried identical
+// the soundboard and system-monitor ports (which carried identical
 // private copies): UTF-8 byte splicing, caret and word movement, selection,
 // IME composition, capacity-refusal with a clamped-insert recovery, ASCII
 // trimming, and ASCII case-insensitive comparison. A core that binds a
@@ -73,10 +73,166 @@ export interface TextEditState {
   readonly composition: TextRange | null;
 }
 
+/** Indentation inserted by a code editor's plain Tab. Nonempty indented
+ * lines vote for tabs or spaces; space widths 2–8 compete by divisibility,
+ * with wider widths winning ties. A tied tab vote follows the caret's
+ * current line. Unindented and ambiguous files use two spaces.
+ */
+export function codeIndentationInsertion(text: Uint8Array, caret: number): Uint8Array {
+  let tabLines = 0, spaceLines = 0, onlySpaceIndent = 0;
+  const scores = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  let lineStart = 0;
+  while (lineStart <= text.length) {
+    let end = lineStart;
+    while (end < text.length && text[end] !== 10) end += 1;
+    let cursor = lineStart, spaces = 0, tabs = 0;
+    while (cursor < end) {
+      if (text[cursor] === 32) spaces += 1;
+      else if (text[cursor] === 9) tabs += 1;
+      else break;
+      cursor += 1;
+    }
+    if (cursor < end && cursor > lineStart) {
+      if (tabs > 0) tabLines += 1;
+      else {
+        spaceLines += 1;
+        onlySpaceIndent = spaceLines === 1 ? spaces : 0;
+        for (let width = 2; width <= 8; width += 1) {
+          if (spaces % width === 0) scores[width] = scores[width]! + 1;
+        }
+      }
+    }
+    if (end === text.length) break;
+    lineStart = end + 1;
+  }
+  const offset = Math.min(Math.max(caret, 0), text.length);
+  let localStart = 0;
+  for (let i = 0; i < offset; i += 1) if (text[i] === 10) localStart = i + 1;
+  if (tabLines > spaceLines || tabLines === spaceLines && tabLines > 0 && localStart < text.length && text[localStart] === 9) {
+    const result = new Uint8Array(1); result[0] = 9; return result;
+  }
+  let inferred = 2;
+  if (spaceLines === 1) {
+    if (onlySpaceIndent >= 2 && onlySpaceIndent <= 8) inferred = onlySpaceIndent;
+  } else if (spaceLines > 1) {
+    let bestWidth = 2, bestScore = 0;
+    for (let width = 2; width <= 8; width += 1) {
+      const score = scores[width]!;
+      if (score > bestScore || score === bestScore && score > 0 && width > bestWidth) {
+        bestWidth = width; bestScore = score;
+      }
+    }
+    if (bestScore * 2 >= spaceLines) inferred = bestWidth;
+  }
+  const result = new Uint8Array(inferred);
+  for (let i = 0; i < inferred; i += 1) result[i] = 32;
+  return result;
+}
+
+/** Parse one-based code diff lines, such as `2-4, 7`. Lines are unique,
+ * retain author order, and range from 1 through 128. Empty ASCII-whitespace
+ * text produces no lines; malformed pieces or descending ranges return null.
+ * Decimal names accept a leading + and interior underscores, matching the
+ * native markup parser. Returns a fresh array; source bytes are never changed.
+ */
+export function parseCodeLineNumberSpec(spec: Uint8Array): number[] | null {
+  let start = 0, end = spec.length;
+  while (start < end && codeSpecWhitespace(spec[start], true)) start += 1;
+  while (end > start && codeSpecWhitespace(spec[end - 1], true)) end -= 1;
+  const result: number[] = [];
+  const seen = new Uint8Array(129);
+  while (start < end) {
+    let after = start;
+    while (after < end && spec[after] !== 44) after += 1;
+    let firstByte = start, lastByte = after;
+    while (firstByte < lastByte && codeSpecWhitespace(spec[firstByte], true)) firstByte += 1;
+    while (lastByte > firstByte && codeSpecWhitespace(spec[lastByte - 1], true)) lastByte -= 1;
+    if (firstByte === lastByte) return null;
+    let dash = -1;
+    for (let i = firstByte; i < lastByte; i += 1) {
+      if (spec[i] === 45) {
+        if (dash !== -1) return null;
+        dash = i;
+      }
+    }
+    const first = codeSpecNumber(spec, firstByte, dash === -1 ? lastByte : dash);
+    const last = dash === -1 ? first : codeSpecNumber(spec, dash + 1, lastByte);
+    if (first === 0 || last < first) return null;
+    for (let line = first; line <= last; line += 1) {
+      if (seen[line] === 0) { seen[line] = 1; result.push(line); }
+    }
+    if (after === end) break;
+    start = after + 1;
+    if (start === end) return null;
+  }
+  return result;
+}
+
+function codeSpecWhitespace(byte: number, breaks: boolean): boolean {
+  return byte === 32 || byte === 9 || breaks && (byte === 10 || byte === 13);
+}
+
+function codeSpecNumber(spec: Uint8Array, from: number, to: number): number {
+  let start = from, end = to;
+  while (start < end && codeSpecWhitespace(spec[start], false)) start += 1;
+  while (end > start && codeSpecWhitespace(spec[end - 1], false)) end -= 1;
+  if (start < end && spec[start] === 43) start += 1;
+  if (start === end || spec[start] === 95 || spec[end - 1] === 95) return 0;
+  let value = 0;
+  for (let i = start; i < end; i += 1) {
+    const byte = spec[i];
+    if (byte === 95) continue;
+    if (byte < 48 || byte > 57) return 0;
+    value = value * 10 + byte - 48;
+    if (value > 128) return 0;
+  }
+  return value;
+}
+
+/// Prepare new single-line input by removing CR/LF bytes. An insertion
+/// containing only line breaks is suppressed; an empty composition stays
+/// meaningful and its explicit cursor moves past the removed bytes.
+/// Clean and over-budget events retain their original borrowed payload.
+/// Retained history is state, so replay it without this new-input step.
+export function sanitizedSingleLineTextInputEvent(event: TextInputEvent): TextInputEvent | null {
+  if (event.kind !== "insert_text" && event.kind !== "set_composition") return event;
+  const text = event.text;
+  if (text.length > 512 * 1024) return event;
+  let length = 0;
+  for (const byte of text) if (byte !== 10 && byte !== 13) length += 1;
+  if (length === text.length) return event;
+  if (event.kind === "insert_text" && length === 0) return null;
+  const stripped = new Uint8Array(length);
+  const cursor = event.kind === "set_composition" ? Math.min(event.cursor === null ? text.length : event.cursor, text.length) : 0;
+  let written = 0, removedBeforeCursor = 0;
+  for (let i = 0; i < text.length; i++) {
+    const byte = text[i];
+    if (byte === 10 || byte === 13) {
+      if (i < cursor) removedBeforeCursor += 1;
+    } else {
+      stripped[written] = byte;
+      written += 1;
+    }
+  }
+  if (event.kind === "insert_text") return { kind: "insert_text", text: stripped };
+  const shifted = cursor - removedBeforeCursor;
+  if (!(shifted >= 0 && shifted <= 512 * 1024)) return null;
+  return { kind: "set_composition", text: stripped,
+    cursor: event.cursor === null && shifted === stripped.length ? null : Math.trunc(shifted) };
+}
+
+// Byte ranges cross the same integer ABI as caret selections. State the
+// ordered bounds and whole-byte intent at the record construction boundary.
+function textRangeAt(start: number, end: number): TextRange {
+  const wholeStart = start >= 0 && start <= 9007199254740991 ? Math.trunc(start) : 0;
+  const wholeEnd = end >= 0 && end <= 9007199254740991 ? Math.trunc(end) : 0;
+  return { start: wholeStart, end: wholeEnd };
+}
+
 function rangeNormalized(r: TextRange, textLen: number): TextRange {
   const start = Math.min(r.start, textLen);
   const end = Math.min(r.end, textLen);
-  return start <= end ? { start: start, end: end } : { start: end, end: start };
+  return start <= end ? textRangeAt(start, end) : textRangeAt(end, start);
 }
 
 function rangeByteLen(r: TextRange, textLen: number): number {
@@ -90,7 +246,18 @@ function rangeIsCollapsed(r: TextRange, textLen: number): boolean {
 }
 
 function selectionRange(s: TextSelection, textLen: number): TextRange {
-  return rangeNormalized({ start: s.anchor, end: s.focus }, textLen);
+  return rangeNormalized(textRangeAt(s.anchor, s.focus), textLen);
+}
+
+/** Source-byte range for Copy/Cut. Clamp and order the selection, then snap
+ * its endpoints to UTF-8 boundaries. Missing or collapsed selections return
+ * null. The current selection supplies the range; line numbers and diff
+ * markers never enter the source bytes.
+ */
+export function textClipboardRange(text: Uint8Array, selection: TextSelection | null): TextRange | null {
+  if (selection === null) return null;
+  const range = snapTextRange(text, selectionRange(selection, text.length));
+  return range.start === range.end ? null : range;
 }
 
 function isUtf8ContinuationByte(byte: number): boolean {
@@ -192,6 +359,33 @@ function textOffsetStartsWord(text: Uint8Array, offset: number): boolean {
   return cls !== null && cls === 0;
 }
 
+/** Select the word, whitespace run or punctuation cluster at a UTF-8 byte
+ * offset. An offset at or beyond the end selects the trailing run.
+ */
+export function textWordSelectionAtOffset(text: Uint8Array, offset: number): TextSelection {
+  if (text.length === 0) return caretSelectionAt(0, 0);
+  let cursor = snapTextOffset(text, offset);
+  if (cursor >= text.length) cursor = previousTextOffset(text, text.length);
+  const kind = textRunClassAt(text, cursor);
+  let start = cursor;
+  while (start > 0) {
+    const previous = previousTextOffset(text, start);
+    if (textRunClassAt(text, previous) !== kind) break;
+    start = previous;
+  }
+  let end = nextTextOffset(text, cursor);
+  while (end < text.length && textRunClassAt(text, end) === kind) end = nextTextOffset(text, end);
+  return caretSelectionAt(start, end);
+}
+
+/** Select a hard-newline line without its LF or CRLF terminator. */
+export function textLineSelectionAtOffset(text: Uint8Array, offset: number): TextSelection {
+  let end = snapTextOffset(text, offset);
+  while (end < text.length && text[end] !== 0x0a) end += 1;
+  if (end > 0 && end < text.length && text[end - 1] === 0x0d) end -= 1;
+  return caretSelectionAt(textLineStartOffset(text, offset), end);
+}
+
 function previousTextWordOffset(text: Uint8Array, offset: number): number {
   let cursor = snapTextOffset(text, offset);
   while (cursor > 0) {
@@ -223,7 +417,7 @@ function nextTextWordOffset(text: Uint8Array, offset: number): number {
 /// excludes NaN) and stated whole with Math.trunc. A value outside the
 /// provable ±(2^53 − 1) window clamps to 0, the same floor every
 /// caller's snap already applies.
-function caretSelectionAt(anchor: number, focus: number): TextSelection {
+export function caretSelectionAt(anchor: number, focus: number): TextSelection {
   const wholeAnchor = anchor >= 0 && anchor <= 9007199254740991 ? Math.trunc(anchor) : 0;
   const wholeFocus = focus >= 0 && focus <= 9007199254740991 ? Math.trunc(focus) : 0;
   return { anchor: wholeAnchor, focus: wholeFocus };
@@ -239,10 +433,7 @@ function snapTextCaretSelection(text: Uint8Array, selection: TextSelection): Tex
 function snapTextRange(text: Uint8Array, range: TextRange): TextRange {
   const normalized = rangeNormalized(range, text.length);
   return rangeNormalized(
-    {
-      start: snapTextOffset(text, normalized.start),
-      end: snapTextOffset(text, normalized.end),
-    },
+    textRangeAt(snapTextOffset(text, normalized.start), snapTextOffset(text, normalized.end)),
     text.length,
   );
 }
@@ -322,7 +513,7 @@ function setTextComposition(
   return {
     text: result.text,
     selection: caretSelectionAt(absoluteCursor, absoluteCursor),
-    composition: { start: result.insertedStart, end: result.insertedEnd },
+    composition: textRangeAt(result.insertedStart, result.insertedEnd),
   };
 }
 
@@ -352,7 +543,7 @@ function deleteBackwardTextEdit(state: TextEditState, capacity: number): TextEdi
   }
   return replaceTextEditRange(
     state,
-    { start: previousTextCaretOffset(state.text, caret), end: caret },
+    textRangeAt(previousTextCaretOffset(state.text, caret), caret),
     new Uint8Array(0),
     capacity,
     null,
@@ -372,7 +563,7 @@ function deleteForwardTextEdit(state: TextEditState, capacity: number): TextEdit
   }
   return replaceTextEditRange(
     state,
-    { start: caret, end: nextTextCaretOffset(state.text, caret) },
+    textRangeAt(caret, nextTextCaretOffset(state.text, caret)),
     new Uint8Array(0),
     capacity,
     null,
@@ -391,7 +582,7 @@ function deleteWordBackwardTextEdit(state: TextEditState, capacity: number): Tex
   }
   return replaceTextEditRange(
     state,
-    { start: previousTextWordOffset(state.text, caret), end: caret },
+    textRangeAt(previousTextWordOffset(state.text, caret), caret),
     new Uint8Array(0),
     capacity,
     null,
@@ -411,7 +602,7 @@ function deleteWordForwardTextEdit(state: TextEditState, capacity: number): Text
   }
   return replaceTextEditRange(
     state,
-    { start: caret, end: nextTextWordOffset(state.text, caret) },
+    textRangeAt(caret, nextTextWordOffset(state.text, caret)),
     new Uint8Array(0),
     capacity,
     null,
@@ -436,7 +627,7 @@ function deleteToStartTextEdit(state: TextEditState, capacity: number): TextEdit
   }
   return replaceTextEditRange(
     state,
-    { start: 0, end: caret },
+    textRangeAt(0, caret),
     new Uint8Array(0),
     capacity,
     null,
@@ -456,7 +647,7 @@ function deleteToLineStartTextEdit(state: TextEditState, capacity: number): Text
   }
   return replaceTextEditRange(
     state,
-    { start: lineStart, end: caret },
+    textRangeAt(lineStart, caret),
     new Uint8Array(0),
     capacity,
     null,

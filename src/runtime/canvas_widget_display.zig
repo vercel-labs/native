@@ -1,4 +1,5 @@
 const std = @import("std");
+const motion_policy = @import("widget_motion_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
@@ -11,13 +12,14 @@ const canvas_frame_helpers = @import("canvas_frame.zig");
 const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const launch_timing = @import("launch_timing.zig");
 const widget_bridge = @import("widget_bridge.zig");
+const accessibility_policy = @import("accessibility_policy.zig");
 
 const CanvasWidgetDisplayListChrome = runtime_api.CanvasWidgetDisplayListChrome;
 const CanvasWidgetToggleAnimation = runtime_view.CanvasWidgetToggleAnimation;
 const CanvasDisplayListScratch = runtime_view.CanvasDisplayListScratch;
 const max_canvas_commands_per_view = canvas_limits.max_canvas_commands_per_view;
 const max_canvas_diff_changes_per_view = canvas_limits.max_canvas_diff_changes_per_view;
-const validateViewLabel = validation.validateViewLabel;
+
 const canvasRenderAnimationStartNsForView = runtime_view.canvasRenderAnimationStartNsForView;
 const canvasWidgetKineticScrollFrameMs = canvas_widget_runtime.canvasWidgetKineticScrollFrameMs;
 const canvasWidgetSemanticParentId = widget_bridge.canvasWidgetSemanticParentId;
@@ -38,7 +40,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
 
         pub fn emitCanvasWidgetDisplayListWithChrome(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (!std.meta.eql(self.views[index].widget_tokens, tokens)) {
@@ -52,7 +54,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
 
         pub fn emitCanvasWidgetDisplayListWithStoredTokensAndChrome(self: *Runtime, window_id: platform.WindowId, label: []const u8, chrome: CanvasWidgetDisplayListChrome) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
@@ -214,7 +216,16 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             var nodes: [platform.max_widget_accessibility_nodes]platform.WidgetAccessibilityNode = undefined;
             const semantics = view.widgetSemantics();
             const count = @min(semantics.len, nodes.len);
-            for (semantics[0..count], 0..) |node, index| {
+            if (view.widget_tokens.accessibility_policy) |policy| {
+                _ = try accessibility_policy.project(self.owned_allocator, policy, semantics, view.keyboard_active, view.focused, view.canvas_widget_focused_id, view.canvas_widget_hovered_id, view.canvas_widget_pressed_id, &nodes);
+                // History availability is an explicit retained-storage query;
+                // the compiled projection chooses which editor is focused.
+                for (nodes[0..count]) |*node| if (node.focused) {
+                    const history = view.canvasWidgetTextHistoryAvailability(node.id);
+                    node.can_undo = history.can_undo;
+                    node.can_redo = history.can_redo;
+                };
+            } else for (semantics[0..count], 0..) |node, index| {
                 const focused = node.state.focused or (view.keyboard_active and view.focused and node.id == view.canvas_widget_focused_id);
                 // Native menu validation only consults the focused editor.
                 // Resolving history for that one node also avoids searching
@@ -266,7 +277,15 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // A failed publish records nothing, so the next refresh
             // retries.
             const published_hash = hashWidgetAccessibilityNodes(nodes[0..count]);
-            if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash) {
+            const decision: accessibility_policy.Publication = if (view.widget_tokens.accessibility_policy) |policy|
+                accessibility_policy.publication(policy, view.widget_accessibility_published, view.widget_accessibility_published_hash, published_hash, allow_deferral, self.canvas_widget_accessibility_defer_depth > 0)
+            else if (view.widget_accessibility_published and view.widget_accessibility_published_hash == published_hash)
+                .unchanged
+            else if (allow_deferral and self.canvas_widget_accessibility_defer_depth > 0)
+                .deferred
+            else
+                .publish;
+            if (decision == .unchanged) {
                 view.widget_accessibility_publish_deferred = false;
                 return;
             }
@@ -279,7 +298,7 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
             // only when the platform would actually be called. Direct API
             // callers (no input dispatch live) publish synchronously as
             // always; the settle/flush paths pass allow_deferral=false.
-            if (allow_deferral and self.canvas_widget_accessibility_defer_depth > 0) {
+            if (decision == .deferred) {
                 view.widget_accessibility_publish_deferred = true;
                 return;
             }
@@ -300,7 +319,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// nothing deferred.
         pub fn flushDeferredCanvasWidgetAccessibility(self: *Runtime) anyerror!void {
             for (0..self.view_count) |view_index| {
-                if (!self.views[view_index].widget_accessibility_publish_deferred) continue;
+                const view = &self.views[view_index];
+                const flush = if (view.widget_tokens.accessibility_policy) |policy|
+                    accessibility_policy.flush(policy, view.widget_accessibility_publish_deferred, view.gpu_canvas_frame_requested, true)
+                else
+                    view.widget_accessibility_publish_deferred;
+                if (!flush) continue;
                 self.views[view_index].widget_accessibility_publish_deferred = false;
                 try publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, false);
             }
@@ -313,8 +337,12 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// to protect, so inline costs the glass nothing.
         pub fn settleDeferredCanvasWidgetAccessibility(self: *Runtime) anyerror!void {
             for (0..self.view_count) |view_index| {
-                if (!self.views[view_index].widget_accessibility_publish_deferred) continue;
-                if (self.views[view_index].gpu_canvas_frame_requested) continue;
+                const view = &self.views[view_index];
+                const flush = if (view.widget_tokens.accessibility_policy) |policy|
+                    accessibility_policy.flush(policy, view.widget_accessibility_publish_deferred, view.gpu_canvas_frame_requested, false)
+                else
+                    view.widget_accessibility_publish_deferred and !view.gpu_canvas_frame_requested;
+                if (!flush) continue;
                 self.views[view_index].widget_accessibility_publish_deferred = false;
                 try publishCanvasWidgetAccessibilityMaybeDeferred(self, view_index, false);
             }
@@ -374,6 +402,27 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// is showing the animation is removed so the view goes idle.
         fn reconcileCanvasWidgetCaretBlink(self: *Runtime, view_index: usize) void {
             const view = &self.views[view_index];
+            if (view.widget_tokens.widget_motion_policy) |policy| {
+                const id = view.canvas_widget_focused_id;
+                const index = view.canvasWidgetNodeIndexById(id);
+                const selection = if (index) |i| canvas.widgetTextSelectionRange(view.widget_layout_nodes[i].widget) else null;
+                const flags = @as(u8, @intFromBool(view.focused)) | (@as(u8, @intFromBool(id != 0)) << 1) |
+                    (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == id)) << 2) |
+                    (@as(u8, @intFromBool(view.canEditCanvasWidgetText(id))) << 3) |
+                    (@as(u8, @intFromBool(index != null)) << 4) |
+                    (@as(u8, @intFromBool(if (selection) |range| range.isCollapsed(view.widget_layout_nodes[index.?].widget.text.len) else false)) << 5);
+                const command_id = if (index) |i| canvas.textCaretCommandId(view.widget_layout_nodes[i].widget.kind, id) else 0;
+                const plan = motion_policy.caret(policy, flags, view.canvas_widget_caret_blink_id, command_id, canvasRenderAnimationStartNsForView(view));
+                if (plan.remove) {
+                    view.removeCanvasRenderAnimation(view.canvas_widget_caret_blink_id);
+                    view.canvas_widget_caret_blink_id = 0;
+                }
+                if (!plan.arm) return;
+                view.replaceCanvasRenderAnimation(.{ .id = plan.id, .start_ns = plan.start, .duration_ms = caret_blink_sweep_ms, .easing = .standard, .from_opacity = 1, .to_opacity = 0, .loop = .ping_pong }) catch return;
+                view.replaceCanvasRenderAnimationDirtyBounds(plan.id, view.widget_layout_nodes[index.?].frame) catch {};
+                view.canvas_widget_caret_blink_id = plan.id;
+                return;
+            }
             const desired = canvasWidgetCaretBlinkTarget(view);
             const previous = view.canvas_widget_caret_blink_id;
             const desired_id: canvas.ObjectId = if (desired) |target| target.command_id else 0;
@@ -419,6 +468,10 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
         /// static poses (the segmented emitter bakes its trail then).
         fn reconcileCanvasWidgetLoopAnimations(self: *Runtime, view_index: usize) void {
             const view = &self.views[view_index];
+            if (view.widget_tokens.widget_motion_policy) |policy| {
+                reconcileCompiledWidgetLoops(view, policy);
+                return;
+            }
             var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
             var desired_count: usize = 0;
 
@@ -530,6 +583,54 @@ pub fn RuntimeCanvasWidgetDisplay(comptime Runtime: type) type {
                 }
                 if (!still_desired) view.removeCanvasRenderAnimation(previous_id);
             }
+            @memcpy(view.canvas_widget_loop_animation_ids[0..desired_count], desired_ids[0..desired_count]);
+            view.canvas_widget_loop_animation_count = desired_count;
+        }
+
+        fn reconcileCompiledWidgetLoops(view: anytype, policy: motion_policy.Policy) void {
+            var desired_ids: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
+            var desired_count: usize = 0;
+            const layout = view.widgetLayoutTree();
+            nodes: for (layout.nodes, 0..) |node, node_index| {
+                if (node.widget.kind != .spinner and node.widget.kind != .skeleton) continue;
+                const mode: u8 = if (node.widget.kind == .skeleton) 2 else if (view.widget_tokens.metrics.spinner_style == .segmented) 1 else 0;
+                var laid_out = node.widget;
+                laid_out.frame = node.frame;
+                // Portable spinner plans own segment identities and the rotation center.
+                const anchors: ?canvas.indicator_plan_policy.Anchors = if (mode != 2 and view.widget_tokens.control_command_policy != null) canvas.indicator_plan_policy.anchors(laid_out, view.widget_tokens) else null;
+                const count = if (mode == 1) (if (anchors) |a| a.count else canvas.spinnerWidgetSegmentCount(view.widget_tokens)) else 1;
+                const first_id = if (mode == 2) canvas.skeletonWidgetFillCommandId(node.widget.id) else if (anchors) |a| (if (mode == 1) a.segment_ids[0] else a.arc_id) else if (mode == 1) canvas.spinnerWidgetSegmentCommandId(node.widget.id, 0) else canvas.spinnerWidgetArcCommandId(node.widget.id);
+                const existing = existingCanvasRenderAnimationStartNs(view, first_id);
+                const capacity = desired_ids.len - desired_count;
+                const flags = @as(u8, @intFromBool(node.widget.id != 0)) | (@as(u8, @intFromBool(view.widget_tokens.motion.durationMs(.slow) != 0)) << 1) |
+                    (@as(u8, @intFromBool(!canvas.isWidgetHiddenInAncestors(layout, node_index))) << 2) |
+                    (@as(u8, @intFromBool(!(node.widget.opacity <= 0))) << 3) |
+                    (@as(u8, @intFromBool(!node.frame.normalized().isEmpty())) << 4) |
+                    (@as(u8, @intFromBool(existing != null)) << 5);
+                for (0..count) |segment| {
+                    const plan = motion_policy.loop(policy, mode, flags, view.widget_tokens.metrics.spinner_period_ms, count, segment, capacity, view.widget_tokens.metrics.spinner_tail_opacity, existing orelse 0, canvasRenderAnimationStartNsForView(view), view.widget_tokens.motion.easing);
+                    if (!plan.arm) {
+                        if (flags & 31 == 31 and count > capacity) break :nodes;
+                        break;
+                    }
+                    const command_id = if (mode == 1) (if (anchors) |a| a.segment_ids[segment] else canvas.spinnerWidgetSegmentCommandId(node.widget.id, segment)) else first_id;
+                    var animation: canvas.CanvasRenderAnimation = .{ .id = command_id, .start_ns = plan.start, .duration_ms = plan.duration, .easing = plan.easing, .loop = plan.loop };
+                    if (mode == 0) {
+                        animation.from_rotation = plan.from;
+                        animation.to_rotation = plan.to;
+                        animation.rotation_center = if (anchors) |a| a.center else canvas.spinnerWidgetRotationCenter(laid_out, view.widget_tokens);
+                    } else {
+                        animation.from_opacity = plan.from;
+                        animation.to_opacity = plan.to;
+                    }
+                    view.replaceCanvasRenderAnimation(animation) catch break :nodes;
+                    view.replaceCanvasRenderAnimationDirtyBounds(command_id, node.frame) catch {};
+                    desired_ids[desired_count] = command_id;
+                    desired_count += 1;
+                }
+            }
+            var removed: [canvas_limits.max_canvas_widget_loop_animations_per_view]canvas.ObjectId = undefined;
+            for (motion_policy.retireLoops(policy, view.canvas_widget_loop_animation_ids[0..view.canvas_widget_loop_animation_count], desired_ids[0..desired_count], &removed)) |id| view.removeCanvasRenderAnimation(id);
             @memcpy(view.canvas_widget_loop_animation_ids[0..desired_count], desired_ids[0..desired_count]);
             view.canvas_widget_loop_animation_count = desired_count;
         }

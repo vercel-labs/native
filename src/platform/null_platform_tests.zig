@@ -334,6 +334,10 @@ test "null platform owns retained rich tray row bytes" {
     var null_platform = NullPlatform.init(.{});
     defer null_platform.deinit();
 
+    var row_label = [_]u8{ 'O', 'p', 'e', 'n' };
+    var row_command = [_]u8{ 'o', 'p', 'e', 'n' };
+    var row_detail = [_]u8{ 'D', 'e', 't', 'a', 'i', 'l' };
+    var row_key = [_]u8{'o'};
     var segment_label = [_]u8{ 'D', 'a', 'y' };
     var segment_command = [_]u8{ 'r', 'a', 'n', 'g', 'e' };
     var metric_primary = [_]u8{ '2', '4', '9', '4' };
@@ -361,8 +365,13 @@ test "null platform owns retained rich tray row bytes" {
             .trailing_summary = &chart_summary,
             .accessibility_label = &chart_accessibility,
         } },
+        .{ .id = 1, .label = &row_label, .command = &row_command, .detail = &row_detail, .key = &row_key, .role = .agent, .modifiers = .{ .primary = true } },
     } });
 
+    @memset(&row_label, 'X');
+    @memset(&row_command, 'Y');
+    @memset(&row_detail, 'Z');
+    @memset(&row_key, 'k');
     @memset(&segment_label, 'X');
     @memset(&segment_command, 'Y');
     @memset(&metric_primary, 'P');
@@ -373,6 +382,10 @@ test "null platform owns retained rich tray row bytes" {
     @memset(&chart_accessibility, 'Q');
 
     const items = null_platform.trayItems();
+    try std.testing.expectEqualStrings("Open", items[3].label);
+    try std.testing.expectEqualStrings("open", items[3].command);
+    try std.testing.expectEqualStrings("Detail", items[3].detail);
+    try std.testing.expectEqualStrings("o", items[3].key);
     try std.testing.expectEqualStrings("Day", items[0].segmented.?.options[0].label);
     try std.testing.expectEqualStrings("range", items[0].segmented.?.options[0].command);
     try std.testing.expectEqualStrings("2494", items[1].metric.?.primary_text);

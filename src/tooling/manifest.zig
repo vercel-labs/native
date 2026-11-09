@@ -63,6 +63,7 @@ pub const Metadata = struct {
     shortcuts: []const ShortcutMetadata = &.{},
     file_associations: []const FileAssociationMetadata = &.{},
     url_schemes: []const UrlSchemeMetadata = &.{},
+    updates: UpdateMetadata = .{},
     dmg: DmgMetadata = .{},
 
     pub fn displayName(self: Metadata) []const u8 {
@@ -209,6 +210,8 @@ pub const Metadata = struct {
             allocator.free(scheme.role);
         }
         if (self.url_schemes.len > 0) allocator.free(self.url_schemes);
+        if (self.updates.feed_url) |value| allocator.free(value);
+        if (self.updates.public_key) |value| allocator.free(value);
         if (self.dmg.volume_name) |value| allocator.free(value);
         if (self.dmg.background) |value| allocator.free(value);
         for (self.dmg.items) |item| {
@@ -416,6 +419,16 @@ pub const DmgMetadata = struct {
     items: []const DmgItemMetadata = &.{},
 };
 
+pub const UpdateMetadata = struct {
+    feed_url: ?[]const u8 = null,
+    public_key: ?[]const u8 = null,
+    check_on_start: bool = false,
+
+    pub fn enabled(self: UpdateMetadata) bool {
+        return self.feed_url != null;
+    }
+};
+
 pub const FrontendDevMetadata = struct {
     url: []const u8,
     command: []const []const u8 = &.{},
@@ -462,6 +475,7 @@ const RawMenuItem = raw_manifest.RawMenuItem;
 const RawShortcut = raw_manifest.RawShortcut;
 const RawFileAssociation = raw_manifest.RawFileAssociation;
 const RawUrlScheme = raw_manifest.RawUrlScheme;
+const RawUpdates = raw_manifest.RawUpdates;
 const RawDmg = raw_manifest.RawDmg;
 const RawDmgItem = raw_manifest.RawDmgItem;
 
@@ -563,6 +577,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer allocator.free(file_associations);
     const url_schemes = parseUrlSchemes(allocator, metadata.url_schemes) catch return .{ .ok = false, .message = "app manifest URL schemes are invalid" };
     defer allocator.free(url_schemes);
+    const updates = convertUpdates(metadata.updates) catch return .{ .ok = false, .message = "app manifest updates are invalid - updates require an HTTPS feed_url and a base64 Ed25519 public_key; check_on_start requires both" };
     // General manifest validation owns only values the app explicitly
     // declared. Archive-time fallbacks (notably display_name as the volume
     // name) are validated when a macOS archive is actually requested, so an
@@ -572,6 +587,10 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         return .{ .ok = false, .message = dmg_message };
     }
     const manifest_web_engine = parseWebEngine(metadata.web_engine) catch return .{ .ok = false, .message = "app manifest web engine is invalid" };
+    if (metadata.updates.enabled() and manifest_web_engine == .chromium) return .{
+        .ok = false,
+        .message = "native updates currently require web_engine = \"system\" on macOS; the Chromium host does not yet provide the updater UI/install lifecycle",
+    };
     const manifest_webview_layer = parseWebViewLayer(metadata.webview_layer) catch return .{ .ok = false, .message = "app manifest webview_layer is invalid - expected \"auto\", \"include\", or \"exclude\"" };
     if (!std.mem.eql(u8, metadata.core_compiler, "external")) {
         if (std.mem.eql(u8, metadata.core_compiler, "transpiler")) {
@@ -601,6 +620,7 @@ pub fn validateFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         .shortcuts = shortcuts,
         .file_associations = file_associations,
         .url_schemes = url_schemes,
+        .updates = updates,
         .cef = .{ .dir = metadata.cef.dir, .auto_install = metadata.cef.auto_install },
         .webview_layer = manifest_webview_layer,
         .package = .{ .web_engine = manifest_web_engine },
@@ -677,6 +697,13 @@ pub fn parseTextForPath(allocator: std.mem.Allocator, path: []const u8, source: 
 }
 
 fn metadataFromRaw(allocator: std.mem.Allocator, raw: RawManifest) !Metadata {
+    if (raw.assets.fonts.len > 8) return error.TooManyFontAssets;
+    for (raw.assets.fonts, 0..) |font, index| {
+        if (font.id < 64 or font.id > 9_007_199_254_740_991) return error.InvalidFontAssetId;
+        try validateRelativePath(font.path);
+        if (!std.mem.startsWith(u8, font.path, "assets/")) return error.InvalidFontAssetPath;
+        for (raw.assets.fonts[0..index]) |previous| if (previous.id == font.id) return error.DuplicateFontAssetId;
+    }
     return .{
         .id = try allocator.dupe(u8, raw.id),
         .name = try allocator.dupe(u8, raw.name),
@@ -712,8 +739,26 @@ fn metadataFromRaw(allocator: std.mem.Allocator, raw: RawManifest) !Metadata {
         .shortcuts = try convertRawShortcuts(allocator, raw.shortcuts),
         .file_associations = try convertRawFileAssociations(allocator, raw.file_associations),
         .url_schemes = try convertRawUrlSchemes(allocator, raw.url_schemes),
+        .updates = try duplicateRawUpdates(allocator, raw.updates),
         .dmg = try convertRawDmg(allocator, raw.dmg),
     };
+}
+
+fn duplicateRawUpdates(allocator: std.mem.Allocator, raw: RawUpdates) !UpdateMetadata {
+    return .{
+        .feed_url = try duplicateOptionalString(allocator, raw.feed_url),
+        .public_key = try duplicateOptionalString(allocator, raw.public_key),
+        .check_on_start = raw.check_on_start,
+    };
+}
+
+fn convertUpdates(updates: UpdateMetadata) !app_manifest.UpdateConfig {
+    if (updates.feed_url == null and updates.public_key == null and !updates.check_on_start) return .{};
+    const feed_url = updates.feed_url orelse return error.InvalidUpdates;
+    const public_key = updates.public_key orelse return error.InvalidUpdates;
+    if (!std.mem.startsWith(u8, feed_url, "https://")) return error.InvalidUpdates;
+    if (public_key.len == 0) return error.InvalidUpdates;
+    return .{ .feed_url = feed_url, .public_key = public_key, .check_on_start = updates.check_on_start };
 }
 
 fn duplicateRawServicePackages(allocator: std.mem.Allocator, packages: []const raw_manifest.RawServicePackage) ![]const ServicePackageMetadata {
@@ -2434,8 +2479,28 @@ fn validatePathSegment(segment: []const u8) !void {
 }
 
 fn parseVersionNumber(value: []const u8) !u32 {
-    if (value.len == 0) return error.InvalidVersion;
-    return std.fmt.parseUnsigned(u32, value, 10);
+    if (value.len == 0 or (value.len > 1 and value[0] == '0')) return error.InvalidVersion;
+    return std.fmt.parseUnsigned(u32, value, 10) catch error.InvalidVersion;
+}
+
+test "manifest versions use canonical numeric components" {
+    try std.testing.expectEqual(@as(u32, 10), (try parseVersion("1.10.0")).minor);
+    try std.testing.expectError(error.InvalidVersion, parseVersion("1.010.0"));
+    try std.testing.expectError(error.InvalidVersion, parseVersion("01.0.0"));
+    try std.testing.expectError(error.InvalidVersion, parseVersion("1.0.00"));
+}
+
+test "manifest validation rejects leading-zero versions" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "app.json", .data =
+        \\{ "id": "com.example.version", "name": "version", "version": "1.010.0" }
+    });
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/app.json", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+    const result = try validateFile(std.testing.allocator, std.testing.io, path);
+    try std.testing.expect(!result.ok);
+    try std.testing.expectEqualStrings("app manifest version is invalid", result.message);
 }
 
 test "JSON manifest parser accepts schema metadata and rejects unknown fields" {
@@ -2460,6 +2525,25 @@ test "JSON manifest parser accepts schema metadata and rejects unknown fields" {
     try std.testing.expectError(error.NullNotAllowed, parseJsonText(std.testing.allocator,
         \\{ "id": "com.example.json", "name": "json-app", "version": "1.2.3", "theme": null }
     ));
+}
+
+test "JSON manifest parser carries native update configuration" {
+    const metadata = try parseJsonText(std.testing.allocator,
+        \\{
+        \\  "id": "com.example.updates",
+        \\  "name": "updates",
+        \\  "version": "1.2.3",
+        \\  "updates": {
+        \\    "feed_url": "https://example.com/native-update.json",
+        \\    "public_key": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        \\    "check_on_start": true
+        \\  }
+        \\}
+    );
+    defer metadata.deinit(std.testing.allocator);
+    try std.testing.expect(metadata.updates.enabled());
+    try std.testing.expect(metadata.updates.check_on_start);
+    try std.testing.expectEqualStrings("https://example.com/native-update.json", metadata.updates.feed_url.?);
 }
 
 test "JSON file validation rejects null with a teaching diagnostic regardless of extension case" {
@@ -3813,4 +3897,32 @@ test "manifest validation resolves explicit DMG file items beside app.zon" {
     const missing = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
     try std.testing.expect(!missing.ok);
     try std.testing.expect(std.mem.indexOf(u8, missing.message, "dmg item source could not be read") != null);
+}
+
+test "font manifests enforce permanent ids, bundled paths and the native slot bound" {
+    const allocator = std.testing.allocator;
+    const good = try parseJsonText(allocator,
+        \\{"id":"dev.test.fonts","name":"fonts","version":"0.1.0","assets":{"fonts":[{"id":64,"path":"assets/mono.ttf"}]}}
+    );
+    good.deinit(allocator);
+    const zon = try parseText(allocator, ".{ .id = \"dev.test.fonts\", .name = \"fonts\", .version = \"0.1.0\", .assets = .{ .fonts = .{ .{ .id = 64, .path = \"assets/mono.ttf\" } } } }");
+    zon.deinit(allocator);
+    const nine = try std.fmt.allocPrint(
+        allocator,
+        "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":[{s}]}}}}",
+        .{"{\"id\":64,\"path\":\"assets/a.ttf\"}," ** 8 ++ "{\"id\":65,\"path\":\"assets/b.ttf\"}"},
+    );
+    defer allocator.free(nine);
+    try std.testing.expectError(error.TooManyFontAssets, parseJsonText(allocator, nine));
+    for ([_]struct { fonts: []const u8, err: anyerror }{
+        .{ .fonts = "[{\"id\":9007199254740992,\"path\":\"assets/a.ttf\"}]", .err = error.InvalidFontAssetId },
+        .{ .fonts = "[{\"id\":63,\"path\":\"assets/a.ttf\"}]", .err = error.InvalidFontAssetId },
+        .{ .fonts = "[{\"id\":64,\"path\":\"a.ttf\"}]", .err = error.InvalidFontAssetPath },
+        .{ .fonts = "[{\"id\":64,\"path\":\"assets/../a.ttf\"}]", .err = error.InvalidPath },
+        .{ .fonts = "[{\"id\":64,\"path\":\"assets/a.ttf\"},{\"id\":64,\"path\":\"assets/b.ttf\"}]", .err = error.DuplicateFontAssetId },
+    }) |case| {
+        const source = try std.fmt.allocPrint(allocator, "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":{s}}}}}", .{case.fonts});
+        defer allocator.free(source);
+        try std.testing.expectError(case.err, parseJsonText(allocator, source));
+    }
 }

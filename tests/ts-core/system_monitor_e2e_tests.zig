@@ -1,7 +1,7 @@
-//! End-to-end proof battery for examples/system-monitor-ts — the second
+//! End-to-end proof battery for examples/system-monitor — the second
 //! port: the spawn-showcase app authored in TypeScript + Native markup
 //! with ZERO hand-written Zig. The build compiles the example's REAL
-//! core (examples/system-monitor-ts/src/core.ts) and this suite drives it
+//! core (examples/system-monitor/src/core.ts) and this suite drives it
 //! through `TsUiApp` with the example's SHIPPING markup (app.native,
 //! staged beside this file) on the FAKE effects executor, so every spawn
 //! parks for scripted answers instead of running the host's real `ps`:
@@ -114,7 +114,7 @@ fn commandId(name: []const u8, prefix: []const u8) ?i64 {
 
 fn appOptions() App.Options {
     return .{
-        .name = "system-monitor-ts-e2e",
+        .name = "system-monitor-e2e",
         .scene = app_scene,
         .canvas_label = canvas_label,
         // The comptime-compiled engine over the example's shipping markup
@@ -801,7 +801,7 @@ fn recordSession(buffer: *JournalBuffer) !MonitorSnapshot {
     const recorder = try std.heap.page_allocator.create(runtime_ns.SessionRecorder);
     defer std.heap.page_allocator.destroy(recorder);
     recorder.* = runtime_ns.SessionRecorder.init(buffer.sink());
-    recorder.begin(.{ .platform_name = "test", .app_name = "system-monitor-ts-e2e", .window_width = 1144, .window_height = 720 });
+    recorder.begin(.{ .platform_name = "test", .app_name = "system-monitor-e2e", .window_width = 1144, .window_height = 720 });
 
     const h = try Harness.createRecorded(recorder);
     defer h.destroy();

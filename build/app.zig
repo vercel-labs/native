@@ -122,6 +122,10 @@ const WebLayerOption = web_layer_contract.WebViewLayer;
 
 pub const AppOptions = struct {
     name: []const u8,
+    /// Expose the embed archive on a desktop host as well as mobile targets.
+    /// The core is staged through the ordinary app build, including compiled
+    /// TypeScript wiring, before addMobileLib consumes it.
+    mobile_lib: bool = false,
     /// Explicit manifest path. Null auto-detects app.json first, then app.zon,
     /// so older owned build.zig files can adopt JSON without a build edit.
     manifest: ?[]const u8 = null,
@@ -201,7 +205,7 @@ const TsWindowView = struct {
     staged_path: []const u8,
 };
 
-const TsWindowSource = struct {
+const TsMarkupSource = struct {
     set_path: []const u8,
     source_path: []const u8,
     staged_path: []const u8,
@@ -209,8 +213,51 @@ const TsWindowSource = struct {
 
 const TsWindowViews = struct {
     views: []const TsWindowView,
-    sources: []const TsWindowSource,
+    sources: []const TsMarkupSource,
 };
+
+const TsAppMarkupSources = struct {
+    /// Non-root, non-window files discovered under src/. Window files are
+    /// staged by the existing secondary-window registry and must not be
+    /// copied a second time.
+    files: []const TsMarkupSource,
+    /// The root view's embedded resolver set. Its path keys are relative to
+    /// src/, matching the root disk watcher; existing window sources are
+    /// projected under their staged `windows/...` names.
+    sources: []const TsMarkupSource,
+};
+
+const max_markup_source_path_len = 200;
+const max_markup_source_path_segments = 24;
+const root_markup_source_prefix = "src/";
+
+/// Whether a path relative to `src/` fits the markup resolver once the
+/// generated desktop watch and `native check` address it as `src/<path>`.
+/// The compiled source set drops that prefix, but accepting a path only the
+/// compiled resolver can represent would make development and release
+/// disagree at the boundary.
+pub fn markupSourcePathWithinBudget(path: []const u8) bool {
+    var segments: usize = 1; // the disk resolver's leading `src` segment
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next() != null) segments += 1;
+    return root_markup_source_prefix.len + path.len <= max_markup_source_path_len and
+        segments <= max_markup_source_path_segments;
+}
+
+fn validateMarkupSourcePath(path: []const u8) void {
+    if (!markupSourcePathWithinBudget(path)) {
+        std.debug.panic(
+            "\nTypeScript markup source path `src/{s}` exceeds the import resolver budget: the full app-relative path, including `src/`, must be at most {d} bytes and {d} segments\n",
+            .{ path, max_markup_source_path_len, max_markup_source_path_segments },
+        );
+    }
+}
+
+pub fn isRootMarkupSourcePath(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".native") and
+        !std.mem.eql(u8, path, "app.native") and
+        !std.mem.startsWith(u8, path, "windows/");
+}
 
 /// Default TypeScript secondary-window views are statically discovered under
 /// `src/windows/`: `settings.native` serves descriptor label `settings`.
@@ -224,7 +271,7 @@ fn collectTsWindowViews(b: *std.Build, app_root: []const u8) TsWindowViews {
     var walker = dir.walk(b.allocator) catch return .{ .views = &.{}, .sources = &.{} };
     defer walker.deinit();
     var views: std.ArrayList(TsWindowView) = .empty;
-    var sources: std.ArrayList(TsWindowSource) = .empty;
+    var sources: std.ArrayList(TsMarkupSource) = .empty;
     while (walker.next(b.graph.io) catch null) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".native")) continue;
         const normalized_path = b.dupe(entry.path);
@@ -261,12 +308,83 @@ fn collectTsWindowViews(b: *std.Build, app_root: []const u8) TsWindowViews {
     }.than;
     std.mem.sort(TsWindowView, views.items, {}, less);
     const source_less = struct {
-        fn than(_: void, a: TsWindowSource, z: TsWindowSource) bool {
+        fn than(_: void, a: TsMarkupSource, z: TsMarkupSource) bool {
             return std.mem.order(u8, a.set_path, z.set_path) == .lt;
         }
     }.than;
-    std.mem.sort(TsWindowSource, sources.items, {}, source_less);
+    std.mem.sort(TsMarkupSource, sources.items, {}, source_less);
     return .{ .views = views.items, .sources = sources.items };
+}
+
+/// The root TypeScript view resolves imports from every `.native` file under
+/// `src/` except itself. Window files already come from collectTsWindowViews;
+/// append those under `windows/...` keys so this set matches the root disk
+/// resolver without changing the separate window resolver root.
+fn collectAppMarkupSources(b: *std.Build, app_root: []const u8, window_views: TsWindowViews) TsAppMarkupSources {
+    const src_path = appPath(b, app_root, "src");
+    var dir = b.build_root.handle.openDir(b.graph.io, src_path, .{ .iterate = true }) catch
+        return .{ .files = &.{}, .sources = &.{} };
+    defer dir.close(b.graph.io);
+    var walker = dir.walk(b.allocator) catch return .{ .files = &.{}, .sources = &.{} };
+    defer walker.deinit();
+
+    var files: std.ArrayList(TsMarkupSource) = .empty;
+    while (walker.next(b.graph.io) catch null) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".native")) continue;
+        const normalized_path = b.dupe(entry.path);
+        for (normalized_path) |*char| {
+            if (char.* == '\\') char.* = '/';
+        }
+        if (!isRootMarkupSourcePath(normalized_path)) continue;
+        validateMarkupSourcePath(normalized_path);
+        files.append(b.allocator, .{
+            .set_path = normalized_path,
+            .source_path = b.fmt("src/{s}", .{normalized_path}),
+            .staged_path = normalized_path,
+        }) catch @panic("OOM");
+    }
+
+    const less = struct {
+        fn than(_: void, a: TsMarkupSource, z: TsMarkupSource) bool {
+            return std.mem.order(u8, a.set_path, z.set_path) == .lt;
+        }
+    }.than;
+    std.mem.sort(TsMarkupSource, files.items, {}, less);
+
+    var sources: std.ArrayList(TsMarkupSource) = .empty;
+    sources.ensureTotalCapacity(b.allocator, files.items.len + window_views.sources.len) catch @panic("OOM");
+    sources.appendSliceAssumeCapacity(files.items);
+    for (window_views.sources) |source| {
+        validateMarkupSourcePath(source.staged_path);
+        sources.appendAssumeCapacity(.{
+            .set_path = source.staged_path,
+            .source_path = source.source_path,
+            .staged_path = source.staged_path,
+        });
+    }
+    std.mem.sort(TsMarkupSource, sources.items, {}, less);
+    return .{ .files = files.items, .sources = sources.items };
+}
+
+fn tsAppMarkupSourcesSource(b: *std.Build, registry: TsAppMarkupSources) []const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(b.allocator,
+        \\//! Generated by build/app.zig from src/**/*.native.
+        \\const native_sdk = @import("native_sdk");
+        \\const canvas = native_sdk.canvas;
+        \\pub const sources = [_]canvas.ui_markup.SourceFile{
+        \\
+    ) catch @panic("OOM");
+    for (registry.sources) |source| {
+        const line = std.fmt.allocPrint(
+            b.allocator,
+            "    .{{ .path = \"{f}\", .source = @embedFile(\"{f}\") }},\n",
+            .{ std.zig.fmtString(source.set_path), std.zig.fmtString(source.staged_path) },
+        ) catch @panic("OOM");
+        out.appendSlice(b.allocator, line) catch @panic("OOM");
+    }
+    out.appendSlice(b.allocator, "};\n") catch @panic("OOM");
+    return out.items;
 }
 
 fn tsWindowRegistrySource(b: *std.Build, registry: TsWindowViews) []const u8 {
@@ -369,6 +487,10 @@ const TsCoreStage = struct {
     /// mirror/registry files): the embed static library's `app`
     /// module roots here on iOS/Android targets.
     mobile_root: std.Build.LazyPath,
+    /// Release/mobile-only module embedding src/app.native. It lives in a
+    /// separate generated directory so a Debug app-code module never gains
+    /// the root markup as a transitive file input; Debug links markup_c.
+    app_markup_root: std.Build.LazyPath,
     /// The compiled-core archive: the app module links it (with libc,
     /// for the toolchain's runtime) beside the staged mirror.
     archive: std.Build.LazyPath,
@@ -708,22 +830,32 @@ fn tsParseQuotedManifestValue(manifest_json: []const u8, comptime key: []const u
     return suffix;
 }
 
-/// PR 166 adds both the published compile-cache bootstrap and the optional
-/// library-profile optimization field. The installed bootstrap is therefore
-/// the capability marker: keep older exact pins byte-for-byte compatible;
-/// once that release is installed, Debug/native-dev gets `dev` and
-/// release/package artifacts get `release` automatically.
+/// App and root fixture builds share the same scriptc optimization policy.
+pub fn scriptcOptimizationForMode(optimize: std.builtin.OptimizeMode) []const u8 {
+    return if (optimize == .Debug) "dev" else "release";
+}
+
+/// The library-profile optimization field first shipped with the Node
+/// bootstrap. scriptc installs a native binary instead, so either
+/// published entrypoint marks a compiler that accepts the field.
 fn scriptcProfileOptimization(b: *std.Build, dep: *std.Build.Dependency, optimize: std.builtin.OptimizeMode) ?[]const u8 {
     const sdk_root = tsSdkRoot(b.allocator, b.graph.io, dep);
+    const release_marker = b.pathJoin(&.{ sdk_root, "packages", "core", "scripts", "scriptc-toolchain.json" });
+    if (std.Io.Dir.cwd().access(b.graph.io, release_marker, .{})) |_| {
+        return scriptcOptimizationForMode(optimize);
+    } else |_| {}
     var dir: []const u8 = b.pathJoin(&.{ sdk_root, "packages", "core" });
     while (true) {
         if (!std.mem.eql(u8, std.fs.path.basename(dir), "node_modules")) {
-            const marker = b.pathJoin(&.{ dir, "node_modules", "scriptc", "dist", "bootstrap.js" });
-            std.Io.Dir.cwd().access(b.graph.io, marker, .{}) catch {
-                dir = std.fs.path.dirname(dir) orelse return null;
-                continue;
+            const native_marker = b.pathJoin(&.{ dir, "node_modules", "scriptc", "bin", "scriptc.exe" });
+            std.Io.Dir.cwd().access(b.graph.io, native_marker, .{}) catch {
+                const bootstrap_marker = b.pathJoin(&.{ dir, "node_modules", "scriptc", "dist", "bootstrap.js" });
+                std.Io.Dir.cwd().access(b.graph.io, bootstrap_marker, .{}) catch {
+                    dir = std.fs.path.dirname(dir) orelse return null;
+                    continue;
+                };
             };
-            return if (optimize == .Debug) "dev" else "release";
+            return scriptcOptimizationForMode(optimize);
         }
         dir = std.fs.path.dirname(dir) orelse return null;
     }
@@ -851,15 +983,19 @@ fn tsCoreStage(
     relational_capability: bool,
     credentials_capability: bool,
     credentials_permission: bool,
+    keyboard_input_permission: bool,
     persist_version: ?u64,
     service_packages: []const ServicePackageConfig,
     service_carrier_choice: ServiceCarrierOption,
     service_pool_workers: ?u8,
     build_trace: bool,
     scriptc_optimization: ?[]const u8,
+    typescript_view: bool,
+    view_reload: bool,
 ) TsCoreStage {
     const node = tsCorePreflight(b, dep, app_root);
     const window_views = collectTsWindowViews(b, app_root);
+    const app_markup_sources = collectAppMarkupSources(b, app_root, window_views);
     const has_services = appHasServiceFiles(b, app_root);
     if (!scriptcCompileSupported(b.graph.host.result, target)) {
         panicUnsupportedScriptcTarget(b, b.graph.host.result, target);
@@ -914,7 +1050,7 @@ fn tsCoreStage(
         }
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_codegen.ts"));
         sqlite_check.addFileInput(dep.path("packages/core/src/sqlite_runtime_policy.ts"));
-        for ([_][]const u8{ "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts" }) |source| {
+        for ([_][]const u8{ "bytes.ts", "bytes.d.ts", "events.ts", "text.ts", "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts", "theme.ts", "theme.d.ts", "internal/image_identity.ts", "internal/image_identity.d.ts", "internal/markdown_policy.ts", "internal/markdown_policy.d.ts" }) |source| {
             sqlite_check.addFileInput(dep.path(b.fmt("packages/core/sdk/{s}", .{source})));
         }
         addAppSqlDirInputs(b, sqlite_check, appPath(b, app_root, "src"));
@@ -961,6 +1097,7 @@ fn tsCoreStage(
     if (relational_capability) check.addArgs(&.{ "--capability", "sqlite" });
     if (credentials_capability) check.addArgs(&.{ "--capability", "credentials" });
     if (credentials_permission) check.addArgs(&.{ "--permission", "credentials" });
+    if (keyboard_input_permission) check.addArgs(&.{ "--permission", "keyboard_input" });
     // Activate the cross-tier registry check even when discovery found no
     // roots: the empty set must reject a core that declares a window.
     check.addArg("--window-views");
@@ -986,7 +1123,7 @@ fn tsCoreStage(
     // corewire, compiled from the SDK dependency for the build host: one
     // invocation projects the generated compile entry and its profile,
     // so the profile's entry spelling and the facade file can never skew.
-    const corewire_exe = corewireExe(b, dep);
+    const corewire_exe = @import("corewire.zig").executable(b, dep.builder, node, .Debug, useLlvmWorkaround(b.graph.host));
     const project = b.addRunArtifact(corewire_exe);
     project.setName("native corewire (core facade + profile)");
     project.addArg("--sidecar");
@@ -1059,6 +1196,8 @@ fn tsCoreStage(
         if (build_trace) service_compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
         service_compile.addFileArg(dep.path("packages/core/scripts/run_external_service_compiler.mjs"));
         service_compile.addFileInput(dep.path("packages/core/scripts/compiler_command.mjs"));
+        service_compile.addFileInput(dep.path("packages/core/scripts/scriptc_toolchain.mjs"));
+        service_compile.addFileInput(dep.path("packages/core/scripts/scriptc-toolchain.json"));
         service_compile.addArg("--stage");
         service_compile.addDirectoryArg(service_stage_dir);
         service_compile.addArg("--manifest");
@@ -1113,6 +1252,23 @@ fn tsCoreStage(
     stage_run.addFileArg(facade);
     stage_run.addArg("--profile");
     stage_run.addFileArg(profile);
+    addViewFrontendInputs(b, dep.builder, stage_run);
+    if (typescript_view) {
+        stage_run.addArg("--view-markup");
+        stage_run.addFileArg(b.path(appPath(b, app_root, "src/app.native")));
+        stage_run.addArg("--view-contract");
+        stage_run.addFileArg(contract);
+        for (app_markup_sources.files) |source| {
+            stage_run.addFileInput(b.path(appPath(b, app_root, source.source_path)));
+        }
+        for (window_views.sources) |source| {
+            stage_run.addFileInput(b.path(appPath(b, app_root, source.source_path)));
+        }
+        if (view_reload) {
+            stage_run.addArg("--view-reload");
+            addViewReloadInputs(dep.builder, stage_run);
+        }
+    }
     if (service_client) |client| {
         stage_run.addArg("--services-client");
         stage_run.addFileArg(client);
@@ -1137,6 +1293,9 @@ fn tsCoreStage(
     if (build_trace) compile.setEnvironmentVariable("SCRIPTC_TIMING", "1");
     compile.addFileArg(dep.path("packages/core/scripts/run_external_core_compiler.mjs"));
     compile.addFileInput(dep.path("packages/core/scripts/compiler_command.mjs"));
+    compile.addFileInput(dep.path("packages/core/scripts/scriptc_toolchain.mjs"));
+    compile.addFileInput(dep.path("packages/core/scripts/scriptc-toolchain.json"));
+    compile.addFileInput(dep.path("packages/core/scripts/run_library_compiler.mjs"));
     compile.addArg("--stage");
     compile.addDirectoryArg(stage_dir);
     compile.addArgs(&.{ "--name", symbol_name });
@@ -1182,6 +1341,7 @@ fn tsCoreStage(
     _ = staged.addCopyFile(shim, "core.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/shim_rt.zig"), "shim_rt.zig");
     _ = staged.addCopyFile(dep.path("tools/corewire/core_abi.zig"), "core_abi.zig");
+    _ = staged.addCopyFile(dep.path("src/app_runner/ts_compiled_view.zig"), "compiled_view.zig");
     _ = staged.addCopyFile(service_registry, "services.zig");
     // The carrier selection, as one staged constant module: the generated
     // wiring comptime-switches its service transport on it.
@@ -1195,9 +1355,22 @@ fn tsCoreStage(
         \\
     , .{ service_carrier, service_pool_workers }));
     _ = staged.addCopyFile(migrations_zig, "migrations.zig");
+    // A view-reload build announces its contract to the markup watcher at
+    // launch, so the watcher compiles programs for exactly this core.
+    if (view_reload) _ = staged.addCopyFile(contract, "view_reload_contract.json");
+    // Every imported file is an input to Debug's embedded source resolver and
+    // the release/mobile compiled view, so stage those beside the runner.
+    // Keep the ROOT out of this directory: changing any file in one WriteFiles
+    // output changes its directory identity, and the runner lives here. Root
+    // markup gets a separate release-only module below; Debug keeps the small
+    // linked C data object, preserving its link-only edit path.
+    for (app_markup_sources.files) |source| {
+        _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
+    }
     // Primary markup bytes live in their own tiny C translation unit. They
-    // no longer participate in Zig source analysis, so a markup edit reuses
-    // the compiled app/SDK graph and performs only C data compile + relink.
+    // drive Debug desktop without participating in Zig source analysis, so a
+    // root markup edit there reuses the compiled app/SDK graph and performs
+    // only C data compile + relink.
     const markup_embed = b.addSystemCommand(&.{node});
     markup_embed.setName("native embed primary markup data");
     markup_embed.addFileArg(dep.path("packages/core/scripts/embed_markup_c.mjs"));
@@ -1206,15 +1379,24 @@ fn tsCoreStage(
     for (window_views.sources) |source| {
         _ = staged.addCopyFile(b.path(appPath(b, app_root, source.source_path)), source.staged_path);
     }
-    _ = staged.add("window_views.zig", tsWindowRegistrySource(b, window_views));
+    _ = staged.add("app_sources.zig", tsAppMarkupSourcesSource(b, app_markup_sources));
+    _ = staged.add("window_views.zig", tsWindowRegistrySource(b, if (typescript_view) .{ .views = &.{}, .sources = &.{} } else window_views));
     const main_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_main.zig"), "main.zig");
     // The mobile wiring stages beside the desktop entry: same mirror, same
     // registry, same carrier constant — only the shell differs (the embed
     // host's AppDef contract instead of a process `main`).
     const mobile_root = staged.addCopyFile(dep.path("src/app_runner/ts_core_mobile.zig"), "mobile.zig");
+    const release_markup = b.addWriteFiles();
+    _ = release_markup.addCopyFile(b.path(appPath(b, app_root, "src/app.native")), "app.native");
+    const app_markup_root = release_markup.add("app_markup_root.zig",
+        \\//! Generated release/mobile embedding for the TypeScript root view.
+        \\pub const source = @embedFile("app.native");
+        \\
+    );
     return .{
         .main_root = main_root,
         .mobile_root = mobile_root,
+        .app_markup_root = app_markup_root,
         .archive = archive,
         .service_exe = service_exe,
         .service_archive = service_archive,
@@ -1251,21 +1433,6 @@ fn addAppSqlDirInputs(b: *std.Build, run: *std.Build.Step.Run, src_path: []const
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".sql")) continue;
         run.addFileInput(b.path(b.fmt("{s}/{s}", .{ src_path, entry.path })));
     }
-}
-
-/// corewire (the contract-sidecar shim generator), compiled from the SDK
-/// dependency's sources for the build host.
-fn corewireExe(b: *std.Build, dep: *std.Build.Dependency) *std.Build.Step.Compile {
-    const mod = b.createModule(.{
-        .root_source_file = dep.path("tools/corewire/main.zig"),
-        .target = b.graph.host,
-        .optimize = .Debug,
-    });
-    return b.addExecutable(.{
-        .name = "corewire",
-        .root_module = mod,
-        .use_llvm = useLlvmWorkaround(b.graph.host),
-    });
 }
 
 /// The archive's symbol-safe stem (`<app>_core` with every non-identifier
@@ -1327,6 +1494,31 @@ fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []
     }
 }
 
+/// Track exactly the ordered portable policies joined by the TypeScript view
+/// frontend. Both app and repository fixture stages use this inventory, so a
+/// policy edit or a new manifest entry invalidates a warm staging cache.
+pub fn addViewFrontendInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
+    const manifest = "packages/core/src/portable_sources.json";
+    const sources = std.json.parseFromSliceLeaky([]const []const u8, b.allocator, @embedFile("../packages/core/src/portable_sources.json"), .{}) catch
+        @panic("invalid portable source inventory");
+    stage.addFileInput(sdk_builder.path(manifest));
+    stage.addFileInput(sdk_builder.path("packages/core/src/portable_sources.ts"));
+    stage.addFileInput(sdk_builder.path("packages/core/src/view_frontend.ts"));
+    stage.addFileInput(sdk_builder.path("packages/core/src/view_program.ts"));
+    stage.addFileInput(sdk_builder.path("packages/core/src/view_sources.ts"));
+    for (sources) |source| {
+        stage.addFileInput(sdk_builder.path(b.fmt("packages/core/{s}", .{source})));
+    }
+}
+
+/// The modules stage_external_core.mjs reads for `--view-reload`: the
+/// development evaluator, its bridge generator and the reload format.
+pub fn addViewReloadInputs(sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
+    for ([_][]const u8{ "view_reload.ts", "view_bridge.ts", "view_evaluator.ts", "view_check.ts" }) |source| {
+        stage.addFileInput(sdk_builder.path(sdk_builder.fmt("packages/core/src/{s}", .{source})));
+    }
+}
+
 /// Declare the SDK implementation modules copied by
 /// stage_external_core.mjs. A directory LazyPath supplies ordering only for
 /// this source tree; these file inputs make implementation-only SDK edits
@@ -1334,7 +1526,7 @@ fn addAppCoreTsDirInputs(b: *std.Build, stage: *std.Build.Step.Run, src_path: []
 /// contract remains byte-identical. Public for the repository fixture graph,
 /// which exercises the same compiler boundary as app builds.
 pub fn addStagedCoreSdkInputs(b: *std.Build, sdk_builder: *std.Build, stage: *std.Build.Step.Run) void {
-    for ([_][]const u8{ "text.ts", "events.ts" }) |source| {
+    for ([_][]const u8{ "bytes.ts", "text.ts", "events.ts", "theme.ts", "internal/image_identity.ts", "internal/markdown_policy.ts" }) |source| {
         stage.addFileInput(sdk_builder.path(b.fmt("packages/core/sdk/{s}", .{source})));
     }
 }
@@ -1453,11 +1645,12 @@ pub const MobileLibOptions = struct {
 pub const MobileTsCore = struct {
     /// The staged mobile wiring (mobile.zig beside the generated mirror).
     main_root: std.Build.LazyPath,
+    /// Separate root-markup module consumed by the compiled mobile view.
+    app_markup_root: std.Build.LazyPath,
     /// The compiled-core archive; merged into the embed library.
     archive: std.Build.LazyPath,
     /// The in-process service archive, when src/services exists.
     service_archive: ?std.Build.LazyPath,
-    markup_c: std.Build.LazyPath,
     /// The app.zon module the mobile wiring reads scene chrome, identity,
     /// and theme from (`app_manifest_zon`).
     manifest_mod: *std.Build.Module,
@@ -1522,6 +1715,11 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
                 .optimize = optimize,
             });
             mod.addImport("app_manifest_zon", ts.manifest_mod);
+            mod.addImport("app_markup_root", b.createModule(.{
+                .root_source_file = ts.app_markup_root,
+                .target = target,
+                .optimize = optimize,
+            }));
             break :ts_app mod;
         } else localModule(b, target, optimize, options.main);
         app_mod.addImport("native_sdk", native_sdk_mod);
@@ -1536,7 +1734,6 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         // host link already passes).
         exports_mod.link_libc = true;
         exports_mod.addObjectFile(ts.archive);
-        exports_mod.addObjectFile(markupDataObject(b, target, optimize, ts.markup_c).getEmittedBin());
         if (ts.service_archive) |service_archive| exports_mod.addObjectFile(service_archive);
     }
     if (options.store_capability or options.relational_capability) {
@@ -1562,15 +1759,20 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
         .use_llvm = useLlvmWorkaround(target),
     });
 
+    if (options.ts_core != null) {
+        // The compiled view decodes JSON numbers through Zig's f128
+        // helpers. C/Objective-C hosts link this archive directly rather
+        // than through Zig, so it must carry its compiler runtime too.
+        lib.bundle_compiler_rt = true;
+    }
+
     const lib_step = b.step("lib", "Build the mobile embed static library");
-    if (options.ts_core != null and target.result.abi.isAndroid()) {
-        // Zig's ELF static-library emission stores the compiled TypeScript
-        // archives as nested members instead of merging their objects (the
-        // Mach-O emission merges), and the NDK's -shared host link would
-        // skip those blobs with only a warning. Flatten to one plain
-        // object archive so the Android host tier keeps linking exactly
-        // the archive it already stages.
-        const merged = mergeMobileArchive(b, dep, lib, options.name);
+    if (options.ts_core != null and (target.result.os.tag == .ios or target.result.abi.isAndroid())) {
+        // Android's ELF archive contains nested TypeScript archives that
+        // the NDK linker skips. On iOS, Zig's Mach-O archive can place
+        // members off an 8-byte boundary, which Apple ld64 rejects.
+        // Rebuild either output as a plain object archive before install.
+        const merged = mergeMobileArchive(b, dep, lib, options.name, if (target.result.os.tag == .ios) "darwin" else "gnu");
         const lib_name = b.fmt("lib{s}.a", .{options.name});
         b.getInstallStep().dependOn(&b.addInstallFileWithDir(merged, .lib, lib_name).step);
         lib_step.dependOn(&b.addInstallFileWithDir(merged, .lib, lib_name).step);
@@ -1580,15 +1782,14 @@ fn addMobileLibWithTarget(b: *std.Build, dep: *std.Build.Dependency, target: std
     }
 }
 
-/// Flatten an Android embed library whose members include the compiled
-/// TypeScript archives (see the call site above). Runs under node like the
-/// rest of the TypeScript lane's drivers.
-fn mergeMobileArchive(b: *std.Build, dep: *std.Build.Dependency, lib: *std.Build.Step.Compile, name: []const u8) std.Build.LazyPath {
+/// Rebuild a TypeScript embed library from its object members. Android
+/// needs flattening; iOS needs Darwin archive member alignment.
+fn mergeMobileArchive(b: *std.Build, dep: *std.Build.Dependency, lib: *std.Build.Step.Compile, name: []const u8, format: []const u8) std.Build.LazyPath {
     const node = b.findProgram(&.{"node"}, &.{}) catch
         @panic("\nmerging the mobile TypeScript archives needs node on PATH (the TypeScript core lane already requires it).\n");
     const merge = b.addSystemCommand(&.{node});
     merge.addFileArg(dep.path("packages/core/scripts/merge_static_archives.mjs"));
-    merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", "gnu" });
+    merge.addArgs(&.{ "--zig", b.graph.zig_exe, "--format", format });
     merge.addArg("--out");
     const merged = merge.addOutputFileArg(b.fmt("lib{s}.a", .{name}));
     merge.addArg("--in");
@@ -1627,6 +1828,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         detectCoreTree(b, app_options.app_root)
     else
         .zig;
+    const typescript_view = b.option(bool, "typescript-view", "Compile Native markup beside the TypeScript model (default for TypeScript apps; rebuild after markup edits)") orelse (core_tree == .ts);
+    if (typescript_view and core_tree != .ts) @panic("-Dtypescript-view requires src/core.ts");
+    const view_reload = b.option(bool, "view-reload", "Debug builds with -Dtypescript-view: let `native dev` apply markup edits to the running app without a rebuild") orelse false;
+    if (view_reload) {
+        if (!typescript_view) @panic("\n-Dview-reload reloads compiled TypeScript views; it requires -Dtypescript-view=true\n");
+        if (app_optimize != .Debug) @panic("\n-Dview-reload is a development feature; it requires -Doptimize=Debug\n");
+        if (target.result.os.tag == .ios or target.result.abi.isAndroid()) @panic("\n-Dview-reload applies to desktop development runs; mobile builds reload by rebuilding\n");
+    }
     if (core_tree == .both) {
         @panic("\nthis app declares two cores: src/core.ts (TypeScript) and src/main.zig (Zig)." ++
             "\nAn app has exactly one core - the tree is the truth. Keep src/core.ts and delete" ++
@@ -1675,12 +1884,15 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             app_config.relational_capability,
             app_config.credentials_capability,
             app_config.credentials_permission,
+            app_config.keyboard_input_permission,
             app_config.persist_version,
             app_config.service_packages,
             service_carrier_choice,
             service_pool_workers,
             build_trace,
             scriptc_optimization,
+            typescript_view,
+            view_reload,
         )
     else
         null;
@@ -1698,7 +1910,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // `-Dtarget`. Desktop targets keep the step absent. A TypeScript core
     // roots the library's app module at the staged mobile wiring and
     // merges the compiled archives into it.
-    if (target.result.os.tag == .ios or target.result.abi.isAndroid()) {
+    if (app_options.mobile_lib or target.result.os.tag == .ios or target.result.abi.isAndroid()) {
         addMobileLibWithTarget(b, dep, target, optimize, .{
             .name = app_options.name,
             .main = appPath(b, app_options.app_root, app_options.main),
@@ -1712,9 +1924,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
             .max_image_pixel_bytes = app_config.max_image_pixel_bytes,
             .ts_core = if (ts_stage) |stage| .{
                 .main_root = stage.mobile_root,
+                .app_markup_root = stage.app_markup_root,
                 .archive = stage.archive,
                 .service_archive = stage.service_archive,
-                .markup_c = stage.markup_c,
                 .manifest_mod = appManifestModule(b, app_options.app_root, manifest_name),
             } else null,
         });
@@ -1723,6 +1935,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
@@ -1742,6 +1955,9 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         @panic("-Dplatform=windows requires a Windows target");
     }
     const web_engine = web_engine_override orelse app_config.web_engine;
+    if (app_config.updates_enabled and selected_platform == .macos and web_engine == .chromium) {
+        @panic("\nnative updates currently require the system macOS host; use web_engine = \"system\" or remove the updates block\n");
+    }
     const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_config.cef_dir);
     const cef_auto_install = cef_auto_install_override orelse app_config.cef_auto_install;
     if (web_engine == .chromium and selected_platform != .macos) {
@@ -1761,17 +1977,26 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     options.addOption([]const u8, "web_engine", @tagName(web_engine));
     options.addOption(bool, "debug_overlay", debug_overlay);
     options.addOption(bool, "automation", automation_enabled);
+    options.addOption(?bool, "webview_inspection", webview_inspection);
     options.addOption(bool, "js_bridge", js_bridge_enabled);
     options.addOption(bool, "web_layer", web_layer);
     const options_mod = options.createModule();
 
-    const app_mod = appModule(b, dep, target, app_optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config);
+    const defer_ts_archives = target.result.ofmt == .elf;
+    const app_mod = appModule(b, dep, target, app_optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config, !defer_ts_archives);
     // TypeScript app code and platform hosts are expensive Zig/Clang semantic
     // work but do not depend on primary markup bytes. Compile them once into
     // an object, then make the executable a link-only artifact over that
     // cached object plus the tiny generated markup-data object. A markup edit
     // therefore avoids re-analyzing the SDK and app runner entirely.
     const exe_root = if (ts_stage) |stage| root: {
+        // COFF has no relocatable link for merging the compiled core archive
+        // and platform C/C++ objects into one object. Keep all those inputs
+        // on the executable's final link instead, including Debug markup.
+        if (target.result.os.tag == .windows) {
+            if (app_optimize == .Debug) app_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
+            break :root app_mod;
+        }
         const app_code = b.addObject(.{
             .name = b.fmt("{s}-app-code", .{app_options.name}),
             .root_module = app_mod,
@@ -1779,7 +2004,14 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         });
         const link_mod = b.createModule(.{ .target = target, .optimize = app_optimize });
         link_mod.addObject(app_code);
-        link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
+        // ELF relocatable links can leave an archive's unwind terminator
+        // before later .eh_frame records. Keep the compiled archives on the
+        // final link, preserving unwind data and the cached app-code split.
+        if (defer_ts_archives) {
+            link_mod.addObjectFile(stage.archive);
+            if (stage.service_archive) |service_archive| link_mod.addObjectFile(service_archive);
+        }
+        if (app_optimize == .Debug) link_mod.addObject(markupDataObject(b, target, app_optimize, stage.markup_c));
         // Object dependencies propagate framework/system-library NAMES, but
         // Zig does not propagate the search paths or rpaths recorded on the
         // module that produced an object. Restate those path-only facts on
@@ -1846,13 +2078,47 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     // the production app module feeds the cached app-code object and must not
     // absorb the separately linked markup data object.
     const test_app_mod = if (ts_stage != null or app_optimize != optimize)
-        appModule(b, dep, target, optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config)
+        appModule(b, dep, target, optimize, app_options, manifest_name, options_mod, ts_stage, relational_migrations, app_config, true)
     else
         app_mod;
-    if (ts_stage) |stage| test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
+    if (ts_stage) |stage| {
+        if (optimize == .Debug) test_app_mod.addObject(markupDataObject(b, target, optimize, stage.markup_c));
+    }
     const tests = b.addTest(.{ .root_module = test_app_mod, .use_llvm = useLlvmWorkaround(target) });
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
+
+    // Authored Node tests drive a separately linked native TestHarness host.
+    // Apps without tests pay no extra compile/link cost.
+    if (ts_stage != null and hasTypeScriptTests(b, app_options.app_root)) {
+        const host_root = b.addWriteFiles().add("native_test_main.zig",
+            \\pub const main = @import("app").testMain;
+            \\
+        );
+        const host_mod = b.createModule(.{ .root_source_file = host_root, .target = target, .optimize = optimize });
+        host_mod.addImport("app", test_app_mod);
+        // The headless host bypasses linkPlatform, but the compiled core's
+        // runtime still references the Windows networking and crypto APIs.
+        if (target.result.os.tag == .windows) {
+            host_mod.linkSystemLibrary("ws2_32", .{});
+            host_mod.linkSystemLibrary("iphlpapi", .{});
+            host_mod.linkSystemLibrary("advapi32", .{});
+        }
+        const host = b.addExecutable(.{
+            .name = b.fmt("{s}-test-host", .{app_options.name}),
+            .root_module = host_mod,
+            .use_llvm = useLlvmWorkaround(target),
+        });
+        const node_tests = b.addSystemCommand(&.{tsToolingPreflight(b, dep, .app_core)});
+        node_tests.addArgs(&.{ "--test-reporter=spec", "--test-reporter-destination=stderr" });
+        node_tests.addFileArg(dep.path("build/ts_run.mjs"));
+        node_tests.addFileArg(dep.path("packages/core/scripts/run_native_tests.mjs"));
+        node_tests.addArtifactArg(host);
+        node_tests.addDirectoryArg(b.path(appPath(b, app_options.app_root, "tests")));
+        node_tests.setCwd(b.path(app_options.app_root));
+        node_tests.has_side_effects = true;
+        test_step.dependOn(&node_tests.step);
+    }
 
     // `native test` must surface the app's compile-time teaching errors,
     // not just its test failures. Test builds never analyze `main` (the
@@ -1885,49 +2151,53 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
     });
     test_step.dependOn(&analysis_obj.step);
 
-    // `zig build model-contract`: reflect the app's Model/Msg into
+    // `zig build model-contract`: reflect a Zig core's Model/Msg into
     // zig-out/model-contract.zon so `native check` can verify markup
     // bindings against the app's real surface without compiling the app.
     // The artifact carries a hash over the app's Zig sources; the checker
     // degrades to structural checking when it goes stale. Apps without a
     // pub Model/Msg pair make this a silent no-op. The test step refreshes
-    // the artifact too, so CI-checked apps always hold a fresh one.
-    const contract_root = b.addWriteFiles().add("model_contract_emit.zig",
-        \\//! Generated by the app build: emits the model contract artifact
-        \\//! (see the toolkit's ui_markup_contract.zig).
-        \\const std = @import("std");
-        \\const native_sdk = @import("native_sdk");
-        \\const app = @import("app");
-        \\
-        \\pub fn main(init: std.process.Init) !void {
-        \\    try native_sdk.canvas.emitModelContractMain(app, init);
-        \\}
-        \\
-    );
-    // The emit root must share the app module's native_sdk instance so
-    // the Msg payload types it classifies are the same types the app
-    // declares its variants with.
-    const contract_mod = b.createModule(.{
-        .root_source_file = contract_root,
-        .target = target,
-        .optimize = optimize,
-    });
-    contract_mod.addImport("app", test_app_mod);
-    if (test_app_mod.import_table.get("native_sdk")) |sdk_mod| {
-        contract_mod.addImport("native_sdk", sdk_mod);
+    // the artifact too, so CI-checked apps always hold a fresh one. A
+    // TypeScript core needs no artifact: `native check` compiles its views
+    // against the core contract directly.
+    if (ts_stage == null) {
+        const contract_root = b.addWriteFiles().add("model_contract_emit.zig",
+            \\//! Generated by the app build: emits the model contract artifact
+            \\//! (see the toolkit's ui_markup_contract.zig).
+            \\const std = @import("std");
+            \\const native_sdk = @import("native_sdk");
+            \\const app = @import("app");
+            \\
+            \\pub fn main(init: std.process.Init) !void {
+            \\    try native_sdk.canvas.emitModelContractMain(app, init);
+            \\}
+            \\
+        );
+        // The emit root must share the app module's native_sdk instance so
+        // the Msg payload types it classifies are the same types the app
+        // declares its variants with.
+        const contract_mod = b.createModule(.{
+            .root_source_file = contract_root,
+            .target = target,
+            .optimize = optimize,
+        });
+        contract_mod.addImport("app", test_app_mod);
+        if (test_app_mod.import_table.get("native_sdk")) |sdk_mod| {
+            contract_mod.addImport("native_sdk", sdk_mod);
+        }
+        const contract_exe = b.addExecutable(.{
+            .name = b.fmt("{s}-model-contract", .{app_options.name}),
+            .root_module = contract_mod,
+            .use_llvm = useLlvmWorkaround(target),
+        });
+        const contract_run = b.addRunArtifact(contract_exe);
+        contract_run.setCwd(b.path(app_options.app_root));
+        contract_run.addArgs(&.{ "--src", "src", "--out", "zig-out/model-contract.zon" });
+        contract_run.has_side_effects = true;
+        const contract_step = b.step("model-contract", "Emit zig-out/model-contract.zon for `native check`");
+        contract_step.dependOn(&contract_run.step);
+        test_step.dependOn(&contract_run.step);
     }
-    const contract_exe = b.addExecutable(.{
-        .name = b.fmt("{s}-model-contract", .{app_options.name}),
-        .root_module = contract_mod,
-        .use_llvm = useLlvmWorkaround(target),
-    });
-    const contract_run = b.addRunArtifact(contract_exe);
-    contract_run.setCwd(b.path(app_options.app_root));
-    contract_run.addArgs(&.{ "--src", "src", "--out", "zig-out/model-contract.zon" });
-    contract_run.has_side_effects = true;
-    const contract_step = b.step("model-contract", "Emit zig-out/model-contract.zon for `native check`");
-    contract_step.dependOn(&contract_run.step);
-    test_step.dependOn(&contract_run.step);
 
     // `zig build package`: bundle the built binary through the `native`
     // CLI (built from the native_sdk dependency), so a scaffolded app can
@@ -1973,6 +2243,7 @@ pub fn addAppArtifacts(b: *std.Build, dep: *std.Build.Dependency, app_options: A
         // runtime (the generated build graph already forwards them).
         package_run.addArgs(&.{ "--web-engine", @tagName(web_engine), "--cef-dir", cef_dir });
         if (cef_auto_install) package_run.addArg("--cef-auto-install");
+        if (app_config.updates_enabled and host_os == .macos) package_run.addArg("--update-archive");
         package_run.has_side_effects = true;
         const package_step = b.step("package", "Create a distributable package via the native CLI");
         package_step.dependOn(&package_run.step);
@@ -2022,7 +2293,7 @@ fn exampleOptimizeMode(b: *std.Build, requested: ?std.builtin.OptimizeMode, defa
     };
 }
 
-fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, manifest_name: []const u8, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig) *std.Build.Module {
+fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, app_options: AppOptions, manifest_name: []const u8, options_mod: *std.Build.Module, ts_stage: ?TsCoreStage, relational_migrations: std.Build.LazyPath, app_config: AppManifestBuildConfig, link_ts_archives: bool) *std.Build.Module {
     const native_sdk_mod = nativeSdkModuleWithTerminal(b, dep, target, optimize, app_options.terminal_sessions);
     const runner_mod = b.createModule(.{
         .root_source_file = dep.path("src/app_runner/root.zig"),
@@ -2058,10 +2329,23 @@ fn appModule(b: *std.Build, dep: *std.Build.Dependency, target: std.Build.Resolv
         // The compiled-core archive links behind the staged mirror; the
         // toolchain's runtime needs libc.
         app_mod.link_libc = true;
-        app_mod.addObjectFile(stage.archive);
+        if (link_ts_archives) app_mod.addObjectFile(stage.archive);
+        // Debug reads src/app.native only through the separately linked C
+        // data object. Supplying this generated module in Debug would put
+        // the authored root back into the app-code dependency graph even
+        // though the runner's comptime branch never imports it.
+        if (optimize != .Debug) {
+            app_mod.addImport("app_markup_root", b.createModule(.{
+                .root_source_file = stage.app_markup_root,
+                .target = target,
+                .optimize = optimize,
+            }));
+        }
         // The in-process service archive links beside it (distinct symbol
         // prefix; its runtime internals are localized).
-        if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);
+        if (link_ts_archives) {
+            if (stage.service_archive) |service_archive| app_mod.addObjectFile(service_archive);
+        }
     }
     if (app_config.sqlite_capability) {
         // `store` and the relational `sqlite` tier share this exact object.
@@ -2745,8 +3029,10 @@ const AppManifestBuildConfig = struct {
     relational_capability: bool = false,
     credentials_capability: bool = false,
     credentials_permission: bool = false,
+    keyboard_input_permission: bool = false,
     filesystem_permission: bool = false,
     max_image_pixel_bytes: usize = 1024 * 1024,
+    updates_enabled: bool = false,
     sqlite_capability: bool = false,
     /// The first web declaration found (for teaching messages), or null
     /// when app.zon declares no web use. `web_engine = "system"` alone is
@@ -2786,6 +3072,7 @@ const InferenceManifest = struct {
     service_packages: []const ServicePackageConfig = &.{},
     service_carrier: []const u8 = "auto",
     service_pool_size: u8 = 0,
+    updates: ?struct {} = null,
     shell: struct {
         windows: []const struct {
             views: []const struct {
@@ -2849,8 +3136,10 @@ fn appManifestBuildConfig(b: *std.Build, app_root: []const u8, manifest_name: []
         .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
         .credentials_capability = hasManifestCapability(raw.capabilities, "credentials"),
         .credentials_permission = hasManifestPermission(raw.permissions, "credentials"),
+        .keyboard_input_permission = hasManifestPermission(raw.permissions, "keyboard_input"),
         .filesystem_permission = hasManifestPermission(raw.permissions, "filesystem"),
         .max_image_pixel_bytes = raw.images.max_image_pixel_bytes,
+        .updates_enabled = raw.updates != null,
         .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         .web_declaration = web_layer_contract.manifestDeclaration(raw),
     };
@@ -2885,4 +3174,18 @@ fn resolveWebLayer(config: AppManifestBuildConfig, web_engine: WebEngineOption, 
         .{ if (override != null) "-Dweb-layer=exclude" else "app.zon .webview_layer = \"exclude\"", declaration.?.text() },
     );
     return decision.enabled;
+}
+
+/// One explicit discovery convention, shared with run_native_tests.mjs.
+fn hasTypeScriptTests(b: *std.Build, app_root: []const u8) bool {
+    var dir = std.Io.Dir.cwd().openDir(b.graph.io, b.pathFromRoot(appPath(b, app_root, "tests")), .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => @panic("cannot read app tests directory"),
+    };
+    defer dir.close(b.graph.io);
+    var iterator = dir.iterate();
+    while (iterator.next(b.graph.io) catch @panic("cannot enumerate app tests")) |entry| {
+        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".test.ts")) return true;
+    }
+    return false;
 }

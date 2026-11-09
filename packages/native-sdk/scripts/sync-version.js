@@ -14,8 +14,8 @@
 // manifest and lockfile get the CLI version, so the version every TS
 // scaffold pins (templates read the bundled manifest) and the editor copy
 // the CLI materializes match the npm publish the moment the package goes
-// public. The committed TS examples pin the bundled version by hand, so
-// they are stamped here too (version:check fails when any example pin
+// public. Committed TS examples and test apps pin the bundled version, so
+// they are stamped here too (version:check fails when any app pin
 // drifts from the bundled version).
 
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
@@ -114,25 +114,26 @@ for (const entry of readdirSync(npmDir, { withFileTypes: true })) {
   }
 }
 
-// Every committed TS example's @native-sdk/core pin (exact, like the
+// Every committed TS example and test app's @native-sdk/core pin (exact, like the
 // scaffold's, so a post-publish `npm install` resolves the same content
 // the CLI materializes). Discover these instead of maintaining a list:
-// new examples often exercise the release's new SDK surface and must not
+// new apps often exercise the release's new SDK surface and must not
 // accidentally keep the version that happened to be current at creation.
-const examplesDir = join(repoRoot, 'examples');
-for (const entry of readdirSync(examplesDir, { withFileTypes: true })) {
-  if (!entry.isDirectory()) continue;
-  const examplePath = join(examplesDir, entry.name, 'package.json');
-  if (!existsSync(examplePath)) continue;
-  const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
-  if (!exampleJson.dependencies?.['@native-sdk/core']) continue;
-  const example = `examples/${entry.name}`;
-  if (exampleJson.dependencies['@native-sdk/core'] !== version) {
-    exampleJson.dependencies['@native-sdk/core'] = version;
-    writeFileSync(examplePath, JSON.stringify(exampleJson, null, 2) + '\n');
-    console.log(`  Updated ${example}/package.json`);
-  } else {
-    console.log(`  ${example}/package.json already up to date`);
+for (const directory of ['examples', 'tests']) {
+  for (const entry of readdirSync(join(repoRoot, directory), { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const examplePath = join(repoRoot, directory, entry.name, 'package.json');
+    if (!existsSync(examplePath)) continue;
+    const exampleJson = JSON.parse(readFileSync(examplePath, 'utf-8'));
+    if (!exampleJson.dependencies?.['@native-sdk/core']) continue;
+    const example = `${directory}/${entry.name}`;
+    if (exampleJson.dependencies['@native-sdk/core'] !== version) {
+      exampleJson.dependencies['@native-sdk/core'] = version;
+      writeFileSync(examplePath, JSON.stringify(exampleJson, null, 2) + '\n');
+      console.log(`  Updated ${example}/package.json`);
+    } else {
+      console.log(`  ${example}/package.json already up to date`);
+    }
   }
 }
 
@@ -149,6 +150,28 @@ if (pinsChanged) {
   console.log('  Updated optionalDependencies pins in package.json');
 } else {
   console.log('  optionalDependencies pins already up to date');
+}
+
+// Release binaries are published after this version bump. Keep third-party
+// resolutions, but remove older optional binaries rather than inventing
+// integrity hashes for packages that have not been published yet.
+const cliLockPath = join(projectRoot, 'package-lock.json');
+const cliLock = JSON.parse(readFileSync(cliLockPath, 'utf-8'));
+const previousLock = JSON.stringify(cliLock);
+cliLock.version = version;
+cliLock.packages[''].version = version;
+cliLock.packages[''].optionalDependencies = { ...packageJson.optionalDependencies };
+for (const name of Object.keys(packageJson.optionalDependencies)) {
+  const key = `node_modules/${name}`;
+  if (cliLock.packages[key] && cliLock.packages[key].version !== version) {
+    delete cliLock.packages[key];
+  }
+}
+if (JSON.stringify(cliLock) !== previousLock) {
+  writeFileSync(cliLockPath, JSON.stringify(cliLock, null, 2) + '\n');
+  console.log('  Updated packages/native-sdk/package-lock.json');
+} else {
+  console.log('  packages/native-sdk/package-lock.json already up to date');
 }
 
 console.log('Version sync complete.');

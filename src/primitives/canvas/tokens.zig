@@ -444,11 +444,14 @@ pub const SpacingTokens = struct {
 /// Derived from a 10px base radius, the derivation the house scale uses:
 /// `--radius`: lg is the base, md steps down 2, sm steps down 4, and xl
 /// steps up 4. Buttons and inputs sit on md; cards and surfaces on lg.
+/// `none` is the fixed square-corner constant, deliberately outside that
+/// derived scale.
 pub const RadiusTokens = struct {
     sm: f32 = 6,
     md: f32 = 8,
     lg: f32 = 10,
     xl: f32 = 14,
+    none: f32 = 0,
 };
 
 pub const StrokeTokens = struct {
@@ -1349,6 +1352,7 @@ pub const SpacingTokenOverrides = struct {
 };
 
 pub const RadiusTokenOverrides = struct {
+    // `none` is intentionally not overridable: it always means square corners.
     sm: ?f32 = null,
     md: ?f32 = null,
     lg: ?f32 = null,
@@ -1901,6 +1905,49 @@ pub const DesignTokens = struct {
     /// so a header that never consumed the chrome insets still keeps
     /// its trailing status text out from under the caption buttons.
     window_controls: ?geometry.RectF = null,
+    /// Portable surface placement supplied by the app adapter, outside theme overrides.
+    surface_layout_policy: ?@import("surface_layout_policy.zig").Policy = null,
+    grid_layout_policy: ?@import("grid_layout_policy.zig").Policy = null,
+    container_layout_policy: ?@import("container_layout_policy.zig").Policy = null,
+    /// Portable measurement scheduling, separate from allocation arithmetic.
+    measurement_coordination_policy: ?@import("measurement_coordination_policy.zig").Policy = null,
+    /// Portable grid and scrolling measurement/admission coordination.
+    flow_measurement_policy: ?@import("flow_measurement_policy.zig").Policy = null,
+    /// Portable layout admission, ordered child plans and retained relayout.
+    layout_coordination_policy: ?@import("layout_coordination_policy.zig").Policy = null,
+    /// Portable paint capability scheduling and direct-tree sibling programs.
+    render_coordination_policy: ?@import("render_coordination_policy.zig").Policy = null,
+    /// Portable control primitive scheduling, part slots and editing overlays.
+    control_command_policy: ?@import("control_command_policy.zig").Policy = null,
+    intrinsic_layout_policy: ?@import("intrinsic_layout_policy.zig").Policy = null,
+    /// Widget motion plans supplied by the compiled app, outside theme overrides.
+    widget_motion_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable accessibility/layout audit rules over native measurement facts.
+    widget_audit_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Platform semantic projection/publication; native owns OS elements.
+    accessibility_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable input routing and focus over copied solved-tree facts.
+    widget_routing_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable retained widget matching and change classification.
+    widget_change_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable rebuild collections and edge-triggered autofocus.
+    widget_retention_policy: ?*const fn ([]const u8, []u8) usize = null,
+    widget_reconcile_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable retained scroll extents, moving subtrees and selected-tab reveals.
+    scroll_tree_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable scroll mutation, retained state and publication sequencing.
+    scroll_mutation_policy: ?*const fn ([]const u8, []u8) usize = null,
+    widget_continuity_policy: ?*const fn ([]const u8, []u8) usize = null,
+    staged_rebuild_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable retained damage geometry; native supplies font measurements.
+    widget_paint_policy: ?*const fn ([]const u8, []u8) usize = null,
+    widget_presentation_policy: ?*const fn ([]const u8, []u8) usize = null,
+    terminal_paint_policy: ?*const fn ([]const u8, []u8) usize = null,
+    widget_paint_walk_policy: ?*const fn ([]const u8, []u8) usize = null,
+    control_geometry_policy: ?*const fn ([]const u8, []u8) usize = null,
+    code_content_policy: ?*const fn ([]const u8, []u8) usize = null,
+    paragraph_policy: ?*const fn ([]const u8, []u8) usize = null,
+    text_run_policy: ?*const fn ([]const u8, []u8) usize = null,
 
     pub fn theme(options: ThemeOptions) DesignTokens {
         // The pack resolves the register (palette, control tables, and

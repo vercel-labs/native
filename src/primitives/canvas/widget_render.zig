@@ -5,6 +5,7 @@ const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
 const text_spans_model = @import("text_spans.zig");
 const code_model = @import("code.zig");
+const code_content = @import("code_content_policy.zig");
 const token_model = @import("tokens.zig");
 const widget_model = @import("widgets.zig");
 const event_model = @import("events.zig");
@@ -22,6 +23,13 @@ const widget_render_surfaces = @import("widget_render_surfaces.zig");
 const widget_render_controls = @import("widget_render_controls.zig");
 const icon_model = @import("icons.zig");
 const chart_model = @import("chart.zig");
+const presentation_policy = @import("widget_presentation_policy.zig");
+const paint_walk_policy = @import("widget_paint_walk_policy.zig");
+const leaves = @import("leaf_plan_policy.zig");
+const chart_plans = @import("chart_plan_policy.zig");
+const indicator_plans = @import("indicator_plan_policy.zig");
+const effect_plans = @import("effect_plan_policy.zig");
+const emission = @import("render_coordination_policy.zig");
 
 const Error = canvas.Error;
 const ObjectId = canvas.ObjectId;
@@ -55,8 +63,8 @@ const widgetTextInputInset = widget_text_input.widgetTextInputInset;
 const widgetButtonTextSize = widget_metrics.widgetButtonTextSize;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
 const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
-const widgetLineHeight = widget_metrics.widgetLineHeight;
-const widgetTypographySize = widget_metrics.widgetTypographySize;
+const widgetLineHeightWithTokens = widget_metrics.widgetLineHeightWithTokens;
+const widgetTypographySizeWithTokens = widget_metrics.widgetTypographySizeWithTokens;
 const widgetButtonInset = widget_metrics.widgetButtonInset;
 const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
@@ -69,7 +77,7 @@ const WidgetRenderState = widget_model.WidgetRenderState;
 const WidgetSize = widget_model.WidgetSize;
 const Widget = widget_model.Widget;
 const estimateTextWidth = text_model.estimateTextWidth;
-const measureTextWidthForFont = text_model.measureTextWidthForFont;
+const measureTextWidthForFontWithPolicy = text_model.measureTextWidthForFontWithPolicy;
 const affinesEqual = equality_model.affinesEqual;
 pub const textSelectionFillColor = widget_render_style.textSelectionFillColor;
 pub const textSelectionTextColor = widget_render_style.textSelectionTextColor;
@@ -91,11 +99,6 @@ pub const controlStrokeWidth = widget_render_style.controlStrokeWidth;
 const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 pub const selectControlVisualTokens = widget_render_style.selectControlVisualTokens;
 pub const textInputControlVisualTokens = widget_render_style.textInputControlVisualTokens;
-const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
-const cardControlVisualTokens = widget_render_style.cardControlVisualTokens;
-const dialogControlVisualTokens = widget_render_style.dialogControlVisualTokens;
-const drawerControlVisualTokens = widget_render_style.drawerControlVisualTokens;
-const sheetControlVisualTokens = widget_render_style.sheetControlVisualTokens;
 pub const listItemControlVisualTokens = widget_render_style.listItemControlVisualTokens;
 pub const selectionControlVisualTokens = widget_render_style.selectionControlVisualTokens;
 pub const surfaceControlVisualTokens = widget_render_style.surfaceControlVisualTokens;
@@ -144,6 +147,25 @@ const widget_render_scratch = @import("lazy_tls.zig").LazyTls(WidgetRenderScratc
 /// the entry points record it here.
 threadlocal var scrim_viewport: ?geometry.RectF = null;
 
+// Results are copied out of the compiler arena and scoped to one retained
+// emission. Save/restore permits nested emissions on the same thread.
+threadlocal var presentation_plan: ?presentation_policy.Plan = null;
+fn activePresentation(layout: anytype) ?presentation_policy.Plan {
+    if (presentation_policy.owner(layout) == null) return null;
+    const plan = presentation_plan orelse @panic("missing compiled presentation plan");
+    if (!plan.matches(layout)) @panic("mismatched compiled presentation layout");
+    return plan;
+}
+
+threadlocal var painting_drag_copy: bool = false;
+threadlocal var paint_walk_plan: ?paint_walk_policy.Plan = null;
+fn activePaintWalk(layout: anytype) ?paint_walk_policy.Plan {
+    if (paint_walk_policy.owner(layout) == null) return null;
+    const plan = paint_walk_plan orelse @panic("missing compiled paint walk plan");
+    if (!plan.matches(layout)) @panic("mismatched compiled paint walk layout");
+    return plan;
+}
+
 /// Visible bounds for the direct widget-tree walk, in the coordinate
 /// space active at the current recursion depth. The layout walk derives
 /// the same value from retained parent links; the direct walk carries it
@@ -152,6 +174,9 @@ threadlocal var scrim_viewport: ?geometry.RectF = null;
 threadlocal var tree_visible_bounds: ?geometry.RectF = null;
 
 pub fn emitWidgetTree(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const saved_policy = builder.text_run_policy;
+    builder.text_run_policy = tokens.text_run_policy;
+    defer builder.text_run_policy = saved_policy;
     scrim_viewport = widget.frame.normalized();
     tree_visible_bounds = widget.frame.normalized();
     defer tree_visible_bounds = null;
@@ -163,6 +188,34 @@ pub fn emitWidgetLayout(builder: *Builder, layout: anytype, tokens: DesignTokens
 }
 
 pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const saved_policy = builder.text_run_policy;
+    builder.text_run_policy = tokens.text_run_policy;
+    defer builder.text_run_policy = saved_policy;
+    const saved_copy = painting_drag_copy;
+    painting_drag_copy = false;
+    defer painting_drag_copy = saved_copy;
+    const saved_walk = paint_walk_plan;
+    const walk = if (paint_walk_policy.owner(layout)) |policy|
+        paint_walk_policy.Plan.init(std.heap.page_allocator, policy, layout, tokens, state) catch @panic("paint walk allocation failed")
+    else
+        null;
+    paint_walk_plan = walk;
+    defer {
+        paint_walk_plan = saved_walk;
+        if (walk) |owned| owned.deinit();
+    }
+    const saved_plan = presentation_plan;
+    const saved_viewport = scrim_viewport;
+    const plan = if (presentation_policy.owner(layout)) |policy|
+        presentation_policy.Plan.init(std.heap.page_allocator, policy, layout, tokens, state) catch @panic("presentation plan allocation failed")
+    else
+        null;
+    presentation_plan = plan;
+    defer {
+        presentation_plan = saved_plan;
+        scrim_viewport = saved_viewport;
+        if (plan) |owned| owned.deinit();
+    }
     scrim_viewport = widgetLayoutRootBounds(layout);
     try emitWidgetLayoutChildren(builder, layout, null, tokens, state);
     try emitWidgetLayoutClipEscapingMotions(builder, layout, tokens, state);
@@ -177,19 +230,29 @@ pub fn emitWidgetLayoutWithState(builder: *Builder, layout: anytype, tokens: Des
 /// the card at the destination lane's bounds. Other layout motions stay in the
 /// ordinary tree walk and retain their scroll clipping.
 fn emitWidgetLayoutClipEscapingMotions(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    if (activePaintWalk(layout)) |plan| {
+        var current = plan.firstEscaping();
+        while (current) |index| {
+            try emitWidgetLayoutEscapingMotion(builder, layout, index, tokens, state);
+            current = plan.facts(index).next_escaping;
+        }
+        return;
+    }
     for (layout.nodes, 0..) |node, index| {
         if (widget_tree.widgetEscapesAncestorClips(node.widget)) continue;
         if (!state.layoutMotionEscapesAncestorClips(node.widget.id)) continue;
         if (widget_tree.isWidgetHiddenInAncestors(layout, index)) continue;
         if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) continue;
-
-        const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, index) orelse return error.InvalidTransform;
-        const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
-        const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
-        if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
-        try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
-        if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
+        try emitWidgetLayoutEscapingMotion(builder, layout, index, tokens, state);
     }
+}
+fn emitWidgetLayoutEscapingMotion(builder: *Builder, layout: anytype, index: usize, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    const ancestor_transform = widgetLayoutNodeAncestorEmissionTransform(layout, index) orelse return error.InvalidTransform;
+    const wrap_ancestor_transform = !affinesEqual(ancestor_transform, Affine.identity());
+    const inverse_ancestor_transform = if (wrap_ancestor_transform) ancestor_transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+    if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
+    try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
+    if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
 }
 
 /// Paint the active drag source in a late, window-level pass so the card under
@@ -197,13 +260,14 @@ fn emitWidgetLayoutClipEscapingMotions(builder: *Builder, layout: anytype, token
 /// subtree, leaving its one current layout slot blank.
 fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
     const source_id = state.drag_preview_id orelse return;
-    const source_index = widget_tree.widgetIndexById(layout, source_id) orelse return;
-    // Resizable panels and split dividers use semantic drag for their built-in
-    // geometry controls. Their retained frame already follows the pointer;
-    // painting a generic translated preview would duplicate the control.
-    if (!widgetKindUsesFloatingDragPreview(layout.nodes[source_index].widget.kind)) return;
-    if (widget_tree.isWidgetHiddenInAncestors(layout, source_index)) return;
-    if (widget_tree.isWidgetConcealedByDisclosure(layout, source_index)) return;
+    const source_index = if (activePaintWalk(layout)) |plan| plan.previewIndex() orelse return else blk: {
+        const index = widget_tree.widgetIndexById(layout, source_id) orelse return;
+        // Geometry controls already follow the pointer in retained layout.
+        if (!widgetKindUsesFloatingDragPreview(layout.nodes[index].widget.kind)) return;
+        if (widget_tree.isWidgetHiddenInAncestors(layout, index)) return;
+        if (widget_tree.isWidgetConcealedByDisclosure(layout, index)) return;
+        break :blk index;
+    };
 
     var preview_state = WidgetRenderState{
         .rendering_drag_preview = true,
@@ -222,6 +286,9 @@ fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: Desig
     const translation = widgetLayoutDragPreviewTranslation(layout, source_index, state, ancestor_transform);
     try builder.transform(translation);
     if (wrap_ancestor_transform) try builder.transform(ancestor_transform);
+    const saved_copy = painting_drag_copy;
+    painting_drag_copy = true;
+    defer painting_drag_copy = saved_copy;
     try emitWidgetLayoutNode(builder, layout, source_index, tokens, preview_state, .none);
     if (wrap_ancestor_transform) try builder.transform(inverse_ancestor_transform);
     try builder.transform(Affine.translate(-translation.tx, -translation.ty));
@@ -230,12 +297,13 @@ fn emitWidgetLayoutDragPreview(builder: *Builder, layout: anytype, tokens: Desig
 /// The window-space translation around a floating drag preview. The same
 /// value drives both the builder stack and span visibility below, so a rich
 /// text child is culled at its lifted pose rather than its standing slot.
-fn widgetLayoutDragPreviewTranslation(
+pub fn widgetLayoutDragPreviewTranslation(
     layout: anytype,
     source_index: usize,
     state: WidgetRenderState,
     ancestor_transform: Affine,
 ) Affine {
+    if (activePresentation(layout)) |plan| return plan.drag() orelse @panic("missing compiled drag translation");
     const current_frame = layout.nodes[source_index].frame.normalized();
     const current_origin = ancestor_transform.transformPoint(geometry.PointF.init(current_frame.x, current_frame.y));
     const source_layout_origin = state.drag_preview_origin orelse geometry.PointF.init(current_frame.x, current_frame.y);
@@ -251,6 +319,10 @@ fn widgetLayoutDragPreviewTranslation(
 /// retain those bounds separately from their resolved frame so a root
 /// dialog can be centered without shrinking its own scrim to the dialog.
 pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
+    if (presentation_policy.owner(layout)) |policy| {
+        if (presentation_plan) |plan| if (plan.matches(layout)) return plan.root();
+        return presentation_policy.rootBounds(policy, layout);
+    }
     if (@hasField(@TypeOf(layout), "root_bounds")) {
         if (layout.root_bounds) |root_bounds| return root_bounds.normalized();
     }
@@ -266,7 +338,7 @@ pub fn widgetLayoutRootBounds(layout: anytype) ?geometry.RectF {
 /// Accumulated transform active while `node_index` emits. Window-level
 /// surfaces are hoisted into the late top-level pass, so their original
 /// ancestors do not contribute transforms there.
-fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+pub fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine {
     if (node_index >= layout.nodes.len) return null;
     var indices: [widget_layout.max_widget_depth]usize = undefined;
     var len: usize = 0;
@@ -290,7 +362,7 @@ fn widgetLayoutNodeEmissionTransform(layout: anytype, node_index: usize) ?Affine
 /// The transform active while `node_index` paints in this frame. Unlike the
 /// standing emission transform above, this includes presentation-only layout
 /// motion and the window-level translation around a floating drag preview.
-fn widgetLayoutNodePresentationTransform(
+pub fn widgetLayoutNodePresentationTransform(
     layout: anytype,
     node_index: usize,
     state: WidgetRenderState,
@@ -332,7 +404,8 @@ fn widgetLayoutNodePresentationTransform(
 /// so it must explicitly restore this stack before painting the source.
 /// Window-level nodes were already hoisted and therefore inherit no
 /// original ancestors there.
-fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+pub fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize) ?Affine {
+    if (activePresentation(layout)) |plan| return if (node_index < layout.nodes.len) plan.facts(node_index).ancestor else null;
     if (node_index >= layout.nodes.len) return null;
     if (widget_tree.widgetEscapesAncestorClips(layout.nodes[node_index].widget)) return Affine.identity();
     const parent_index = layout.nodes[node_index].parent_index orelse return Affine.identity();
@@ -345,12 +418,17 @@ fn widgetLayoutNodeAncestorEmissionTransform(layout: anytype, node_index: usize)
 /// mapped back through the exact PRESENTATION transform stack. Floating
 /// drag previews and clip-escaping landing motions stop at their lifted
 /// subtree root, so the culling policy matches the late unclipped paint pass.
-fn widgetLayoutNodeVisibleBounds(
+pub fn widgetLayoutNodeVisibleBounds(
     layout: anytype,
     node_index: usize,
     bounds: geometry.RectF,
     state: WidgetRenderState,
 ) ?geometry.RectF {
+    if (activePresentation(layout)) |plan| {
+        if (node_index >= layout.nodes.len) return null;
+        const facts = plan.facts(node_index);
+        return if (state.rendering_drag_preview) facts.preview_visible else facts.visible;
+    }
     if (node_index >= layout.nodes.len) return null;
     var device_visible = (widgetLayoutRootBounds(layout) orelse return null).normalized();
     const has_layout_motion = state.layout_motions.len > 0;
@@ -401,6 +479,14 @@ fn widgetLayoutNodeVisibleBounds(
 /// floating surfaces preserve their structural z-order.
 /// Ancestor hiding still applies.
 fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: DesignTokens, state: WidgetRenderState) Error!void {
+    if (activePaintWalk(layout)) |plan| {
+        var current = plan.firstSurface();
+        while (current) |index| {
+            try emitWidgetLayoutNode(builder, layout, index, tokens, state, .none);
+            current = plan.facts(index).next_surface;
+        }
+        return;
+    }
     const surface_count = widget_tree.widgetLayoutWindowSurfaceCount(layout);
     var emitted: usize = 0;
     var previous: ?widget_tree.WidgetPaintOrder = null;
@@ -417,8 +503,20 @@ fn emitWidgetLayoutWindowSurfaces(builder: *Builder, layout: anytype, tokens: De
 }
 
 fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
-    if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
-    if (widget.semantics.hidden) return;
+    const recipe = if (tokens.render_coordination_policy) |policy|
+        emission.Recipe.init(policy, .tree, widget, tokens, depth, 0, isSyntaxCodeParagraph(widget))
+    else
+        null;
+    if (recipe) |plan| {
+        switch (plan.status) {
+            .depth => return error.WidgetDepthExceeded,
+            .hidden => return,
+            .ready => {},
+        }
+    } else {
+        if (depth >= max_widget_depth) return error.WidgetDepthExceeded;
+        if (widget.semantics.hidden) return;
+    }
 
     const opacity = widgetOpacity(widget);
     if (opacity <= 0) return;
@@ -435,16 +533,17 @@ fn emitWidgetDepth(builder: *Builder, widget: Widget, tokens: DesignTokens, dept
         else
             null;
         try builder.transform(transform);
-        try emitWidgetDepthContent(builder, widget, tokens, depth);
+        try emitWidgetDepthContent(builder, widget, tokens, depth, recipe);
         try builder.transform(inverse_transform);
     } else {
-        try emitWidgetDepthContent(builder, widget, tokens, depth);
+        try emitWidgetDepthContent(builder, widget, tokens, depth, recipe);
     }
     if (wrap_opacity) try builder.popOpacity();
 }
 
-fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize) Error!void {
+fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize, recipe: ?emission.Recipe) Error!void {
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    if (recipe) |plan| return emitTreeRecipe(builder, paint_widget, tokens, depth, plan);
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
         .stack, .row, .column => {
@@ -499,7 +598,7 @@ fn emitWidgetDepthContent(builder: *Builder, widget: Widget, tokens: DesignToken
             }
         },
         .icon => try emitIconWidget(builder, paint_widget, tokens),
-        .image => try emitImageWidget(builder, paint_widget),
+        .image => try emitImageWidget(builder, paint_widget, tokens),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
         .terminal => try emitTerminalWidget(builder, paint_widget, tokens, paint_widget.state.focused),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
@@ -606,6 +705,7 @@ fn emitDataCellContent(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 }
 
 fn emitWidgetChildren(builder: *Builder, children: []const Widget, tokens: DesignTokens, depth: usize) Error!void {
+    if (tokens.render_coordination_policy) |policy| return emitCompiledChildren(builder, children, tokens, depth, policy, false);
     var emitted: usize = 0;
     var previous: ?WidgetPaintOrder = null;
     while (emitted < children.len) : (emitted += 1) {
@@ -691,6 +791,16 @@ fn emitWidgetLayoutChildren(
     tokens: DesignTokens,
     state: WidgetRenderState,
 ) Error!void {
+    if (activePaintWalk(layout)) |plan| {
+        var current = if (parent_index) |index| plan.facts(index).first_child else plan.firstRoot();
+        while (current) |index| {
+            const facts = plan.facts(index);
+            if (!plan.activeLane(index, painting_drag_copy).suppress_flow)
+                try emitWidgetLayoutNode(builder, layout, index, tokens, state, facts.segment);
+            current = facts.next_sibling;
+        }
+        return;
+    }
     const child_count = widgetLayoutDirectChildCount(layout, parent_index);
     // The layout walk's flush button-group stamp (the tree walk's twin
     // lives in `emitButtonGroupWidget`): children of a gap-0 group get
@@ -742,25 +852,30 @@ fn emitWidgetLayoutNode(
     segment: widget_model.WidgetGroupSegment,
 ) Error!void {
     const node = layout.nodes[node_index];
-    if (node.widget.semantics.hidden) return;
-    // During a drag the retained source remains in flow as the exact blank
-    // source slot. Its one visible rendering happens in the late floating
-    // pass above, fully opaque under the pointer.
-    if (!state.rendering_drag_preview and
-        state.drag_preview_id != null and
-        state.drag_preview_id.? == node.widget.id and
-        widgetKindUsesFloatingDragPreview(node.widget.kind)) return;
-
-    var widget = widgetWithRenderState(widgetWithFrame(node.widget, node.frame), state);
+    const planned: ?paint_walk_policy.Lane = if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy) else null;
+    if (planned) |facts| {
+        if (facts.skip) return;
+    } else {
+        if (node.widget.semantics.hidden) return;
+        if (!state.rendering_drag_preview and state.drag_preview_id != null and
+            state.drag_preview_id.? == node.widget.id and widgetKindUsesFloatingDragPreview(node.widget.kind)) return;
+    }
+    var widget = widgetWithFrame(node.widget, node.frame);
+    if (planned) |facts| {
+        widget.state.focused = facts.focused;
+        widget.state.hovered = facts.hovered;
+        widget.state.pressed = facts.pressed;
+        if (state.rendering_drag_preview and widget.id != 0) widget.id = dragPreviewWidgetId(widget.id);
+    } else widget = widgetWithRenderState(widget, state);
     widget.group_segment = segment;
-    const opacity = widgetOpacity(widget);
+    const opacity = if (planned) |facts| facts.opacity else widgetOpacity(widget);
     if (opacity <= 0) return;
-    const layout_motion = state.layoutMotionOffset(widget.id);
-    const wrap_layout_motion = layout_motion.dx != 0 or layout_motion.dy != 0;
-    const wrap_opacity = opacity < 1;
+    const layout_motion = if (planned) |facts| facts.motion else state.layoutMotionOffset(widget.id);
+    const wrap_layout_motion = if (planned) |facts| facts.wrap_motion else layout_motion.dx != 0 or layout_motion.dy != 0;
+    const wrap_opacity = if (planned) |facts| facts.wrap_opacity else opacity < 1;
     const transform = widgetTransform(widget);
-    const wrap_transform = !affinesEqual(transform, Affine.identity());
-    const inverse_transform = if (wrap_transform) transform.inverse() orelse return error.InvalidTransform else Affine.identity();
+    const wrap_transform = if (planned) |facts| facts.wrap_transform else !affinesEqual(transform, Affine.identity());
+    const inverse_transform = if (planned) |facts| facts.inverse orelse return error.InvalidTransform else if (wrap_transform) inversePaintTransform(transform) orelse return error.InvalidTransform else Affine.identity();
     if (wrap_opacity) try builder.pushOpacity(opacity);
     if (wrap_layout_motion) try builder.transform(Affine.translate(layout_motion.dx, layout_motion.dy));
     if (wrap_transform) try builder.transform(transform);
@@ -786,6 +901,12 @@ fn emitWidgetLayoutNodeContent(
     widget: Widget,
 ) Error!void {
     const paint_widget = widgetWithFrame(widget, pixelSnapGeometryRect(tokens, widget.frame));
+    if (tokens.render_coordination_policy) |policy| {
+        const disclosure: u8 = if (widget.kind == .accordion) @intFromEnum(accordionLayoutDisclosure(layout, node_index, paint_widget, state)) else 0;
+        const recipe = emission.Recipe.init(policy, .retained, paint_widget, tokens, 0, disclosure, isSyntaxCodeParagraph(paint_widget));
+        if (recipe.status != .ready) @panic("inactive retained render recipe");
+        return emitRetainedRecipe(builder, layout, node_index, tokens, state, paint_widget, recipe);
+    }
     try emitWidgetBackdropBlur(builder, paint_widget, tokens);
     switch (paint_widget.kind) {
         .stack, .row, .column => try emitLayoutContainerBackground(builder, paint_widget, tokens),
@@ -889,9 +1010,9 @@ fn emitWidgetLayoutNodeContent(
             }
         },
         .icon => try emitIconWidget(builder, paint_widget, tokens),
-        .image => try emitImageWidget(builder, paint_widget),
+        .image => try emitImageWidget(builder, paint_widget, tokens),
         .media_surface => try emitMediaSurfaceWidget(builder, paint_widget),
-        .terminal => try emitTerminalWidget(builder, paint_widget, tokens, widgetHasLogicalFocus(paint_widget, state)),
+        .terminal => try emitTerminalWidget(builder, paint_widget, tokens, if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy).logical_focus else widgetHasLogicalFocus(paint_widget, state)),
         .avatar => try emitAvatarWidget(builder, paint_widget, tokens),
         .badge => try emitBadgeWidget(builder, paint_widget, tokens),
         .button, .toggle_button, .toggle => try widget_render_controls.emitButtonWidget(builder, paint_widget, tokens),
@@ -927,7 +1048,9 @@ fn emitWidgetLayoutNodeContent(
             // trees, docs scenes) the baked child state is truth — the
             // same override-vs-baked split `widgetWithRenderState` makes.
             var group = paint_widget;
-            if (!group.state.focused) {
+            if (activePaintWalk(layout)) |plan| {
+                group.state.focused = plan.activeLane(node_index, painting_drag_copy).group_focus;
+            } else if (!group.state.focused) {
                 group.state.focused = if (state.focused_id != null or state.focus_visible_id != null)
                     layoutSubtreeHasFocusVisible(layout, node_index, state)
                 else
@@ -940,11 +1063,157 @@ fn emitWidgetLayoutNodeContent(
     try emitWidgetLayoutClippedChildren(builder, layout, node_index, tokens, state, paint_widget);
 }
 
+// These executors provide explicit drawing capabilities. Kind routing,
+// ordered composition, clip selection and scrollbar admission live in the
+// copied program; the independent native reference above remains selectable.
+fn emitPlannedDraw(builder: *Builder, widget: Widget, tokens: DesignTokens, draw: emission.Draw, visible: ?geometry.RectF, logical_focus: bool, group_focus: bool) Error!void {
+    switch (draw) {
+        .container => try emitLayoutContainerBackground(builder, widget, tokens),
+        .data_row => try emitDataRowWidgetWash(builder, widget, tokens),
+        .tabs => try widget_render_surfaces.emitTabsListWidgetChrome(builder, widget, tokens),
+        .alert => try widget_render_surfaces.emitAlertWidgetChrome(builder, widget, tokens),
+        .card => try widget_render_surfaces.emitCardWidgetChrome(builder, widget, tokens),
+        .dialog => try widget_render_surfaces.emitDialogSurfaceWidgetChrome(builder, widget, tokens),
+        .drawer => try widget_render_surfaces.emitDrawerSurfaceWidgetChrome(builder, widget, tokens),
+        .sheet => try widget_render_surfaces.emitSheetSurfaceWidgetChrome(builder, widget, tokens),
+        .accordion => try widget_render_surfaces.emitAccordionWidgetChrome(builder, widget, tokens),
+        .bubble => try widget_render_surfaces.emitBubbleWidgetChrome(builder, widget, tokens),
+        .panel => try widget_render_surfaces.emitPanelWidgetChrome(builder, widget, tokens),
+        .popover => try widget_render_surfaces.emitPopoverWidgetChrome(builder, widget, tokens),
+        .menu => try widget_render_surfaces.emitMenuSurfaceWidgetChrome(builder, widget, tokens),
+        .text => try emitTextWidget(builder, widget, tokens),
+        .code_paragraph => if (visible) |bounds| {
+            try emitVisibleCodeTextSpansWidget(builder, widget, tokens, bounds, .{});
+        },
+        .spans => if (visible) |bounds| {
+            try emitVisibleTextSpansWidget(builder, widget, tokens, bounds);
+        },
+        .icon => try emitIconWidget(builder, widget, tokens),
+        .image => try emitImageWidget(builder, widget, tokens),
+        .media => try emitMediaSurfaceWidget(builder, widget),
+        .terminal => try emitTerminalWidget(builder, widget, tokens, logical_focus),
+        .avatar => try emitAvatarWidget(builder, widget, tokens),
+        .badge => try emitBadgeWidget(builder, widget, tokens),
+        .button => try widget_render_controls.emitButtonWidget(builder, widget, tokens),
+        .icon_button => try widget_render_controls.emitIconButtonWidget(builder, widget, tokens),
+        .select => try widget_render_controls.emitSelectWidget(builder, widget, tokens),
+        .text_field => try widget_render_controls.emitTextFieldWidget(builder, widget, tokens),
+        .code_editor => try emitCodeEditorWidget(builder, widget, tokens),
+        .search => try widget_render_controls.emitSearchFieldWidget(builder, widget, tokens),
+        .tooltip => try widget_render_controls.emitTooltipWidget(builder, widget, tokens),
+        .menu_item => try widget_render_controls.emitMenuItemWidget(builder, widget, tokens),
+        .list_item => try widget_render_controls.emitListItemWidget(builder, widget, tokens),
+        .data_cell => try emitDataCellContent(builder, widget, tokens),
+        .status => try emitStatusBarWidget(builder, widget, tokens),
+        .segmented => try widget_render_controls.emitSegmentedControlWidget(builder, widget, tokens),
+        .checkbox => try widget_render_controls.emitCheckboxWidget(builder, widget, tokens),
+        .radio => try widget_render_controls.emitRadioWidget(builder, widget, tokens),
+        .toggle => try widget_render_controls.emitToggleWidget(builder, widget, tokens),
+        .slider => try widget_render_controls.emitSliderWidget(builder, widget, tokens),
+        .progress => try widget_render_controls.emitProgressWidget(builder, widget, tokens),
+        .separator => try emitSeparatorWidget(builder, widget, tokens),
+        .split_divider => try emitSplitDividerWidget(builder, widget, tokens),
+        .skeleton => try emitSkeletonWidget(builder, widget, tokens),
+        .spinner => try emitSpinnerWidget(builder, widget, tokens),
+        .chart => try emitChartWidget(builder, widget, tokens),
+        .input_group => {
+            var group = widget;
+            group.state.focused = group_focus;
+            try widget_render_controls.emitInputGroupWidget(builder, group, tokens);
+        },
+    }
+}
+
+fn plannedClip(widget: Widget, tokens: DesignTokens, arg: u32) ?Clip {
+    return switch (arg & 3) {
+        0 => null,
+        1 => widgetContentClip(widget, tokens),
+        2 => .{ .id = widgetPartId(widget.id, 1), .rect = widget.frame },
+        3 => .{ .id = widgetPartId(widget.id, 9), .rect = widget.frame },
+        else => unreachable,
+    };
+}
+fn emitCompiledChildren(builder: *Builder, children: []const Widget, tokens: DesignTokens, depth: usize, policy: emission.Policy, stamp: bool) Error!void {
+    const plan = emission.ChildPlan.init(std.heap.page_allocator, policy, children, tokens, stamp) catch @panic("render child allocation failed");
+    defer plan.deinit();
+    for (0..plan.count) |i| {
+        var child = children[plan.index(i)];
+        if (stamp) child.group_segment = plan.segment(i);
+        try emitWidgetDepth(builder, child, tokens, depth + 1);
+    }
+}
+fn emitTreeRecipe(builder: *Builder, widget: Widget, tokens: DesignTokens, depth: usize, recipe: emission.Recipe) Error!void {
+    for (recipe.commands[0..recipe.count]) |command| switch (command.opcode) {
+        .backdrop => try emitWidgetBackdropBlur(builder, widget, tokens),
+        .scrim => try emitModalSurfaceScrim(builder, widget, tokens),
+        .draw => {
+            const draw: emission.Draw = @enumFromInt(command.arg);
+            const visible = if (draw == .spans or draw == .code_paragraph) visibleBoundsInsideClip(tree_visible_bounds, widget.frame) else null;
+            const group_focus = if (draw == .input_group) widget.state.focused or widgetSubtreeHasFocusedState(widget) else widget.state.focused;
+            try emitPlannedDraw(builder, widget, tokens, draw, visible, widget.state.focused, group_focus);
+        },
+        .children => {
+            const child_tokens = if (command.arg & 256 != 0) widget_render_surfaces.bubbleContentTokens(widget, tokens) else tokens;
+            const saved_visible = tree_visible_bounds;
+            defer tree_visible_bounds = saved_visible;
+            const clip = plannedClip(widget, child_tokens, command.arg);
+            if (clip) |value| {
+                tree_visible_bounds = visibleBoundsInsideClip(saved_visible, value.rect);
+                try builder.pushClip(value);
+            }
+            try emitCompiledChildren(builder, widget.children, child_tokens, depth, tokens.render_coordination_policy.?, command.arg & 512 != 0);
+            if (clip != null) try builder.popClip();
+        },
+        .separators => try emitTableRowSeparators(builder, widget.children, tokens),
+        .scrollbars => try widget_render_scroll.emitScrollViewScrollbars(builder, widget.frame, widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .vertical), if (command.arg == 1) widget_render_scroll.widgetScrollAxisMetricsForWidget(widget, tokens, .horizontal) else .{}, tokens, widget.id),
+        .reactions => try widget_render_surfaces.emitBubbleWidgetReactions(builder, widget, tokens),
+    };
+}
+fn emitRetainedRecipe(builder: *Builder, layout: anytype, node_index: usize, tokens: DesignTokens, state: WidgetRenderState, widget: Widget, recipe: emission.Recipe) Error!void {
+    for (recipe.commands[0..recipe.count]) |command| switch (command.opcode) {
+        .backdrop => try emitWidgetBackdropBlur(builder, widget, tokens),
+        .scrim => try emitModalSurfaceScrim(builder, widget, tokens),
+        .draw => {
+            const draw: emission.Draw = @enumFromInt(command.arg);
+            const visible = if (draw == .spans or draw == .code_paragraph) widgetLayoutNodeVisibleBounds(layout, node_index, widget.frame, state) else null;
+            const logical_focus = if (draw == .terminal) if (activePaintWalk(layout)) |plan| plan.activeLane(node_index, painting_drag_copy).logical_focus else widgetHasLogicalFocus(widget, state) else widget.state.focused;
+            var group_focus = widget.state.focused;
+            if (draw == .input_group) {
+                if (activePaintWalk(layout)) |plan| group_focus = plan.activeLane(node_index, painting_drag_copy).group_focus else if (!group_focus) group_focus = if (state.focused_id != null or state.focus_visible_id != null)
+                    layoutSubtreeHasFocusVisible(layout, node_index, state)
+                else
+                    layoutSubtreeHasBakedFocus(layout, node_index);
+            }
+            try emitPlannedDraw(builder, widget, tokens, draw, visible, logical_focus, group_focus);
+        },
+        .children => {
+            const child_tokens = if (command.arg & 256 != 0) widget_render_surfaces.bubbleContentTokens(widget, tokens) else tokens;
+            const clip = plannedClip(widget, child_tokens, command.arg);
+            if (clip) |value| try builder.pushClip(value);
+            try emitWidgetLayoutChildren(builder, layout, node_index, child_tokens, state);
+            if (clip != null) try builder.popClip();
+        },
+        .separators => try emitTableRowSeparatorsLayout(builder, layout, node_index, tokens, widget, command.arg == 1),
+        .scrollbars => try widget_render_scroll.emitScrollViewScrollbars(builder, widget.frame, widgetScrollAxisMetrics(layout, node_index, .vertical), if (command.arg == 1) widgetScrollAxisMetrics(layout, node_index, .horizontal) else .{}, tokens, widget.id),
+        .reactions => try widget_render_surfaces.emitBubbleWidgetReactions(builder, widget, tokens),
+    };
+}
+
 /// Flow and stacking containers have no implicit surface treatment. An
 /// actionable container, however, wears the same neutral hover/pressed
 /// ladder as a list row over its full hit frame; an authored background is
 /// its rest fill. Non-actionable containers paint only that authored fill.
 fn emitLayoutContainerBackground(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.container, widget, tokens, null);
+        plan.run();
+        if (plan.wantsListFill()) {
+            plan.reply(listItemFillColor(widget, tokens, widget.state));
+            plan.run();
+            if (plan.wantsListFill()) @panic("effect plan repeated its appearance query");
+        }
+        return executeEffectPlan(builder, plan);
+    }
     const actions = widget.semantics.actions;
     const actionable = widget.id != 0 and !widget.state.disabled and
         (actions.press or actions.toggle or actions.drag);
@@ -1017,7 +1286,7 @@ fn pixelSnapValueWithScale(value: f32, scale: f32) f32 {
     return @round(value * scale) / scale;
 }
 
-fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
+pub fn pixelSnapGeometryRect(tokens: DesignTokens, rect: geometry.RectF) geometry.RectF {
     if (!tokens.pixel_snap.geometry) return rect;
     const scale = pixelSnapScale(tokens) orelse return rect;
     const normalized = rect.normalized();
@@ -1047,6 +1316,11 @@ fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.Poi
 }
 
 fn emitWidgetBackdropBlur(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.backdrop, widget, tokens, null);
+        plan.run();
+        return executeEffectPlan(builder, plan);
+    }
     const radius = widgetBackdropBlur(widget, tokens);
     if (radius <= 0 or widget.frame.normalized().isEmpty()) return;
     try builder.blur(.{
@@ -1057,6 +1331,11 @@ fn emitWidgetBackdropBlur(builder: *Builder, widget: Widget, tokens: DesignToken
 }
 
 pub fn widgetBackdropBlur(widget: Widget, tokens: DesignTokens) f32 {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.backdrop, widget, tokens, null);
+        plan.run();
+        return plan.scalar();
+    }
     const explicit = nonNegative(widget.backdrop_blur);
     if (explicit > 0) return explicit;
     if (widget.backdrop_blur_token) |token| return nonNegative(tokens.blur.value(token));
@@ -1069,6 +1348,11 @@ pub fn widgetBackdropBlur(widget: Widget, tokens: DesignTokens) f32 {
 /// blur + dim treatment. Anchored surfaces (popover, menus, tooltips)
 /// are NOT modal and never scrim.
 pub fn widgetEmitsModalScrim(widget: Widget, tokens: DesignTokens) bool {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.scrim, widget, tokens, null);
+        plan.run();
+        return plan.flag();
+    }
     if (!widget.scrim) return false;
     return switch (widget.kind) {
         .dialog, .drawer, .sheet => tokens.colors.scrim.a > 0 or nonNegative(tokens.blur.scrim) > 0,
@@ -1088,6 +1372,11 @@ pub fn widgetEmitsModalScrim(widget: Widget, tokens: DesignTokens) bool {
 /// wrappers, and honoring reduced motion costs nothing because nothing
 /// here moves.
 fn emitModalSurfaceScrim(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.scrim, widget, tokens, scrim_viewport);
+        plan.run();
+        return executeEffectPlan(builder, plan);
+    }
     if (!widgetEmitsModalScrim(widget, tokens)) return;
     const viewport = (scrim_viewport orelse widget.frame.normalized());
     if (viewport.isEmpty()) return;
@@ -1108,6 +1397,18 @@ fn emitModalSurfaceScrim(builder: *Builder, widget: Widget, tokens: DesignTokens
     }
 }
 
+/// Draw copied surface effect commands through native capabilities.
+fn executeEffectPlan(builder: *Builder, plan: effect_plans.Plan) Error!void {
+    for (0..plan.count()) |index| {
+        const command = plan.command(index);
+        switch (command.op) {
+            .fill_round => try builder.fillRoundedRect(.{ .id = command.id, .rect = command.rect, .radius = Radius.all(command.radius), .fill = colorFill(command.color) }),
+            .blur => try builder.blur(.{ .id = command.id, .rect = command.rect, .radius = command.radius }),
+            .fill_rect => try builder.fillRect(.{ .id = command.id, .rect = command.rect, .fill = colorFill(command.color) }),
+        }
+    }
+}
+
 fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
     return .{
         .id = widgetPartId(widget.id, 9),
@@ -1117,17 +1418,35 @@ fn widgetContentClip(widget: Widget, tokens: DesignTokens) Clip {
 }
 
 fn widgetContentClipRadius(widget: Widget, tokens: DesignTokens) Radius {
+    if (tokens.control_command_policy != null) {
+        var plan = effect_plans.Plan.init(.clip, widget, tokens, null);
+        plan.run();
+        return switch (plan.clipSource()) {
+            .none => .{},
+            .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
+            .large => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+            .extra_large => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+            .medium => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
+        };
+    }
     if (!widget.layout.clip_content) return .{};
     return switch (widget.kind) {
         // The bubble clips at its own capsule arc so wide content (an
         // image child, a full-bleed row) shears along the chrome's
         // corners instead of the generic surface radius.
         .bubble => widget_render_surfaces.bubbleWidgetRadius(widget, tokens),
-        .alert, .card, .resizable, .panel, .menu_surface, .dropdown_menu => Radius.all(tokens.radius.lg),
+        // Keep a surface's child clip exactly in step with its chrome.
+        // In particular, an explicit `radius="none"` must not round a
+        // full-bleed child after the surface itself has become square.
+        .alert => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .card => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .resizable, .panel, .menu_surface, .dropdown_menu => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
         .accordion => .{},
-        .dialog, .popover => Radius.all(tokens.radius.xl),
-        .drawer, .sheet => Radius.all(tokens.radius.lg),
-        .tooltip => Radius.all(tokens.radius.md),
+        .dialog => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .drawer => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .sheet => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg),
+        .popover => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl),
+        .tooltip => controlRadius(widget, surfaceControlVisualTokens(widget, tokens), tokens.radius.md),
         else => .{},
     };
 }
@@ -1205,6 +1524,7 @@ fn emitAccordionWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, 
 const AccordionLayoutDisclosure = enum { closed, revealing, open };
 
 fn accordionLayoutDisclosure(layout: anytype, node_index: usize, widget: Widget, state: WidgetRenderState) AccordionLayoutDisclosure {
+    if (activePaintWalk(layout)) |plan| return @enumFromInt(@intFromEnum(plan.activeLane(node_index, painting_drag_copy).disclosure));
     if (accordionChildrenVisible(widget)) {
         return if (widget_tree.disclosureSettledOpen(layout, node_index)) .open else .revealing;
     }
@@ -1966,7 +2286,8 @@ fn emitVisibleWrappedEditableCodeLines(
                 .color = .syntax_plain,
             };
             break :blk span_storage[0..1];
-        } else code_model.highlightWithState(
+        } else code_content.highlight(
+            tokens.code_content_policy,
             line_source,
             widget.code_language,
             &span_storage,
@@ -2113,7 +2434,8 @@ fn emitVisibleEditableCodeLines(
     var state: code_model.HighlightState = .{};
     var span_storage: [text_spans_model.max_text_spans_per_paragraph]text_spans_model.TextSpan = undefined;
     if (line_start > 0) {
-        _ = code_model.highlightWithState(
+        _ = code_content.highlight(
+            tokens.code_content_policy,
             widget.text[0..line_start],
             widget.code_language,
             &span_storage,
@@ -2149,7 +2471,8 @@ fn emitVisibleEditableCodeLines(
                 .color = .syntax_plain,
             };
             break :blk span_storage[0..1];
-        } else code_model.highlightWithState(
+        } else code_content.highlight(
+            tokens.code_content_policy,
             line_source,
             widget.code_language,
             &span_storage,
@@ -2684,10 +3007,11 @@ fn emitIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error
 /// widget's foreground color token.
 fn emitVectorIconWidget(builder: *Builder, widget: Widget, tokens: DesignTokens, icon: *const icon_model.Icon) Error!void {
     const color = widgetForegroundColor(widget, tokens, tokens.colors.text);
-    try widget_render_controls.emitVectorIcon(builder, widget.id, 1, widget.frame, color, icon);
+    try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 1, widget.frame, color, icon, tokens);
 }
 
-fn emitImageWidget(builder: *Builder, widget: Widget) Error!void {
+fn emitImageWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledImage(builder, widget, tokens);
     if (widget.image_id == 0 or widget.frame.normalized().isEmpty()) return;
     const clips_image = widget.image_fit == .cover;
     if (clips_image) try builder.pushClip(.{ .id = widgetPartId(widget.id, 2), .rect = widget.frame });
@@ -2968,6 +3292,7 @@ fn emitMediaSurfaceWidget(builder: *Builder, widget: Widget) Error!void {
 }
 
 fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledAvatar(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const radius = componentPillRadius(widget, visual, widget.frame.height * 0.5);
     const background = widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle);
@@ -3030,6 +3355,7 @@ fn emitAvatarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Err
 }
 
 fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledBadge(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const radius = componentPillRadius(widget, visual, widget.frame.height * 0.5);
     const text_size = widget_metrics.widgetBadgeTextSize(widget, tokens);
@@ -3068,11 +3394,11 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
                 icon_extent,
                 icon_extent,
             );
-            try widget_render_controls.emitVectorIcon(builder, widget.id, 4, icon_frame, content_color, resolved);
+            try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, icon_frame, content_color, resolved, tokens);
             return;
         }
         const icon_frame = geometry.RectF.init(widget.frame.x + text_inset, icon_y, icon_extent, icon_extent);
-        try widget_render_controls.emitVectorIcon(builder, widget.id, 4, icon_frame, content_color, resolved);
+        try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, icon_frame, content_color, resolved, tokens);
         const shift = icon_extent + widget_metrics.widgetBadgeIconGap(widget, tokens);
         const text_frame = geometry.RectF.init(
             widget.frame.x + shift,
@@ -3105,6 +3431,7 @@ fn emitBadgeWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Erro
 }
 
 fn emitSeparatorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSeparator(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const normalized = widget.frame.normalized();
     if (normalized.isEmpty()) return;
@@ -3125,6 +3452,7 @@ fn emitSeparatorWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) 
 /// the hit target, so the affordance appears as the pointer reaches
 /// it); keyboard focus draws the standard focus ring around the band.
 fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledDivider(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     const normalized = widget.frame.normalized();
     if (normalized.isEmpty()) return;
@@ -3162,6 +3490,7 @@ fn emitSplitDividerWidget(builder: *Builder, widget: Widget, tokens: DesignToken
 }
 
 fn emitStatusBarWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledStatus(builder, widget, tokens);
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
@@ -3225,6 +3554,7 @@ pub fn skeletonWidgetFillCommandId(id: ObjectId) ObjectId {
 }
 
 fn emitSkeletonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledSkeleton(builder, widget, tokens);
     const visual = componentControlVisualTokens(widget, tokens);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -3238,6 +3568,7 @@ fn emitSkeletonWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) E
 /// edge to edge (the table register's row hover), square-cornered so
 /// adjacent rows tile. Rows at rest draw nothing.
 fn emitDataRowWidgetWash(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledWash(builder, widget, tokens);
     const fill = listItemFillColor(widget, tokens, widget.state);
     if (fill.a <= 0) return;
     try builder.fillRect(.{
@@ -3252,6 +3583,7 @@ fn emitDataRowWidgetWash(builder: *Builder, widget: Widget, tokens: DesignTokens
 /// is a part of the ROW above it (stable command id per row), drawn by
 /// the table so the last row can stay open-edged.
 fn emitTableRowSeparators(builder: *Builder, children: []const Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledTableRows(builder, children, tokens);
     var last_row_index: ?usize = null;
     for (children, 0..) |child, index| {
         if (child.kind == .data_row and !child.semantics.hidden) last_row_index = index;
@@ -3264,6 +3596,7 @@ fn emitTableRowSeparators(builder: *Builder, children: []const Widget, tokens: D
 }
 
 fn emitTableRowSeparatorsLayout(builder: *Builder, layout: anytype, table_index: usize, tokens: DesignTokens, table: Widget, clip_to_table: bool) Error!void {
+    if (tokens.control_command_policy != null) return emitCompiledTableRowsLayout(builder, layout, table_index, tokens, table, clip_to_table);
     if (clip_to_table) try builder.pushClip(.{ .id = widgetPartId(table.id, 9), .rect = table.frame });
     var last_row_index: ?usize = null;
     for (layout.nodes, 0..) |node, index| {
@@ -3329,6 +3662,7 @@ const spinner_arc_stroke_ratio: f32 = 2.0 / 24.0;
 ///   the static pose shows the head-to-tail trail.
 fn emitSpinnerWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
     const visual = componentControlVisualTokens(widget, tokens);
+    if (tokens.control_command_policy != null) return executeIndicatorPlan(builder, widget, tokens, visual);
     const normalized = widget.frame.normalized();
     if (normalized.isEmpty()) return;
     const size = @min(normalized.width, normalized.height);
@@ -3475,6 +3809,25 @@ fn emitSpinnerSegments(builder: *Builder, widget: Widget, tokens: DesignTokens, 
     }
 }
 
+/// Execute the portable spinner plan: resolve appearance when asked, then
+/// draw each copied path through the native builder.
+fn executeIndicatorPlan(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    var plan = indicator_plans.Plan.init(widget, tokens);
+    if (plan.run() == .appearance) {
+        const ink = widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text);
+        const stroke = if (tokens.metrics.spinner_style == .arc) controlStrokeWidth(widget, visual, plan.strokeFallback()) else 0;
+        plan.reply(ink, stroke);
+        if (plan.run() != .done) @panic("indicator plan repeated its appearance query");
+    }
+    for (0..plan.count()) |index| {
+        const elements = try builder.allocPathElements(plan.elementCount(index));
+        for (elements, 0..) |*element, ordinal| element.* = plan.element(index, ordinal);
+        if (plan.stroked(index)) {
+            try builder.strokePath(.{ .id = plan.commandId(index), .elements = elements, .stroke = .{ .fill = colorFill(plan.color(index)), .width = plan.strokeWidth() }, .cap = .round });
+        } else try builder.fillPath(.{ .id = plan.commandId(index), .elements = elements, .fill = colorFill(plan.color(index)) });
+    }
+}
+
 /// The command id of a spinner's accent arc segment — the part slot
 /// `emitSpinnerWidget` draws it under — so the runtime can target the
 /// arc with a looping rotation render animation.
@@ -3486,6 +3839,7 @@ pub fn spinnerWidgetArcCommandId(id: ObjectId) ObjectId {
 /// center of the PAINTED frame (pixel-snapped exactly like emission),
 /// so the sampled rotation never wobbles against the emitted geometry.
 pub fn spinnerWidgetRotationCenter(widget: Widget, tokens: DesignTokens) geometry.PointF {
+    if (tokens.control_command_policy != null) return indicator_plans.anchors(widget, tokens).center;
     const normalized = pixelSnapGeometryRect(tokens, widget.frame).normalized();
     return geometry.PointF.init(normalized.x + normalized.width * 0.5, normalized.y + normalized.height * 0.5);
 }
@@ -3503,6 +3857,7 @@ pub fn spinnerWidgetSegmentCommandId(id: ObjectId, index: usize) ObjectId {
 /// range). Emitter and runtime both resolve the count through here, so
 /// the armed opacity loops always match the emitted commands one-to-one.
 pub fn spinnerWidgetSegmentCount(tokens: DesignTokens) usize {
+    if (tokens.control_command_policy != null) return indicator_plans.anchors(.{ .kind = .spinner }, tokens).count;
     return @intCast(std.math.clamp(tokens.metrics.spinner_segment_count, 3, 15));
 }
 
@@ -3520,6 +3875,11 @@ pub fn spinnerWidgetSegmentCount(tokens: DesignTokens) usize {
 /// (`chartWidgetPlotRect`) only when opted in, so unlabeled charts
 /// render byte-identically to before.
 fn emitChartWidget(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .render, .zero(), .zero(), null);
+        defer plan.deinit();
+        return executeChartPlan(&plan, builder);
+    }
     const data = widget.chart;
     const plot = chartWidgetPlotRect(widget, tokens);
     if (plot.isEmpty() or plot.width <= 0 or plot.height <= 0) return;
@@ -3597,6 +3957,12 @@ const chart_x_label_min_gap: f32 = 12;
 /// cursor snaps exactly where the ink is. Without labels this is the
 /// padded frame, byte-identical to the pre-label contract.
 pub fn chartWidgetPlotRect(widget: Widget, tokens: DesignTokens) geometry.RectF {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .plot, .zero(), .zero(), null);
+        defer plan.deinit();
+        executeChartPlan(&plan, null) catch unreachable;
+        return plan.plot();
+    }
     const data = widget.chart;
     var plot = widget.frame.inset(widget.layout.padding).normalized();
     if (data.x_labels.len > 0) {
@@ -3629,7 +3995,7 @@ fn chartYLabelGutterWidth(data: chart_model.ChartData, tokens: DesignTokens) f32
     var buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
     for (0..lattice.count) |ordinal| {
         const text = chart_model.formatChartValue(&buffer, lattice.value(ordinal), lattice.decimals);
-        widest = @max(widest, measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size));
+        widest = @max(widest, measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, size));
     }
     return @ceil(widest) + chart_axis_label_gap;
 }
@@ -3653,7 +4019,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
             const value = lattice.value(ordinal);
             const formatted = chart_model.formatChartValue(&buffer, value, lattice.decimals);
             const text = try builder.allocChartLabelBytes(formatted);
-            const width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, text, size);
+            const width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, size);
             const line_y = chartMapY(value, domain, plot, 0);
             const top = std.math.clamp(line_y - line_height * 0.5, content.y, @max(content.y, content.maxY() - line_height));
             try builder.drawText(.{
@@ -3675,7 +4041,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         // never touch. Pure over the labels and the plot width.
         var widest: f32 = 0;
         for (data.x_labels) |label| {
-            widest = @max(widest, measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, label, size));
+            widest = @max(widest, measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, label, size));
         }
         const spacing = @max(1, widest + chart_x_label_min_gap);
         const fit: usize = @max(1, @as(usize, @intFromFloat(plot.width / spacing)));
@@ -3685,7 +4051,7 @@ fn emitChartAxisLabels(builder: *Builder, widget: Widget, tokens: DesignTokens, 
         while (ordinal < data.x_labels.len) : (ordinal += @max(1, stride)) {
             const label = data.x_labels[ordinal];
             if (label.len == 0) continue;
-            const width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, label, size);
+            const width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, label, size);
             const center_x = chartSampleX(data, count, ordinal, plot);
             const x = std.math.clamp(center_x - width * 0.5, content.x, @max(content.x, content.maxX() - width));
             try builder.drawText(.{
@@ -3979,6 +4345,13 @@ fn chartDetailRowName(series: chart_model.ChartSeries) []const u8 {
 /// position depends only on the snapped index, never the raw pointer,
 /// so a pointer gliding within one sample repaints nothing.
 pub fn chartWidgetHoverDetail(widget: Widget, tokens: DesignTokens, point: geometry.PointF, bounds: geometry.RectF) ?ChartHoverDetail {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .hover_detail, bounds, point, null);
+        defer plan.deinit();
+        executeChartPlan(&plan, null) catch unreachable;
+        const detail = plan.detail();
+        return if (plan.admitted()) .{ .index = detail.index, .plot = detail.plot, .sample_x = detail.sample_x, .card = detail.card } else null;
+    }
     if (widget.kind != .chart or !widget.chart.hover_details) return null;
     const data = widget.chart;
     const plot = chartWidgetPlotRect(widget, tokens);
@@ -3994,15 +4367,15 @@ pub fn chartWidgetHoverDetail(widget: Widget, tokens: DesignTokens, point: geome
     // index) over one row per series that has this sample.
     var buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
     const title = chartHoverDetailTitle(data, index, &buffer);
-    var content_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, title, size);
+    var content_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, title, size);
     var rows: usize = 0;
     for (data.series) |series| {
         if (index >= series.values.len) continue;
         rows += 1;
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
-        const name_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, chartDetailRowName(series), size);
+        const name_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, chartDetailRowName(series), size);
         const value_text = chart_model.formatChartValue(&value_buffer, series.values[index], decimals);
-        const value_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, value_text, size);
+        const value_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, value_text, size);
         content_width = @max(content_width, chart_detail_swatch + chart_detail_swatch_gap + name_width + chart_detail_column_gap + value_width);
     }
     if (rows == 0) return null;
@@ -4030,6 +4403,12 @@ pub fn chartWidgetHoverDetail(widget: Widget, tokens: DesignTokens, point: geome
 /// The runtime's interaction path uses this to gate repaints: a pointer
 /// gliding within one sample changes nothing, so nothing repaints.
 pub fn chartWidgetHoverIndex(widget: Widget, tokens: DesignTokens, point: geometry.PointF) ?usize {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .hover_index, .zero(), point, null);
+        defer plan.deinit();
+        executeChartPlan(&plan, null) catch unreachable;
+        return if (plan.admitted()) plan.index() else null;
+    }
     if (widget.kind != .chart or !widget.chart.hover_details) return null;
     const plot = chartWidgetPlotRect(widget, tokens);
     if (plot.isEmpty() or plot.width <= 0 or plot.height <= 0) return null;
@@ -4092,6 +4471,11 @@ fn emitWidgetLayoutChartHoverDetails(builder: *Builder, layout: anytype, tokens:
 /// holding the sample's title over swatch/name/value rows. Values
 /// format deterministically into the frame label scratch.
 fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens, detail: ChartHoverDetail) Error!void {
+    if (tokens.control_command_policy != null) {
+        var plan = chart_plans.Plan.init(widget, tokens, .hover_draw, .zero(), .zero(), .{ .index = detail.index, .plot = detail.plot, .sample_x = detail.sample_x, .card = detail.card });
+        defer plan.deinit();
+        return executeChartPlan(&plan, builder);
+    }
     const data = widget.chart;
     const domain = chart_model.chartDomain(data);
     const decimals = chartDetailDecimals(domain);
@@ -4191,7 +4575,7 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
         });
         var value_buffer: [chart_model.max_chart_value_label_bytes]u8 = undefined;
         const value_text = try builder.allocChartLabelBytes(chart_model.formatChartValue(&value_buffer, series.values[detail.index], decimals));
-        const value_width = measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, value_text, size);
+        const value_width = measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, value_text, size);
         try builder.drawText(.{
             .id = chartCommandId(widget.id, chart_hover_row_seed, series_index, 2),
             .font_id = tokens.typography.font_id,
@@ -4202,6 +4586,71 @@ fn emitChartHoverDetail(builder: *Builder, widget: Widget, tokens: DesignTokens,
             .measure = tokens.text_measure,
         });
         row_y += line_height;
+    }
+}
+
+/// Execute explicit font, storage and drawing capabilities. Every returned
+/// continuation is copied before measurement or a nested drawing policy call.
+fn executeChartPlan(plan: *chart_plans.Plan, builder: ?*Builder) Error!void {
+    while (true) {
+        const action = plan.run();
+        const tokens = plan.token;
+        switch (action) {
+            .done => return,
+            .measure => {
+                var text = plan.text();
+                if (plan.allocateText()) {
+                    text = try (builder orelse @panic("chart query requested drawing storage")).allocChartLabelBytes(text);
+                    plan.saved_label = text;
+                }
+                plan.reply(measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, text, plan.scalar(224)));
+            },
+            .fill_rect => try (builder orelse @panic("chart query requested drawing")).fillRect(.{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .fill = colorFill(plan.commandColor()),
+            }),
+            .fill_round => try (builder orelse @panic("chart query requested drawing")).fillRoundedRect(.{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .radius = Radius.all(plan.scalar(232)),
+                .fill = colorFill(plan.commandColor()),
+            }),
+            .text => {
+                const target = builder orelse @panic("chart query requested drawing");
+                const text = if (plan.allocateText()) try target.allocChartLabelBytes(plan.text()) else plan.text();
+                try target.drawText(.{
+                    .id = plan.commandId(),
+                    .font_id = tokens.typography.font_id,
+                    .size = plan.scalar(224),
+                    .origin = plan.commandOrigin(),
+                    .color = plan.commandColor(),
+                    .text = text,
+                    .measure = tokens.text_measure,
+                });
+            },
+            .fill_path, .stroke_path => {
+                const target = builder orelse @panic("chart query requested drawing");
+                const elements = try target.allocPathElements(plan.count());
+                for (elements, 0..) |*element, i| element.* = plan.pathElement(i);
+                if (action == .fill_path) try target.fillPath(.{ .id = plan.commandId(), .elements = elements, .fill = colorFill(plan.commandColor()) }) else try target.strokePath(.{ .id = plan.commandId(), .elements = elements, .stroke = .{ .fill = colorFill(plan.commandColor()), .width = plan.scalar(228) } });
+            },
+            .shadow => try (builder orelse @panic("chart query requested drawing")).shadow(.{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .radius = Radius.all(plan.scalar(232)),
+                .offset = .{ .dx = 0, .dy = tokens.shadow.sm.y },
+                .blur = tokens.shadow.sm.blur,
+                .spread = tokens.shadow.sm.spread,
+                .color = plan.commandColor(),
+            }),
+            .stroke_rect => try (builder orelse @panic("chart query requested drawing")).strokeRect(snapHairlineStrokeRect(tokens, .{
+                .id = plan.commandId(),
+                .rect = plan.commandRect(),
+                .radius = Radius.all(plan.scalar(232)),
+                .stroke = .{ .fill = colorFill(plan.commandColor()), .width = plan.scalar(228) },
+            })),
+        }
     }
 }
 
@@ -4234,6 +4683,7 @@ pub fn textCaretCommandId(kind: WidgetKind, id: ObjectId) ObjectId {
 
 pub fn toggleWidgetKnobTravel(widget: Widget, tokens: DesignTokens) f32 {
     if (!widgetSwitchControlKind(widget.kind)) return 0;
+    if (tokens.control_geometry_policy != null) return @import("control_geometry_policy.zig").controls(widget, tokens, .toggle).scalar;
     // Shares the renderer's track/inset metrics (44x24 track, 2px thumb
     // inset, both size- and density-scaled) so animated travel lands on
     // exactly the painted on/off thumb positions.
@@ -4307,7 +4757,7 @@ fn alignedTextOrigin(frame: geometry.RectF, text: []const u8, size: f32, inset: 
 
 fn iconGlyphSize(widget: Widget, tokens: DesignTokens) f32 {
     const min_size = widgetSizedDensityValue(widget, tokens, 12);
-    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySize(widget, tokens.typography.title_size)));
+    if (widget.frame.height > 0) return @min(@max(min_size, widget.frame.height * widgetIconGlyphScale(widget)), @max(min_size, widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens)));
     return widgetButtonTextSize(widget, tokens);
 }
 
@@ -4360,7 +4810,7 @@ fn widgetWithRenderState(widget: Widget, state: WidgetRenderState) Widget {
 /// Widget emitters derive every command id from the widget id, so remapping
 /// each node before emission keeps the copied subtree valid for display-list
 /// diffing without changing its retained/accessibility identity.
-fn dragPreviewWidgetId(id: ObjectId) ObjectId {
+pub fn dragPreviewWidgetId(id: ObjectId) ObjectId {
     const mapped = std.hash.Wyhash.hash(0x5eed_59a2_d6a6_0001, std.mem.asBytes(&id));
     return if (mapped == 0) 0x5eed_59a2_d6a6_0001 else mapped;
 }
@@ -4391,4 +4841,224 @@ fn accordionContentFrame(widget: Widget, content: geometry.RectF, tokens: Design
 
 fn nonNegative(value: f32) f32 {
     return @max(0, value);
+}
+
+/// Independent native lane used to qualify the copied traversal boundary.
+pub fn referencePaintWalkLane(layout: anytype, index: usize, state: WidgetRenderState) paint_walk_policy.Lane {
+    const node = layout.nodes[index];
+    const widget = widgetWithRenderState(node.widget, state);
+    const opacity = widgetOpacity(widget);
+    const motion = state.layoutMotionOffset(widget.id);
+    const transform = widgetTransform(widget);
+    const wrap_transform = !affinesEqual(transform, Affine.identity());
+    return .{
+        .focused = widget.state.focused,
+        .hovered = widget.state.hovered,
+        .pressed = widget.state.pressed,
+        .logical_focus = widgetHasLogicalFocus(widget, state),
+        .group_focus = if (widget.kind != .input_group or widget.state.focused) widget.state.focused else if (state.focused_id != null or state.focus_visible_id != null) layoutSubtreeHasFocusVisible(layout, index, state) else layoutSubtreeHasBakedFocus(layout, index),
+        .skip = node.widget.semantics.hidden or (!state.rendering_drag_preview and state.drag_preview_id != null and state.drag_preview_id.? == node.widget.id and widgetKindUsesFloatingDragPreview(node.widget.kind)),
+        .wrap_opacity = opacity < 1,
+        .wrap_motion = motion.dx != 0 or motion.dy != 0,
+        .wrap_transform = wrap_transform,
+        .suppress_flow = widget_tree.widgetEscapesAncestorClips(node.widget) or state.layoutMotionEscapesAncestorClips(node.widget.id),
+        .disclosure = if (widget.kind != .accordion) .open else if (accordionChildrenVisible(widget)) if (widget_tree.disclosureSettledOpen(layout, index)) .open else .revealing else if (state.disclosureRevealing(widget.id)) .revealing else .closed,
+        .opacity = opacity,
+        .motion = motion,
+        .inverse = if (wrap_transform) inversePaintTransform(transform) else Affine.identity(),
+    };
+}
+pub fn referencePaintWalkSegment(layout: anytype, index: usize, tokens: DesignTokens) widget_model.WidgetGroupSegment {
+    const parent = layout.nodes[index].parent_index orelse return .none;
+    if (parent >= layout.nodes.len or layout.nodes[parent].widget.kind != .button_group or !buttonGroupStampsSegments(layout.nodes[parent].widget, tokens)) return .none;
+    return layoutButtonGroupSegment(layout, parent, index);
+}
+
+/// GPU transform capability for exceptional scalar words. Keep its native
+/// arithmetic in one call boundary: inline specialization can move a NaN sign
+/// flip across multiplication. Finite transforms retain the ordinary path.
+pub fn inversePaintTransform(transform: Affine) ?Affine {
+    inline for (.{ "a", "b", "c", "d", "tx", "ty" }) |name| {
+        if (!std.math.isFinite(@field(transform, name))) return @call(.never_inline, Affine.inverse, .{transform});
+    }
+    return transform.inverse();
+}
+
+fn leafFacts(widget: Widget) leaves.Facts {
+    return .{ .text = widget.text.len != 0, .image = widget.image_id != 0, .cover = widget.image_fit == .cover, .focused = widget.state.focused, .hovered = widget.state.hovered, .pressed = widget.state.pressed };
+}
+fn leafText(builder: *Builder, widget: Widget, tokens: DesignTokens, id: ObjectId, frame: geometry.RectF, size: f32, inset: f32, color: Color) Error!void {
+    const p = leaves.payload(tokens, .text, frame, .{ size, inset, 0, 0, 0, 0, 0, 0 }, 0, .nearest);
+    try builder.drawText(.{ .id = id, .font_id = tokens.typography.font_id, .size = size, .origin = p.points[0], .color = color, .text = widget.text, .text_layout = .{ .max_width = p.max_width, .line_height = p.line_height, .alignment = .center, .wrap = .none, .measure = tokens.text_measure } });
+}
+fn leafImage(builder: *Builder, widget: Widget, tokens: DesignTokens, id: ObjectId, radius: Radius) Error!void {
+    const p = leaves.payload(tokens, .raw, widget.frame, @splat(0), if (widget.image_src != null) 4 else 0, widget.image_sampling);
+    try builder.drawImage(.{ .id = id, .image_id = widget.image_id, .src = widget.image_src, .dst = p.rects[0], .opacity = widget.image_opacity, .fit = widget.image_fit, .sampling = p.sampling, .radius = radius });
+}
+fn emitCompiledImage(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const program = leaves.Program.init(tokens, .image, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .clip => try builder.pushClip(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame) }),
+        .image => try leafImage(builder, widget, tokens, command.id, .{}),
+        .unclip => try builder.popClip(),
+        else => @panic("unsupported image drawing capability"),
+    };
+}
+fn emitCompiledAvatar(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const radius = componentPillRadius(widget, visual, leaves.pillFallback(tokens, widget.frame));
+    const background = widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle);
+    const program = leaves.Program.init(tokens, .avatar, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => try builder.fillRoundedRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .fill = colorFill(background) }),
+        .clip => try builder.pushClip(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius }),
+        .image => try leafImage(builder, widget, tokens, command.id, radius),
+        .unclip => try builder.popClip(),
+        .text => {
+            const size = widgetLabelTextSize(widget, tokens);
+            try leafText(builder, widget, tokens, command.id, widget.frame, size, 0, widgetForegroundColor(widget, tokens, visual.foreground orelse tokens.colors.text_muted));
+        },
+        .stroke => try builder.strokeRect(snapHairlineStrokeRect(tokens, .{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .stroke = .{ .fill = widgetBorderFill(widget, visual.border orelse tokens.colors.border), .width = controlStrokeWidth(widget, visual, tokens.stroke.hairline) } })),
+        else => @panic("unsupported avatar drawing capability"),
+    };
+}
+fn emitCompiledBadge(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const radius = componentPillRadius(widget, visual, leaves.pillFallback(tokens, widget.frame));
+    const size = widget_metrics.widgetBadgeTextSize(widget, tokens);
+    const inset = widgetControlInset(widget, tokens, tokens.spacing.sm);
+    const program = leaves.Program.init(tokens, .badge, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => try builder.fillRoundedRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .fill = colorFill(badgeBackgroundColor(widget, tokens, visual)) }),
+        .border_query => {
+            const width = badgeStrokeWidth(widget, tokens, visual);
+            const border = leaves.Program.init(tokens, .badge, 1, widget, .{ .scalar = width });
+            for (border.commands[0..border.count]) |stroke| {
+                if (stroke.opcode != .stroke) @panic("unsupported badge border capability");
+                try builder.strokeRect(snapHairlineStrokeRect(tokens, .{ .id = stroke.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = radius, .stroke = .{ .fill = colorFill(badgeBorderColor(widget, tokens, visual)), .width = width } }));
+            }
+        },
+        .content_query => {
+            const ink = badgeTextColor(widget, tokens, visual);
+            const icon = icon_model.resolveOrMissing(widget.icon);
+            var facts = leafFacts(widget);
+            facts.icon = icon != null;
+            const content = leaves.Program.init(tokens, .badge, 2, widget, facts);
+            var text_frame = widget.frame;
+            for (content.commands[0..content.count]) |item| switch (item.opcode) {
+                .icon => {
+                    const extent = widget_metrics.widgetBadgeIconExtent(widget, tokens);
+                    // The gap is queried after drawing the icon, exactly as in
+                    // the independent reference, including buffer failures.
+                    const geometry_ = leaves.payload(tokens, .badge_content, widget.frame, .{ extent, inset, 0, 0, 0, 0, 0, 0 }, @intFromBool(facts.text), .nearest);
+                    try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, item.slot, geometry_.rects[0], ink, icon.?, tokens);
+                    if (facts.text) {
+                        const gap = widget_metrics.widgetBadgeIconGap(widget, tokens);
+                        text_frame = leaves.payload(tokens, .badge_content, widget.frame, .{ extent, inset, gap, 0, 0, 0, 0, 0 }, 1, .nearest).rects[1];
+                    }
+                },
+                .text => try leafText(builder, widget, tokens, item.id, text_frame, size, inset, ink),
+                else => @panic("unsupported badge content capability"),
+            };
+        },
+        else => @panic("unsupported badge drawing capability"),
+    };
+}
+fn emitCompiledSeparator(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const program = leaves.Program.init(tokens, .separator, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .fill) @panic("unsupported separator drawing capability");
+        const width = controlStrokeWidth(widget, visual, tokens.stroke.hairline);
+        const p = leaves.payload(tokens, .separator, widget.frame, .{ width, 0, 0, 0, 0, 0, 0, 0 }, 0, .nearest);
+        try builder.fillRect(.{ .id = command.id, .rect = p.rects[0], .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse visual.border orelse tokens.colors.border)) });
+    }
+}
+fn emitCompiledDivider(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const program = leaves.Program.init(tokens, .divider, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill, .accent_fill => {
+            const width = controlStrokeWidth(widget, visual, tokens.stroke.hairline);
+            const active = command.opcode == .accent_fill;
+            const p = leaves.payload(tokens, .divider, widget.frame, .{ width, 0, 0, 0, 0, 0, 0, 0 }, if (active) 2 else 0, .nearest);
+            const ink = if (active) widgetAccentColor(widget, tokens.colors.accent) else widgetBorderColor(widget, visual.border orelse tokens.colors.border);
+            try builder.fillRect(.{ .id = command.id, .rect = p.rects[0], .fill = colorFill(ink) });
+        },
+        .focus => {
+            const p = leaves.payload(tokens, .divider, widget.frame, @splat(0), 0, .nearest);
+            try builder.strokeRect(snapHairlineStrokeRect(tokens, .{ .id = command.id, .rect = p.rects[1], .radius = Radius.all(tokens.radius.sm), .stroke = .{ .fill = widget_render_style.widgetFocusRingFill(widget, tokens), .width = tokens.stroke.focus } }));
+        },
+        else => @panic("unsupported divider drawing capability"),
+    };
+}
+fn emitCompiledStatus(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const program = leaves.Program.init(tokens, .status, 0, widget, leafFacts(widget));
+    // Normalization is a payload operation rather than host-side arithmetic.
+    const normalized = leaves.payload(tokens, .divider, widget.frame, @splat(0), 0, .nearest).rects[1];
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .fill => try builder.fillRect(.{ .id = command.id, .rect = normalized, .fill = colorFill(widgetBackgroundColor(widget, tokens.colors.surface)) }),
+        .status_separator => {
+            const p = leaves.payload(tokens, .status_separator, widget.frame, .{ tokens.stroke.hairline, widget.style.stroke_width orelse tokens.stroke.hairline, 0, 0, 0, 0, 0, 0 }, 0, .nearest);
+            try builder.fillRect(.{ .id = command.id, .rect = p.rects[0], .fill = widgetBorderFill(widget, tokens.colors.border) });
+        },
+        .status_text => {
+            const size = widgetBodyTextSize(widget, tokens);
+            const pad = widget.layout.padding;
+            const p = leaves.payload(tokens, .status_text, widget.frame, .{ size, pad.top, pad.right, pad.bottom, pad.left, 0, 0, 0 }, 0, .nearest);
+            if (p.admitted) try builder.drawText(.{ .id = command.id, .font_id = tokens.typography.font_id, .size = size, .origin = p.points[0], .color = widgetForegroundColor(widget, tokens, tokens.colors.text), .text = widget.text, .text_layout = .{ .max_width = p.max_width, .line_height = p.line_height, .wrap = .none, .alignment = widget.text_alignment, .overflow = widget.text_overflow, .measure = tokens.text_measure } });
+        },
+        else => @panic("unsupported status drawing capability"),
+    };
+}
+fn emitCompiledSkeleton(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const visual = componentControlVisualTokens(widget, tokens);
+    const program = leaves.Program.init(tokens, .skeleton, 0, widget, leafFacts(widget));
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .fill) @panic("unsupported skeleton drawing capability");
+        try builder.fillRoundedRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .radius = controlRadius(widget, visual, tokens.radius.md), .fill = colorFill(widgetBackgroundColor(widget, visual.background orelse tokens.colors.surface_subtle)) });
+    }
+}
+fn emitCompiledWash(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    const fill = listItemFillColor(widget, tokens, widget.state);
+    const program = leaves.Program.init(tokens, .wash, 0, widget, .{ .scalar = fill.a });
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .fill) @panic("unsupported row wash capability");
+        try builder.fillRect(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, widget.frame), .fill = colorFill(fill) });
+    }
+}
+fn emitCompiledRowLine(builder: *Builder, id: ObjectId, frame: geometry.RectF, tokens: DesignTokens) Error!void {
+    const widget: Widget = .{ .id = id, .kind = .data_row, .frame = frame };
+    const program = leaves.Program.init(tokens, .row_line, 0, widget, .{});
+    for (program.commands[0..program.count]) |command| {
+        if (command.opcode != .line) @panic("unsupported row line capability");
+        const p = leaves.payload(tokens, .row_line, frame, @splat(0), 0, .nearest);
+        try builder.drawLine(.{ .id = command.id, .from = p.points[0], .to = p.points[1], .stroke = .{ .fill = colorFill(tokens.colors.border), .width = tokens.stroke.hairline } });
+    }
+}
+fn emitCompiledTableRows(builder: *Builder, children: []const Widget, tokens: DesignTokens) Error!void {
+    const plan = leaves.RowPlan.init(std.heap.page_allocator, tokens, children, null) catch @panic("leaf row plan allocation failed");
+    defer plan.deinit();
+    for (0..plan.count) |i| {
+        const child = children[plan.index(i)];
+        try emitCompiledRowLine(builder, child.id, child.frame, tokens);
+    }
+}
+fn emitCompiledTableRowsLayout(builder: *Builder, layout: anytype, index: usize, tokens: DesignTokens, table: Widget, clip: bool) Error!void {
+    var facts: leaves.Facts = .{};
+    facts.cover = clip;
+    const program = leaves.Program.init(tokens, .table, 0, table, facts);
+    for (program.commands[0..program.count]) |command| switch (command.opcode) {
+        .clip => try builder.pushClip(.{ .id = command.id, .rect = leaves.copiedFrame(tokens, table.frame) }),
+        .rows => {
+            const plan = leaves.RowPlan.init(std.heap.page_allocator, tokens, layout.nodes, index) catch @panic("leaf row plan allocation failed");
+            defer plan.deinit();
+            for (0..plan.count) |i| {
+                const node = layout.nodes[plan.index(i)];
+                try emitCompiledRowLine(builder, node.widget.id, node.frame, tokens);
+            }
+        },
+        .unclip => try builder.popClip(),
+        else => @panic("unsupported table drawing capability"),
+    };
 }

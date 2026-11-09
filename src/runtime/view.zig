@@ -144,6 +144,16 @@ pub const CanvasWidgetClaimedKeyGrace = enum {
 /// the one focused now, so the grace and its owner pin die at blur (the
 /// target-less twin too, when the blurred view owns it).
 pub fn clearImeGraceOnViewBlur(runtime: anytype, view: *RuntimeView) void {
+    const composition = @import("input_composition_policy.zig");
+    const input = platform.GpuSurfaceInputEvent{ .window_id = view.window_id, .label = view.label, .kind = .ime_cancel_composition };
+    if (composition.plan(view.canvas_widget_surface_scope_policy, .retire, input, composition.observations(runtime, view))) |program| {
+        composition.installWidget(view, program);
+        view.canvas_widget_tab_input_focus_entry_held = false;
+        view.canvas_widget_terminal_paste_v_held = false;
+        if (program.has(512)) runtime.targetless_ime_preedit_len = 0;
+        if (program.has(2048)) runtime.targetless_ime_commit_grace = false;
+        return;
+    }
     // The owner pin clears UNCONDITIONALLY, not only when a grace is
     // armed: an active (never-cancelled) composition's owner surviving
     // a view blur would redirect post-refocus input to the stale editor
@@ -446,6 +456,15 @@ pub const RuntimeView = struct {
     widget_layout_nodes: [max_canvas_widget_nodes_per_view]canvas.WidgetLayoutNode = undefined,
     widget_layout_node_count: usize = 0,
     widget_layout_root_bounds: ?geometry.RectF = null,
+    /// Optional compiled traversal for this retained view. A function
+    /// pointer survives window compaction without retaining arena data.
+    canvas_widget_tab_focus_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable anchored-surface ownership over native retained facts.
+    canvas_widget_surface_scope_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable focus return; native keeps IDs and focus effects.
+    canvas_widget_focus_return_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Portable tooltip ownership and binding survival over retained facts.
+    canvas_widget_tooltip_policy: ?*const fn ([]const u8, []u8) usize = null,
     widget_semantics_nodes: [max_canvas_widget_semantics_per_view]canvas.WidgetSemanticsNode = undefined,
     widget_semantics_node_count: usize = 0,
     /// Fingerprint of the last accessibility tree actually handed to the
@@ -922,6 +941,7 @@ pub const RuntimeView = struct {
     pub const copyCanvasFrameRenderOverrides = CanvasFrameMethods.copyCanvasFrameRenderOverrides;
     pub const compactCanvasFrameRenderOverrideNoops = CanvasFrameMethods.compactCanvasFrameRenderOverrideNoops;
     pub const sampleCanvasRenderAnimations = CanvasFrameMethods.sampleCanvasRenderAnimations;
+    pub const sampleCanvasRenderAnimationsWithPolicy = CanvasFrameMethods.sampleCanvasRenderAnimationsWithPolicy;
     pub const pruneCompletedNoopCanvasRenderAnimations = CanvasFrameMethods.pruneCompletedNoopCanvasRenderAnimations;
     pub const canvasRenderAnimationsActive = CanvasFrameMethods.canvasRenderAnimationsActive;
     pub const copyCanvasFramePipelineCache = CanvasFrameMethods.copyCanvasFramePipelineCache;
@@ -931,9 +951,12 @@ pub const RuntimeView = struct {
     pub const recordCanvasFramePresentationComplete = CanvasFrameMethods.recordCanvasFramePresentationComplete;
     pub const refreshCanvasFrameBudgetStatus = CanvasFrameMethods.refreshCanvasFrameBudgetStatus;
     pub const copyPresentedCanvasSummary = CanvasFrameMethods.copyPresentedCanvasSummary;
+    pub const copyPresentedCanvasSummaryWithPolicy = CanvasFrameMethods.copyPresentedCanvasSummaryWithPolicy;
     pub const copyPresentedCanvasSummaryFrom = CanvasFrameMethods.copyPresentedCanvasSummaryFrom;
     pub const currentCanvasHasUnkeyed = CanvasFrameMethods.currentCanvasHasUnkeyed;
+    pub const currentCanvasHasUnkeyedWithPolicy = CanvasFrameMethods.currentCanvasHasUnkeyedWithPolicy;
     pub const diffPresentedCanvasSummary = CanvasFrameMethods.diffPresentedCanvasSummary;
+    pub const diffPresentedCanvasSummaryWithPolicy = CanvasFrameMethods.diffPresentedCanvasSummaryWithPolicy;
     pub const currentCanvasCommandById = CanvasFrameMethods.currentCanvasCommandById;
     pub const presentedCanvasCommandById = CanvasFrameMethods.presentedCanvasCommandById;
     pub const copyCanvasCommand = CanvasFrameMethods.copyCanvasCommand;
@@ -971,6 +994,8 @@ pub const RuntimeView = struct {
     pub const canvasWidgetOwnedMenuSurfaceIndex = CanvasWidgetTreeMethods.canvasWidgetOwnedMenuSurfaceIndex;
     pub const canvasWidgetOwnedTooltipIndex = CanvasWidgetTreeMethods.canvasWidgetOwnedTooltipIndex;
     pub const canvasWidgetOwnedTooltipIdForOwner = CanvasWidgetTreeMethods.canvasWidgetOwnedTooltipIdForOwner;
+    pub const CanvasTooltipIntentCause = CanvasWidgetTreeMethods.CanvasTooltipIntentCause;
+    pub const applyCompiledCanvasTooltipIntent = CanvasWidgetTreeMethods.applyCompiledCanvasTooltipIntent;
     pub const applyCanvasTooltipVisibility = CanvasWidgetTreeMethods.applyCanvasTooltipVisibility;
     pub const applyCanvasTooltipVisibilityToNodes = CanvasWidgetTreeMethods.applyCanvasTooltipVisibilityToNodes;
     pub const applyCanvasTooltipVisibilityToNodesForShownId = CanvasWidgetTreeMethods.applyCanvasTooltipVisibilityToNodesForShownId;

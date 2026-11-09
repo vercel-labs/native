@@ -25,6 +25,9 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@/.source/*": [
+        "./.source/*"
       ]
     }
   },
@@ -46,6 +49,7 @@
     "node_modules",
     ".next",
     ".next-gate",
-    ".next-agent"
+    ".next-agent",
+    ".next-check"
   ]
 }

@@ -3273,3 +3273,1985 @@ test "a spawn_failed transport end routes the event arm with the reason" {
     try std.testing.expectEqual(mini_core.PtyReason.spawn_failed, Host.model().pty_reason);
     try std.testing.expectEqual(@as(i64, -1), Host.model().pty_code);
 }
+
+// A deliberately redirected policy proves the host consumes the copied plan
+// rather than repeating slot, interval, route or retirement decisions itself.
+const timer_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var retire: bool = false;
+    var calls: usize = 0;
+
+    pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
+        calls += 1;
+        if (request[0] == 7) {
+            const size = @import("callback_policy_test_reference.zig").plan(request, output);
+            output[1] = 10;
+            std.mem.writeInt(u64, output[8..16], @bitCast(@as(f64, 1234.5)), .little);
+            return size;
+        }
+        if (request[0] == 1) {
+            std.mem.writeInt(u16, output[0..2], if (retire) std.mem.readInt(u16, request[1..3], .little) else 0, .little);
+            return 2;
+        }
+        @memset(output[0..14], 0);
+        output[0] = 5;
+        output[1] = 1;
+        output[2] = 10; // Route to stamped instead of tick.
+        std.mem.writeInt(u64, output[4..12], @bitCast(@as(f64, 7)), .little);
+        std.mem.writeInt(u16, output[12..14], 1 << 5, .little);
+        return 14;
+    }
+};
+
+test "timer host applies policy slot interval route and retirement without resetting the cycle" {
+    const Probe = ts_core_host.TsCoreHost(timer_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    timer_policy_probe_core.calls = 0;
+    timer_policy_probe_core.retire = false;
+    Probe.init(fx);
+    Probe.dispatch(fx, .toggle);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    const redirected = ts_core_host.timer_key_base + 5;
+    try std.testing.expectEqual(redirected, fx.pendingTimerAt(0).?.key);
+    try std.testing.expectEqual(@as(u64, 7), fx.pendingTimerAt(0).?.interval_ms);
+    Probe.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try fx.fireTimer(redirected);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().ticks);
+    try std.testing.expectEqual(@as(f64, 1234.5), Probe.model().stamp_ms);
+    Probe.dispatch(fx, .toggle);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    timer_policy_probe_core.retire = true;
+    Probe.dispatch(fx, .speed);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expect(timer_policy_probe_core.calls >= 6);
+}
+
+// Redirecting every delay operation distinguishes policy ownership from a
+// native fallback: a nonmatching cancellation can be suppressed or routed,
+// and fire routing can differ from the stored declaration tag.
+const delay_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub fn update(model: *const Model, msg: Msg) mini_core.UpdateResult {
+        if (msg == .open_save_sink) return .{ .model = model, .cmd = mini_core.cmdWriteFileStream("boom", 12, 8, "notes.bin") };
+        return mini_core.update(model, msg);
+    }
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var lookup_enabled: bool = false;
+    var calls = [_]usize{0} ** 8;
+
+    pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        switch (request[0]) {
+            2 => {
+                const value_at = 2 + @as(usize, request[1]);
+                output[0] = if (request[value_at + 9] == 1) 255 else 6;
+                output[1] = 10;
+                std.mem.writeInt(u64, output[2..10], @bitCast(@as(f64, 17)), .little);
+                return 10;
+            },
+            3 => {
+                var at: usize = 2 + @as(usize, request[1]);
+                for (0..16) |slot| {
+                    if (slot == 6) output[0] = if (lookup_enabled and request[at] == 1) 6 else 255;
+                    at += 3 + @as(usize, request[at + 1]);
+                }
+                return 1;
+            },
+            7 => {
+                const size = @import("callback_policy_test_reference.zig").plan(request, output);
+                output[1] = 9;
+                return size;
+            },
+            4 => {
+                output[0] = request[1];
+                output[1] = 9; // tick instead of the stored stamped arm.
+                return 2;
+            },
+            else => unreachable,
+        }
+    }
+};
+
+test "delay host consumes compiled allocation lookup fire route and retirement" {
+    const Probe = ts_core_host.TsCoreHost(delay_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    delay_policy_probe_core.lookup_enabled = false;
+    delay_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .arm_delay);
+    const redirected = ts_core_host.delay_key_base + 6;
+    try std.testing.expectEqual(redirected, fx.pendingTimerAt(0).?.key);
+    try std.testing.expectEqual(@as(u64, 17), fx.pendingTimerAt(0).?.interval_ms);
+    Probe.dispatch(fx, .halt);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    delay_policy_probe_core.lookup_enabled = true;
+    Probe.dispatch(fx, .halt);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    Probe.dispatch(fx, .arm_delay);
+    Probe.dispatch(fx, .arm_delay);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try fx.fireTimer(redirected);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().ticks);
+    try std.testing.expectEqual(@as(f64, -1), Probe.model().stamp_ms);
+    Probe.dispatch(fx, .halt); // The fire retired the bridge slot too.
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 3), delay_policy_probe_core.calls[2]);
+    try std.testing.expectEqual(@as(usize, 3), delay_policy_probe_core.calls[3]);
+    try std.testing.expectEqual(@as(usize, 1), delay_policy_probe_core.calls[7]);
+}
+
+test "delay admission supplies file stream occupancy and preserves cancellation priority" {
+    const Probe = ts_core_host.TsCoreHost(delay_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    delay_policy_probe_core.lookup_enabled = true;
+    delay_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.dispatch(fx, .arm_delay);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 1), delay_policy_probe_core.calls[2]);
+    Probe.dispatch(fx, .halt);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    try std.testing.expectEqualStrings("cancelled", Probe.model().last_err);
+    // Conversely a live delay occupies its key for file-stream admission.
+    Probe.dispatch(fx, .arm_delay);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(i64, 2), Probe.model().errs);
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    Probe.dispatch(fx, .halt);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+}
+
+const db_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var retain: bool = true;
+    var rearm: bool = true;
+    var lookup: bool = true;
+    var calls = [_]usize{0} ** 3;
+
+    pub fn nativeDbPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 37), 255);
+        if (request[0] == 1) {
+            std.mem.writeInt(u16, output[0..2], if (retain) 1 << 6 else 0, .little);
+            return 2;
+        }
+        const table = if (request[0] == 0) 2 + @as(usize, request[1]) else 15 + @as(usize, request[3]);
+        var at: usize = table;
+        for (0..6) |_| at += 11 + @as(usize, request[at + 2]);
+        const used = request[at] == 1;
+        if (request[0] == 0) {
+            output[0] = if (lookup and used) 6 else 255;
+            return 1;
+        }
+        output[0] = 6;
+        output[1] = @intFromBool(!used or rearm);
+        output[2] = @intFromBool(used and rearm);
+        output[3] = 8; // Route pages to failed instead of loaded.
+        output[4] = 12;
+        output[5] = 7; // Route errors to loaded instead of failed.
+        std.mem.writeInt(u16, output[6..8], 1 << 6, .little);
+        return 8;
+    }
+};
+
+test "database host consumes policy slot routes restart retention and copied cycle facts" {
+    const Probe = ts_core_host.TsCoreHost(db_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    db_policy_probe_core.retain = true;
+    db_policy_probe_core.rearm = true;
+    db_policy_probe_core.lookup = true;
+    db_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .toggle); // Native timer and database policies share a cycle.
+    Probe.dispatch(fx, .arm_db_live);
+    const redirected = ts_core_host.db_key_base + 6;
+    try std.testing.expectEqual(redirected, fx.pendingDbAt(0).?.key);
+    try std.testing.expectEqualStrings("SELECT id FROM item", fx.pendingDbAt(0).?.sql);
+    const generation = fx.pendingDbAt(0).?.generation;
+    db_policy_probe_core.rearm = false;
+    Probe.dispatch(fx, .arm_db_live);
+    try std.testing.expectEqual(generation, fx.pendingDbAt(0).?.generation);
+    db_policy_probe_core.rearm = true;
+    Probe.dispatch(fx, .arm_db_live);
+    try std.testing.expect(generation != fx.pendingDbAt(0).?.generation);
+    try fx.feedDbResult(redirected, .page, .ok, &(@as([8]u8, @splat(0))));
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    try std.testing.expectEqual(@as(usize, 8), Probe.model().last_err.len);
+    try fx.feedDbResult(redirected, .done, .busy, "");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("busy", Probe.model().status);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    Probe.dispatch(fx, .stop_db_live_with_cancel);
+    // The policy deliberately retains an absent declaration; Cmd.cancel is
+    // still unable to strand a live query. Only retention retires that slot.
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    db_policy_probe_core.retain = false;
+    Probe.dispatch(fx, .stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingDbCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try std.testing.expect(db_policy_probe_core.calls[1] >= 6);
+    try std.testing.expect(db_policy_probe_core.calls[2] >= 3);
+}
+
+test "database key lookup is owned by the compiled policy and preserves live command refusal" {
+    const Probe = ts_core_host.TsCoreHost(db_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    db_policy_probe_core.retain = true;
+    db_policy_probe_core.rearm = false;
+    db_policy_probe_core.lookup = true;
+    db_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .arm_db_live);
+    Probe.dispatch(fx, .query_over_db_live);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    db_policy_probe_core.lookup = false;
+    Probe.dispatch(fx, .query_over_db_live);
+    try std.testing.expectEqual(@as(usize, 2), fx.pendingDbCount());
+    try fx.feedDbResult(ts_core_host.db_key_base, .done, .ok, "");
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    try std.testing.expect(db_policy_probe_core.calls[0] >= 2);
+}
+
+// Redirected slots and routes demonstrate that the native consumer applies the
+// policy's copied decisions rather than independently recomputing them.
+// Independent native behavior for unrelated forced-policy probes. New probes
+// override these bytes explicitly to prove that the consumer applies the plan.
+fn referenceCoordinationPolicy(request: []const u8, output: []u8) usize {
+    if (request[0] == 17) return @import("callback_policy_test_reference.zig").plan(request, output);
+    if (request[0] >= 15) return @import("file_policy_test_reference.zig").plan(request, output);
+    if (request[0] >= 11) return @import("request_policy_test_reference.zig").plan(request, output);
+    if (request[0] == 10) {
+        output[0] = if (request[1] == 1) request[4] else request[3];
+        return 1;
+    }
+    if (request[0] == 8) {
+        @memset(output[0..24], 0);
+        output[1] = request[2];
+        output[2] = request[3] & 7;
+        const value: f64 = @bitCast(std.mem.readInt(u64, request[8..16], .little));
+        if (request[1] == 0) {
+            output[0] = 1;
+            std.mem.writeInt(u64, output[16..24], if (value >= 1 and value <= 9007199254740992.0) @intFromFloat(value) else 0, .little);
+        } else {
+            const surface: u64 = if (value >= 1 and value < 9007199254740992.0 and @floor(value) == value) @intFromFloat(value) else 0;
+            std.mem.writeInt(u64, output[8..16], surface, .little);
+            const path_len = std.mem.readInt(u32, request[16..20], .little);
+            const url_len = std.mem.readInt(u32, request[20..24], .little);
+            // These probes only issue short paths. Full size/URI parity is
+            // compared directly against videoLoadRejected in the compiled suite.
+            const path = "fixture.mp4"[0..@min(path_len, "fixture.mp4".len)];
+            output[0] = @intFromBool(url_len <= 1024 and path_len <= 1024 and !Fx.videoLoadRejected(.{
+                .key = 0,
+                .surface = surface,
+                .path = path,
+                .url = request[24..],
+            }));
+        }
+        return 24;
+    }
+    std.debug.assert(request[0] == 9);
+    @memset(output[0..16], 0);
+    output[0] = 255;
+    output[1] = request[5];
+    const cols: f64 = @bitCast(std.mem.readInt(u64, request[16..24], .little));
+    const rows: f64 = @bitCast(std.mem.readInt(u64, request[24..32], .little));
+    std.mem.writeInt(u16, output[4..6], if (cols >= 1 and cols <= 65535 and @floor(cols) == cols) @intFromFloat(cols) else 0, .little);
+    std.mem.writeInt(u16, output[6..8], if (rows >= 1 and rows <= 65535 and @floor(rows) == rows) @intFromFloat(rows) else 0, .little);
+    const name = request[32..][0..request[6]];
+    var at: usize = 32 + name.len;
+    var positions: [4]usize = undefined;
+    var live: ?usize = null;
+    var bound: ?usize = null;
+    var free: ?usize = null;
+    var binding: ?usize = null;
+    for (0..4) |slot| {
+        positions[slot] = at;
+        const used = request[at] == 1;
+        const retained = request[at + 1] == 1;
+        const equal = std.mem.eql(u8, name, request[at + 4 ..][0..request[at + 3]]);
+        if (name.len > 0 and equal and used and live == null) live = slot;
+        if (equal and retained and !used and bound == null) bound = slot;
+        if (!used and !retained and free == null) free = slot;
+        if (name.len > 0 and equal and (used or retained) and binding == null) binding = slot;
+        at += 4 + request[at + 3];
+    }
+    const selected: ?usize = switch (request[1]) {
+        0 => if (name.len > 0 and (live != null or request[3] == 1)) null else bound orelse free,
+        1 => live,
+        2 => if (std.mem.readInt(u16, output[4..6], .little) != 0 and std.mem.readInt(u16, output[6..8], .little) != 0) live else null,
+        3 => binding,
+        4 => @intCast(std.mem.readInt(u64, request[8..16], .little) - ts_core_host.pty_key_base),
+        else => unreachable,
+    };
+    if (selected) |slot| {
+        output[0] = @intCast(slot);
+        if (request[1] != 0) output[1] = request[positions[slot] + 2];
+        output[2] = @intFromBool(request[1] == 4 and request[4] == 1);
+        output[3] = @intFromBool(request[1] == 3);
+        std.mem.writeInt(u64, output[8..16], ts_core_host.pty_key_base + slot, .little);
+    }
+    return 16;
+}
+
+const effect_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var lookup_enabled: bool = true;
+    var calls = [_]usize{0} ** 18;
+
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        if (request[0] == 17) {
+            const size = referenceCoordinationPolicy(request, output);
+            output[1] = 7; // Redirect the complete buffered route to loaded.
+            if (output[2] != 0 and output[2] != 5) output[2] = 2;
+            return size;
+        }
+        if (request[0] >= 8) {
+            const size = referenceCoordinationPolicy(request, output);
+            if (request[0] == 12 and !lookup_enabled and output[0] == 1) {
+                output[0] = 255;
+                output[1] = 255;
+            }
+            return size;
+        }
+        if (request[0] == 2) {
+            const at = 5 + @as(usize, request[1]) * 4;
+            output[0] = request[1];
+            output[1] = 7; // The loaded bytes arm, including an error outcome.
+            output[2] = if (request[at + 1] == 1) 0 else if (request[3] == 1) 2 else 5;
+            output[3] = if (output[2] == 5) 1 else 0;
+            return 4;
+        }
+        const length: usize = request[1];
+        var at: usize = 2 + length + @as(usize, if (request[0] == 0) 3 else 0);
+        var matching: u8 = 255;
+        var used: [16]bool = undefined;
+        for (0..16) |slot| {
+            used[slot] = request[at] == 1;
+            const key_len: usize = request[at + 2];
+            if (used[slot] and request[at + 1] == 0 and matching == 255 and std.mem.eql(u8, request[at + 3 ..][0..key_len], request[2..][0..length])) matching = @intCast(slot);
+            at += 5 + key_len;
+        }
+        if (request[0] == 1) {
+            output[0] = if (lookup_enabled) matching else 255;
+            return 1;
+        }
+        const blocked = request[2 + length] == 1;
+        var free: u8 = 255;
+        for (0..16) |offset| {
+            const slot = (offset + 5) % 16;
+            if (!used[slot]) {
+                free = @intCast(slot);
+                break;
+            }
+        }
+        @memcpy(output[0..5], &@as([5]u8, .{ @intFromBool(!blocked), if (blocked) 255 else free, if (blocked or length == 0) 255 else matching, 8, 7 }));
+        return 5;
+    }
+};
+
+test "named effect host applies policy admission slots cancellation routes and dropped terminal retirement" {
+    const Probe = ts_core_host.TsCoreHost(effect_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    effect_policy_probe_core.lookup_enabled = false;
+    effect_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .load_file);
+    const first = ts_core_host.effect_key_base + 5;
+    try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
+    Probe.dispatch(fx, .drop_load); // Compiled cancellation deliberately suppresses it.
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    effect_policy_probe_core.lookup_enabled = true;
+    Probe.dispatch(fx, .drop_load);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().errs);
+    Probe.dispatch(fx, .load_file); // Dropped completion retired the owned slot.
+    try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
+    try fx.feedFileResult(first, .io_failed, "");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("io_failed", Probe.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().errs);
+    Probe.dispatch(fx, .dup_load);
+    try std.testing.expectEqual(ts_core_host.effect_key_base + 6, fx.pendingFileAt(0).?.key);
+    Probe.drain(fx); // First terminal is swallowed; replacement still owns slot 6.
+    try std.testing.expectEqualStrings("io_failed", Probe.model().status);
+    try fx.feedFileResult(ts_core_host.effect_key_base + 6, .ok, "replacement");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("replacement", Probe.model().status);
+    Probe.dispatch(fx, .load_file);
+    try std.testing.expectEqual(first, fx.pendingFileAt(0).?.key);
+    try std.testing.expect(effect_policy_probe_core.calls[0] >= 5);
+    try std.testing.expectEqual(@as(usize, 1), effect_policy_probe_core.calls[1]);
+    try std.testing.expectEqual(@as(usize, 2), effect_policy_probe_core.calls[12]);
+    try std.testing.expectEqual(@as(usize, 4), effect_policy_probe_core.calls[17]);
+}
+
+test "named effect admission consumes native file stream occupancy and keeps cancel priority" {
+    const Probe = ts_core_host.TsCoreHost(effect_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    effect_policy_probe_core.lookup_enabled = true;
+    effect_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.dispatch(fx, .save_file);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    // The policy redirects the refusal's error route to loaded.
+    try std.testing.expectEqualStrings("rejected", Probe.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().errs);
+    Probe.dispatch(fx, .drop_save);
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("cancelled", Probe.model().last_err);
+    try std.testing.expectEqual(@as(usize, 1), effect_policy_probe_core.calls[0]);
+}
+
+const stream_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var admit = false;
+    var lookup = false;
+    var calls = [_]usize{0} ** 5;
+    pub fn nativeStreamPolicy(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 37), 255);
+        switch (request[0]) {
+            0 => {
+                output[0] = if (admit) 6 else 255;
+                return 1;
+            },
+            1 => {
+                output[0] = if (lookup) 6 else 255;
+                return 1;
+            },
+            2 => {
+                output[0..5].* = .{ 8, 0, 1, 0, 0 }; // failed instead of got_line
+                return 5;
+            },
+            3 => {
+                output[0..5].* = .{ 26, 1, 0, 1, 0 }; // number even for collect
+                return 5;
+            },
+            4 => {
+                output[0..5].* = .{ 8, 0, 1, 1, 1 }; // truncated even for success
+                return 5;
+            },
+            else => unreachable,
+        }
+    }
+};
+
+test "stream host consumes compiled admission lookup line payload route and retirement" {
+    const Probe = ts_core_host.TsCoreHost(stream_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    stream_policy_probe_core.admit = false;
+    stream_policy_probe_core.lookup = false;
+    stream_policy_probe_core.calls = @splat(0);
+    Probe.init(fx);
+    Probe.dispatch(fx, .run_lines);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    stream_policy_probe_core.admit = true;
+    Probe.dispatch(fx, .run_lines);
+    const key = ts_core_host.spawn_key_base + 6;
+    try std.testing.expectEqual(key, fx.pendingSpawnAt(0).?.key);
+    try fx.feedLine(key, "redirected line");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("redirected line", Probe.model().last_err);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().line_count);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    Probe.dispatch(fx, .stop_job); // Lookup refuses the real stored key.
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    stream_policy_probe_core.lookup = true;
+    Probe.dispatch(fx, .stop_job);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingSpawnCount());
+    Probe.dispatch(fx, .run_collect); // Retired slot may be reused.
+    try fx.feedOutput(key, "collected bytes");
+    try fx.feedExit(key, 7);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 7), Probe.model().exit_code);
+    try std.testing.expectEqualStrings("", Probe.model().output);
+    Probe.dispatch(fx, .stream_get);
+    try std.testing.expectEqual(key, fx.pendingFetchAt(0).?.key);
+    try fx.feedResponse(key, 200, "");
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("truncated", Probe.model().last_err);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expectEqualSlices(usize, &.{ 4, 2, 1, 2, 1 }, &stream_policy_probe_core.calls);
+}
+
+// Observe cross-family facts while redirecting native slots through both callbacks.
+const mixed_effect_stream_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    pub const nativeEffectPolicy = effect_policy_probe_core.nativeEffectPolicy;
+    var buffered_blocked: [2]bool = undefined;
+    var admissions: usize = 0;
+    pub fn nativeStreamPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] == 1) {
+            stream_policy_probe_core.calls[1] += 1;
+            var at: usize = 2 + @as(usize, request[1]);
+            for (0..6) |_| at += 2 + @as(usize, request[at + 1]);
+            output[0] = if (request[at] == 1) 6 else 255;
+            return 1;
+        }
+        if (request[0] == 4) {
+            stream_policy_probe_core.calls[4] += 1;
+            output[0..5].* = .{ 8, 0, 0, 1, 0 }; // Cancelled response follows the error route.
+            return 5;
+        }
+        if (request[0] == 0) {
+            buffered_blocked[admissions] = request[3] == 1;
+            admissions += 1;
+            output[0] = if (request[2] == 1 or request[3] == 1) 255 else 6;
+            return 1;
+        }
+        return stream_policy_probe_core.nativeStreamPolicy(request, output);
+    }
+};
+
+test "compiled named and streaming policies share key occupancy and preserve cancellation priority" {
+    const Probe = ts_core_host.TsCoreHost(mixed_effect_stream_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    effect_policy_probe_core.lookup_enabled = true;
+    effect_policy_probe_core.calls = @splat(0);
+    stream_policy_probe_core.lookup = true;
+    stream_policy_probe_core.calls = @splat(0);
+    mixed_effect_stream_probe_core.admissions = 0;
+    Probe.init(fx);
+    Probe.dispatch(fx, .get);
+    try std.testing.expectEqual(ts_core_host.effect_key_base + 5, fx.pendingFetchAt(0).?.key);
+    Probe.dispatch(fx, .stream_over_get);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    Probe.dispatch(fx, .drop_get);
+    Probe.drain(fx); // Cancelled buffered predecessor retires silently.
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expectEqual(@as(i64, 1), Probe.model().errs);
+    Probe.dispatch(fx, .stream_get);
+    try std.testing.expectEqual(ts_core_host.spawn_key_base + 6, fx.pendingFetchAt(0).?.key);
+    Probe.dispatch(fx, .get_over_stream);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFetchCount());
+    try std.testing.expectEqual(@as(i64, 2), Probe.model().errs);
+    Probe.dispatch(fx, .stop_stream);
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFetchCount());
+    try std.testing.expectEqualStrings("cancelled", Probe.model().last_err);
+    try std.testing.expectEqualSlices(bool, &.{ true, false }, &mixed_effect_stream_probe_core.buffered_blocked);
+    try std.testing.expect(effect_policy_probe_core.calls[0] == 1 and effect_policy_probe_core.calls[1] >= 3 and effect_policy_probe_core.calls[17] == 1);
+    try std.testing.expect(stream_policy_probe_core.calls[1] > 0 and stream_policy_probe_core.calls[4] == 1);
+}
+
+// Complete capability records deliberately shuffle enum declaration order.
+const complete_core = struct {
+    pub const rt = mini_core.rt;
+    const Line = struct { key: []const u8, line: []const u8, truncated: bool, droppedBefore: f64 };
+    const Exit = struct { key: []const u8, code: f64, reason: enum { rejected, signaled, cancelled, spawn_failed, exited }, droppedLines: f64, output: []const u8, outputTruncated: bool, stderrTail: []const u8, stderrTruncated: bool };
+    const Clipboard = struct { key: []const u8, operation: enum { write, read }, outcome: enum { cancelled, rejected, failed, ok }, text: []const u8, droppedBefore: f64 };
+    const Snapshot = struct { key: []const u8, active: bool, surface: f64, playing: bool, buffering: bool, completed: bool, looping: bool, muted: bool, source: enum { stream, local }, positionMs: f64, durationMs: f64, width: f64, height: f64, volume: f64 };
+    pub const Model = struct { line: ?Line = null, exit: ?Exit = null, clipboard: ?Clipboard = null, snapshot: ?Snapshot = null, replies: usize = 0 };
+    pub const Msg = union(enum) {
+        commands: []const u8,
+        line: Line,
+        exit: Exit,
+        clipboard: Clipboard,
+        snapshot: Snapshot,
+        video: struct { state: enum { failed, rejected, completed, loaded, position }, positionMs: f64, durationMs: f64, playing: bool, buffering: bool, width: f64, height: f64 },
+    };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var model: Model = .{};
+    var owned: [6][8192]u8 = undefined;
+    fn bytes(value: []const u8, slot: usize) []const u8 {
+        std.debug.assert(value.len <= owned[slot].len);
+        @memcpy(owned[slot][0..value.len], value);
+        return owned[slot][0..value.len];
+    }
+    pub fn initialModel() *const Model {
+        model = .{};
+        return &model;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model {
+        return value;
+    }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .line => |line| {
+                model.line = line;
+                model.line.?.key = bytes(line.key, 0);
+                model.line.?.line = bytes(line.line, 1);
+            },
+            .exit => |exit| {
+                model.exit = exit;
+                model.exit.?.key = bytes(exit.key, 2);
+                model.exit.?.output = bytes(exit.output, 3);
+                model.exit.?.stderrTail = bytes(exit.stderrTail, 4);
+            },
+            .clipboard => |clip| {
+                model.clipboard = clip;
+                model.clipboard.?.key = bytes(clip.key, 5);
+            },
+            .snapshot => |snapshot| {
+                model.snapshot = snapshot;
+                model.snapshot.?.key = bytes(snapshot.key, 5);
+            },
+            .video => {},
+        }
+        model.replies += 1;
+        return .{ .model = &model, .cmd = "" };
+    }
+    fn pair(a: []const u8, b: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, a.len + b.len);
+        @memcpy(out[0..a.len], a);
+        @memcpy(out[a.len..], b);
+        return out;
+    }
+    fn spawn(key: []const u8, collect: bool) []const u8 {
+        const argv = [_][]const u8{ "worker", "argument" };
+        const out = rt.frameAlloc(u8, 6 + key.len + 4 + 6 + 4 + 8 + 4);
+        out[0] = 0x33;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        var at = 2 + key.len;
+        out[at] = 1;
+        out[at + 1] = 2;
+        out[at + 2] = @intFromBool(collect);
+        out[at + 3] = argv.len;
+        at += 4;
+        for (argv) |arg| at = mini_core.writeLongBytes(out, at, arg);
+        _ = mini_core.writeLongBytes(out, at, "");
+        return out;
+    }
+    fn clipboard(key: []const u8) []const u8 {
+        const out = rt.frameAlloc(u8, 7 + key.len + 4);
+        out[0] = 0x34;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = 3;
+        _ = mini_core.writeLongBytes(out, 3 + key.len, "copy");
+        return out;
+    }
+};
+const CompleteHost = ts_core_host.TsCoreHost(complete_core);
+var complete_channel: CompleteHost.Fx = undefined;
+fn freshComplete() *CompleteHost.Fx {
+    complete_channel = CompleteHost.Fx.init(std.testing.allocator);
+    complete_channel.executor = .fake;
+    CompleteHost.init(&complete_channel);
+    return &complete_channel;
+}
+test "complete subprocess records retain all metadata, rejection keys, collected output and stderr" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("lines", false) });
+    const key = fx.pendingSpawnAt(0).?.key;
+    try fx.feedLineWithMetadata(key, "Caf\xc3\xa9\x00tail", true, 17);
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualDeep(complete_core.Line{ .key = "lines", .line = "Caf\xc3\xa9\x00tail", .truncated = true, .droppedBefore = 17 }, CompleteHost.model().line.?);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("lines", false) });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("lines", CompleteHost.model().exit.?.key);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().exit.?.reason);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingSpawnCount());
+    try fx.feedExitWithMetadata(key, -9, .signaled, .{ .dropped_lines = 31, .output_truncated = true, .stderr_truncated = true });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualDeep(complete_core.Exit{ .key = "lines", .code = -9, .reason = .signaled, .droppedLines = 31, .output = "", .outputTruncated = true, .stderrTail = "", .stderrTruncated = true }, CompleteHost.model().exit.?);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("lines", true) });
+    const collected = fx.pendingSpawnAt(0).?.key;
+    try fx.feedOutput(collected, "output\x00owned");
+    try fx.feedStderr(collected, "stderr\xc3\xa9");
+    try fx.feedExit(collected, 7);
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("output\x00owned", CompleteHost.model().exit.?.output);
+    try std.testing.expectEqualStrings("stderr\xc3\xa9", CompleteHost.model().exit.?.stderrTail);
+    try std.testing.expectEqual(@as(f64, 7), CompleteHost.model().exit.?.code);
+    // Starting a new cycle resets transient command bytes; retained result
+    // bytes must still match the entire prior completion.
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("next", false) });
+    try std.testing.expectEqualStrings("output\x00owned", CompleteHost.model().exit.?.output);
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdCancel("next") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.cancelled, CompleteHost.model().exit.?.reason);
+}
+test "routed clipboard duplicates reject without stealing the original completion and cancel retires the key" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    const key = fx.pendingClipboardAt(0).?.key;
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualDeep(complete_core.Clipboard{ .key = "copy-key", .operation = .write, .outcome = .rejected, .text = "", .droppedBefore = 0 }, CompleteHost.model().clipboard.?);
+    try std.testing.expectEqual(key, fx.pendingClipboardAt(0).?.key);
+    try fx.feedClipboardResult(key, .ok, "ignored");
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.ok, CompleteHost.model().clipboard.?.outcome);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdCancel("copy-key") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.cancelled, CompleteHost.model().clipboard.?.outcome);
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("copy-key") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
+}
+test "playback snapshot captures command-order state and restart retains ownership without commandeering a foreign load" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoLoad("owned", 5, 0x7601, "clip.mp4", "", 7) });
+    try fx.feedVideoEvent(.loaded, 1234, 60000, true, true, 1920, 1080);
+    CompleteHost.drain(fx);
+    const pause = mini_core.cmdVideoCtl("owned", 1, 0);
+    const command = complete_core.pair(&.{ 0x35, 4 }, pause);
+    CompleteHost.dispatch(fx, .{ .commands = command });
+    const snapshot = CompleteHost.model().snapshot.?;
+    try std.testing.expectEqualDeep(complete_core.Snapshot{ .key = "owned", .active = true, .surface = 0x7601, .playing = true, .buffering = true, .completed = false, .looping = true, .muted = true, .source = .local, .positionMs = 1234, .durationMs = 60000, .width = 1920, .height = 1080, .volume = 1 }, snapshot);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    try fx.feedVideoEvent(.completed, 60000, 60000, false, false, 1920, 1080);
+    CompleteHost.drain(fx);
+    const token = fx.videoOwnerToken();
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoCtl("owned", 7, 0) });
+    try std.testing.expect(fx.videoOwnerToken() != token);
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoCtl("owned", 1, 0) });
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    fx.loadVideo(.{ .key = 77, .surface = 99, .path = "foreign.mp4" });
+    const foreign = fx.videoSnapshot();
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdVideoCtl("owned", 7, 0) });
+    try std.testing.expectEqualDeep(foreign, fx.videoSnapshot());
+    CompleteHost.dispatch(fx, .{ .commands = &.{ 0x35, 4 } });
+    try std.testing.expectEqualStrings("", CompleteHost.model().snapshot.?.key);
+}
+
+test "routed clipboard keys reject cross-family collisions and every full-capacity terminal returns its original key" {
+    const fx = freshComplete();
+    defer fx.deinit();
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("shared", false) });
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("shared") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().clipboard.?.outcome);
+    try std.testing.expectEqualStrings("shared", CompleteHost.model().clipboard.?.key);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+    CompleteHost.dispatch(fx, .{ .commands = mini_core.cmdCancel("shared") });
+    CompleteHost.drain(fx);
+    for (0..effects_mod.max_effects) |i| {
+        var key: [16]u8 = undefined;
+        CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard(try std.fmt.bufPrint(&key, "copy-{d}", .{i})) });
+    }
+    try std.testing.expectEqual(effects_mod.max_effects, fx.pendingClipboardCount());
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("overflow") });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("overflow", CompleteHost.model().clipboard.?.key);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().clipboard.?.outcome);
+    // A new stream cannot steal a pending clipboard key either.
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.spawn("copy-0", false) });
+    CompleteHost.drain(fx);
+    try std.testing.expectEqualStrings("copy-0", CompleteHost.model().exit.?.key);
+    try std.testing.expectEqual(.rejected, CompleteHost.model().exit.?.reason);
+    for (0..effects_mod.max_effects) |_| {
+        const request = fx.pendingClipboardAt(0).?;
+        try fx.feedClipboardResult(request.key, .ok, "");
+        CompleteHost.drain(fx);
+    }
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingClipboardCount());
+    CompleteHost.dispatch(fx, .{ .commands = complete_core.clipboard("reused") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingClipboardCount());
+}
+
+const complete_storage_core = struct {
+    pub const rt = mini_core.rt;
+    const File = struct {
+        key: []const u8,
+        operation: effects_mod.EffectFileOp,
+        event: enum { done, chunk, terminal },
+        outcome: effects_mod.EffectFileOutcome,
+        bytes: []const u8,
+        totalBytes: []const u8,
+        mtimeMs: []const u8,
+        exists: bool,
+        droppedBefore: f64,
+    };
+    const Timer = struct { key: []const u8, timestampNs: []const u8, outcome: enum { rejected, fired } };
+    pub const Model = struct { file: ?File = null, timer: ?Timer = null, stamp: []const u8 = "", replies: usize = 0 };
+    pub const Msg = union(enum) { commands: []const u8, file: File, timer: Timer, stamp: []const u8 };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var model: Model = .{};
+    var owned: [7][8192]u8 = undefined;
+    fn bytes(value: []const u8, slot: usize) []const u8 {
+        std.debug.assert(value.len <= owned[slot].len);
+        @memcpy(owned[slot][0..value.len], value);
+        return owned[slot][0..value.len];
+    }
+    pub fn initialModel() *const Model {
+        model = .{};
+        return &model;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model {
+        return value;
+    }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .file => |file| {
+                model.file = file;
+                model.file.?.key = bytes(file.key, 0);
+                model.file.?.bytes = bytes(file.bytes, 1);
+                model.file.?.totalBytes = bytes(file.totalBytes, 2);
+                model.file.?.mtimeMs = bytes(file.mtimeMs, 3);
+            },
+            .timer => |timer| {
+                model.timer = timer;
+                model.timer.?.key = bytes(timer.key, 4);
+                model.timer.?.timestampNs = bytes(timer.timestampNs, 5);
+            },
+            .stamp => |stamp| model.stamp = bytes(stamp, 6),
+        }
+        model.replies += 1;
+        return .{ .model = &model, .cmd = "" };
+    }
+    fn fileCommand(key: []const u8, write: bool) []const u8 {
+        const path = "notes.bin";
+        const content = "body\x00\xff";
+        const out = rt.frameAlloc(u8, 3 + key.len + 4 + path.len + (if (write) @as(usize, 4 + content.len) else 0));
+        out[0] = if (write) 0x38 else 0x37;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = @intFromEnum(std.meta.Tag(Msg).file);
+        const at = mini_core.writeLongBytes(out, 3 + key.len, path);
+        if (write) _ = mini_core.writeLongBytes(out, at, content);
+        return out;
+    }
+    fn timerCommand(key: []const u8, repeating: bool, ms: f64) []const u8 {
+        const out = rt.frameAlloc(u8, 12 + key.len);
+        out[0] = 0x3A;
+        out[1] = @intCast(key.len);
+        @memcpy(out[2..][0..key.len], key);
+        out[2 + key.len] = @intFromBool(repeating);
+        std.mem.writeInt(u64, out[3 + key.len ..][0..8], @bitCast(ms), .little);
+        out[11 + key.len] = @intFromEnum(std.meta.Tag(Msg).timer);
+        return out;
+    }
+};
+const StorageHost = ts_core_host.TsCoreHost(complete_storage_core);
+
+test "complete storage records own binary keys bodies and exact signed clock and file metadata" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    var clock: runtime_clock.TestClock = .{};
+    fx.clock = clock.clock();
+    StorageHost.init(&fx);
+    for ([_]i64{ std.math.minInt(i64), -9007199254740993, -1, 0, 9007199254740993, std.math.maxInt(i64) }) |value| {
+        clock.setWallMs(value);
+        StorageHost.dispatch(&fx, .{ .commands = &.{ 0x39, @intFromEnum(std.meta.Tag(complete_storage_core.Msg).stamp) } });
+        var buffer: [21]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{d}", .{value}), StorageHost.model().stamp);
+        complete_storage_core.rt.frameReset();
+        @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "{d}", .{value}), StorageHost.model().stamp);
+    }
+    inline for (std.meta.tags(effects_mod.EffectFileOutcome)) |outcome| {
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("file\x00\xff", false) });
+        const pending = fx.pendingFileAt(0).?;
+        try std.testing.expectEqualStrings("notes.bin", pending.path);
+        try fx.feedFileResultDetailed(.{ .key = pending.key, .op = .read, .outcome = outcome, .bytes = "body\x00\xff", .total = std.math.maxInt(u64), .mtime_ms = std.math.minInt(i64), .exists = true });
+        StorageHost.drain(&fx);
+        try std.testing.expectEqualDeep(complete_storage_core.File{
+            .key = "file\x00\xff",
+            .operation = .read,
+            .event = .terminal,
+            .outcome = outcome,
+            .bytes = if (outcome == .ok or outcome == .truncated) "body\x00\xff" else "",
+            .totalBytes = "18446744073709551615",
+            .mtimeMs = "-9223372036854775808",
+            .exists = true,
+            .droppedBefore = 0,
+        }, StorageHost.model().file.?);
+        complete_storage_core.rt.frameReset();
+        @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+        try std.testing.expectEqualStrings("file\x00\xff", StorageHost.model().file.?.key);
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("write", true) });
+        const write = fx.pendingFileAt(0).?;
+        try std.testing.expectEqualStrings("body\x00\xff", write.bytes);
+        try fx.feedFileResult(write.key, outcome, "ignored");
+        StorageHost.drain(&fx);
+        try std.testing.expectEqual(outcome, StorageHost.model().file.?.outcome);
+        try std.testing.expectEqual(.write, StorageHost.model().file.?.operation);
+        try std.testing.expectEqualStrings("", StorageHost.model().file.?.bytes);
+    }
+}
+
+test "complete storage admission preserves key ownership cancellation replacement and capacity" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StorageHost.init(&fx);
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("timer", true, 30) });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("timer", false) });
+    complete_storage_core.rt.frameReset();
+    @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(.rejected, StorageHost.model().file.?.outcome);
+    try std.testing.expectEqualStrings("timer", StorageHost.model().file.?.key);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("replace", false) });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("replace", true) });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    try std.testing.expectEqual(.write, fx.pendingFileAt(0).?.op);
+    const count = StorageHost.model().replies;
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("replace") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(count, StorageHost.model().replies);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    for (0..16) |i| {
+        var key: [16]u8 = undefined;
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand(try std.fmt.bufPrint(&key, "file{d}", .{i}), false) });
+    }
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("overflow", true) });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualDeep(complete_storage_core.File{ .key = "overflow", .operation = .write, .event = .terminal, .outcome = .rejected, .bytes = "", .totalBytes = "0", .mtimeMs = "0", .exists = false, .droppedBefore = 0 }, StorageHost.model().file.?);
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingFileCount());
+}
+
+test "complete timers preserve modes rearming explicit refusals cross-family ownership and cancellation" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StorageHost.init(&fx);
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("pulse", true, 30.5) });
+    const key = fx.pendingTimerAt(0).?.key;
+    try std.testing.expectEqual(@as(u64, 31), fx.pendingTimerAt(0).?.interval_ms);
+    for (0..2) |_| {
+        try fx.fireTimer(key);
+        StorageHost.drain(&fx);
+        try std.testing.expectEqualDeep(complete_storage_core.Timer{ .key = "pulse", .timestampNs = "0", .outcome = .fired }, StorageHost.model().timer.?);
+        try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    }
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("pulse", false, 40) });
+    try std.testing.expectEqual(key, fx.pendingTimerAt(0).?.key);
+    try fx.fireTimer(key);
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("file", false) });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("file", false, 40) });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(.rejected, StorageHost.model().timer.?.outcome);
+    try std.testing.expectEqualStrings("file", StorageHost.model().timer.?.key);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    for ([_]f64{ 0, -1, std.math.nan(f64), std.math.inf(f64), 31536000001 }) |invalid| {
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("invalid", false, invalid) });
+        StorageHost.drain(&fx);
+        try std.testing.expectEqual(.rejected, StorageHost.model().timer.?.outcome);
+        try std.testing.expectEqualStrings("invalid", StorageHost.model().timer.?.key);
+    }
+    for (0..16) |i| {
+        var name: [16]u8 = undefined;
+        StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand(try std.fmt.bufPrint(&name, "timer{d}", .{i}), true, 1) });
+    }
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("overflow", false, 1) });
+    complete_storage_core.rt.frameReset();
+    @memset(complete_storage_core.rt.frameAlloc(u8, 512), 0xA5);
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(.rejected, StorageHost.model().timer.?.outcome);
+    try std.testing.expectEqualStrings("overflow", StorageHost.model().timer.?.key);
+    try std.testing.expectEqual(@as(usize, 16), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("timer0") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 15), fx.pendingTimerCount());
+}
+
+test "complete storage owners refuse later basic commands and retain same-family replacement" {
+    var fx = StorageHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    StorageHost.init(&fx);
+    const reply_tag = @intFromEnum(std.meta.Tag(complete_storage_core.Msg).stamp);
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.timerCommand("owned", true, 50) });
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdReadFile("owned", reply_tag, reply_tag, "notes.bin") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", StorageHost.model().stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingFileCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", reply_tag, reply_tag, "body") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", StorageHost.model().stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 100, reply_tag) });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(u32, 100), fx.pendingTimerAt(0).?.interval_ms);
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    StorageHost.dispatch(&fx, .{ .commands = complete_storage_core.fileCommand("owned", false) });
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 20, reply_tag) });
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", reply_tag, reply_tag, "body") });
+    StorageHost.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", StorageHost.model().stamp);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingTimerCount());
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingFileCount());
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    StorageHost.drain(&fx);
+    StorageHost.dispatch(&fx, .{ .commands = mini_core.cmdDelay("owned", 20, reply_tag) });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingTimerCount());
+}
+
+// Deliberately redirect portable decisions. OS requests and owned table facts
+// expose whether the consumer obeys the returned plan instead of recomputing it.
+const media_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var lookup = true;
+    var retire = true;
+    var transport = true;
+    var calls = [_]usize{0} ** 8;
+    var owned_after_restart = false;
+
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 8) return referenceCoordinationPolicy(request, output);
+        calls[request[0]] += 1;
+        if (request[0] == 1) {
+            output[0] = 255;
+            return 1;
+        }
+        // Allocate without resetting the borrowed command or event arena.
+        @memset(rt.frameAlloc(u8, 37), 255);
+        if (request[0] == 6) {
+            @memset(output[0..12], 0);
+            output[0] = 255;
+            if (!transport) return 12;
+            const video = request[1] == 1;
+            const verb = request[4];
+            output[0] = if (verb == 2) 2 else if (video and verb == 1) 7 else if (video and verb == 0) 1 else 3;
+            output[1] = @intFromBool(verb == 2 and retire);
+            output[2] = @intFromBool(output[0] == 7);
+            std.mem.writeInt(u64, output[4..12], @bitCast(@as(f64, 321)), .little);
+            if (video and verb == 0) owned_after_restart = request[3] == 1;
+            return 12;
+        }
+        @memset(output[0..28], 0);
+        output[0] = 1;
+        output[1] = 255;
+        output[2] = if (request[1] == 1) 53 else request[4];
+        output[4] = request[5];
+        output[5] = request[6];
+        std.mem.writeInt(u32, output[24..28], std.mem.readInt(u32, request[16..20], .little), .little);
+        const numeric = request[0] == 3 or request[0] == 4;
+        const key: u64 = if (numeric) @as(u64, @intFromFloat(@as(f64, @bitCast(std.mem.readInt(u64, request[8..16], .little))))) else std.mem.readInt(u64, request[8..16], .little);
+        std.mem.writeInt(u64, output[8..16], key, .little);
+        std.mem.writeInt(u64, output[16..24], 987, .little);
+        var matching: u8 = 255;
+        for (0..request[2]) |slot| {
+            const at = 28 + slot * 16;
+            if (request[at] == 1 and std.mem.readInt(u64, request[at + 1 ..][0..8], .little) == key) matching = @intCast(slot);
+        }
+        if (request[0] == 3) {
+            if (matching == 255) {
+                for (0..request[2]) |offset| {
+                    const slot = (offset + 5) % request[2];
+                    if (request[28 + slot * 16] == 0) {
+                        output[1] = @intCast(slot);
+                        break;
+                    }
+                }
+            }
+        } else if (lookup) output[1] = matching;
+        if (request[0] == 5 and matching != 255) {
+            const at = 28 + @as(usize, matching) * 16;
+            // An accepted channel route was selected by the admission policy.
+            std.debug.assert(request[1] != 1 or request[at + 9] == 53);
+            output[2] = if (request[1] == 1) 47 else request[at + 9];
+            output[3] = @intFromBool(retire and (request[1] == 0 or request[1] == 1 and request[3] != 0 or request[1] == 2 and request[3] >= 3));
+            if (request[1] == 2) {
+                output[4] = 1;
+                output[5] = 2;
+                std.mem.writeInt(u32, output[24..28], 24_000, .little);
+            }
+        }
+        return 28;
+    }
+};
+
+const MediaProbe = ts_core_host.TsCoreHost(media_policy_probe_core);
+fn freshMediaProbe() *MediaProbe.Fx {
+    media_policy_probe_core.lookup = true;
+    media_policy_probe_core.retire = true;
+    media_policy_probe_core.transport = true;
+    media_policy_probe_core.owned_after_restart = false;
+    media_policy_probe_core.calls = @splat(0);
+    const fx = freshChannel();
+    MediaProbe.init(fx);
+    return fx;
+}
+
+test "media host consumes redirected admission slots routes sizes lookup and terminal retirement" {
+    const fx = freshMediaProbe();
+    defer fx.deinit();
+    MediaProbe.dispatch(fx, .load_img);
+    try std.testing.expectEqual(@as(u64, 987), fx.pendingImageLoadAt(0).?.expected_bytes);
+    MediaProbe.dispatch(fx, .open_chan);
+    const handle = fx.channelHandle(41).?;
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.accepted, handle.post("owned\x00\xff"));
+    MediaProbe.drain(fx);
+    try std.testing.expectEqualStrings("owned\x00\xff", MediaProbe.model().chan_bytes);
+    media_policy_probe_core.lookup = false;
+    MediaProbe.dispatch(fx, .close_chan);
+    try std.testing.expect(fx.channelHandle(41) != null);
+    media_policy_probe_core.lookup = true;
+    MediaProbe.dispatch(fx, .close_chan);
+    MediaProbe.drain(fx);
+    try std.testing.expect(fx.channelHandle(41) == null);
+    MediaProbe.dispatch(fx, .open_chan);
+    try std.testing.expect(fx.channelHandle(41) != null);
+    media_policy_probe_core.retire = false;
+    try fx.feedImageResult(7, .loaded, 2, 3, 200, "");
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 1), MediaProbe.model().img_events);
+    MediaProbe.dispatch(fx, .load_img);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.ImageState.rejected, MediaProbe.model().img_state);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+    try std.testing.expect(media_policy_probe_core.calls[3] >= 4);
+    try std.testing.expect(media_policy_probe_core.calls[4] >= 2);
+    try std.testing.expect(media_policy_probe_core.calls[5] >= 3);
+}
+
+test "media host consumes capture restoration data and terminal retirement" {
+    const fx = freshMediaProbe();
+    defer fx.deinit();
+    MediaProbe.dispatch(fx, .start_capture);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureSource.system, MediaProbe.model().capture_source);
+    try std.testing.expectEqual(@as(f64, 24_000), MediaProbe.model().capture_rate);
+    try std.testing.expectEqual(@as(f64, 2), MediaProbe.model().capture_channels);
+    try fx.feedAudioCapture(91, 9_876_543, &.{ 1, 0, 2, 0 });
+    MediaProbe.drain(fx);
+    try std.testing.expectEqualStrings("\x01\x00\x02\x00", MediaProbe.model().capture_pcm);
+    MediaProbe.dispatch(fx, .stop_capture);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.stopped, MediaProbe.model().capture_state);
+    try std.testing.expectEqual(@as(f64, 24_000), MediaProbe.model().capture_rate);
+    MediaProbe.dispatch(fx, .start_capture);
+    MediaProbe.drain(fx);
+    try std.testing.expectEqual(mini_core.CaptureState.started, MediaProbe.model().capture_state);
+    try std.testing.expectEqual(@as(usize, 4), media_policy_probe_core.calls[5]);
+}
+
+test "media host consumes transport suppression scalar restart rekey and scoped foreign cancellation" {
+    const fx = freshMediaProbe();
+    defer fx.deinit();
+    MediaProbe.dispatch(fx, .play);
+    media_policy_probe_core.transport = false;
+    const before = fx.audioSnapshot();
+    MediaProbe.dispatch(fx, .pause_it);
+    try std.testing.expectEqualDeep(before, fx.audioSnapshot());
+    media_policy_probe_core.transport = true;
+    MediaProbe.dispatch(fx, .seek_it);
+    try std.testing.expectEqual(@as(u64, 321), fx.audioSnapshot().position_ms);
+    MediaProbe.dispatch(fx, .vload);
+    const token = fx.videoOwnerToken();
+    MediaProbe.dispatch(fx, .vpause_it); // Policy requests restart instead.
+    try std.testing.expect(fx.videoOwnerToken() != token);
+    MediaProbe.dispatch(fx, .vplay_it);
+    try std.testing.expect(media_policy_probe_core.owned_after_restart);
+    try std.testing.expect(!fx.videoSnapshot().playing);
+    MediaProbe.dispatch(fx, .vseek_it);
+    try std.testing.expectEqual(@as(u64, 321), fx.videoSnapshot().position_ms);
+    fx.loadVideo(.{ .key = 77, .surface = 99, .path = "foreign.mp4" });
+    const foreign = fx.videoSnapshot();
+    MediaProbe.dispatch(fx, .vstop_it);
+    try std.testing.expectEqualDeep(foreign, fx.videoSnapshot());
+    try std.testing.expect(media_policy_probe_core.calls[6] >= 6);
+}
+
+const coordination_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const initialModel = mini_core.initialModel;
+    pub const bootCommand = mini_core.bootCommand;
+    pub const update = mini_core.update;
+    pub const subscriptions = mini_core.subscriptions;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    var admit = true;
+    var lookup = true;
+    var bind = true;
+    var retire = true;
+    var calls = [_]usize{0} ** 11;
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 11) return referenceCoordinationPolicy(request, output);
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 19), 173);
+        if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
+        const size = referenceCoordinationPolicy(request, output);
+        if (request[0] == 8) {
+            if (request[1] == 0) std.mem.writeInt(u64, output[16..24], 1234, .little) else {
+                output[0] = @intFromBool(admit);
+                output[1] = 69;
+                output[2] = 6;
+                std.mem.writeInt(u64, output[8..16], 17, .little);
+            }
+        } else if (request[0] == 10) {
+            if (request[1] == 1) output[0] = 58;
+        } else {
+            switch (request[1]) {
+                0 => {
+                    output[0] = if (admit) 3 else 255;
+                    std.mem.writeInt(u64, output[8..16], if (admit) ts_core_host.pty_key_base + 3 else 0, .little);
+                },
+                1 => if (!lookup) {
+                    output[0] = 255;
+                    @memset(output[8..16], 0);
+                },
+                2 => {
+                    std.mem.writeInt(u16, output[4..6], 31, .little);
+                    std.mem.writeInt(u16, output[6..8], 9, .little);
+                },
+                3 => output[3] = @intFromBool(bind),
+                4 => output[2] = @intFromBool(retire and request[4] == 1),
+                else => unreachable,
+            }
+        }
+        return size;
+    }
+};
+const CoordinationProbe = ts_core_host.TsCoreHost(coordination_policy_probe_core);
+fn freshCoordinationProbe() *CoordinationProbe.Fx {
+    coordination_policy_probe_core.admit = true;
+    coordination_policy_probe_core.lookup = true;
+    coordination_policy_probe_core.bind = true;
+    coordination_policy_probe_core.retire = true;
+    coordination_policy_probe_core.calls = @splat(0);
+    const fx = freshMediaProbe();
+    CoordinationProbe.init(fx);
+    return fx;
+}
+
+test "media host consumes playback preparation route flags refusal and borrowed complete events" {
+    const fx = freshCoordinationProbe();
+    defer fx.deinit();
+    CoordinationProbe.dispatch(fx, .play_stream);
+    try std.testing.expectEqual(@as(u64, 1234), fx.pendingAudio().?.expected_bytes);
+    CoordinationProbe.dispatch(fx, .vload);
+    const original = fx.videoSnapshot();
+    try std.testing.expectEqual(@as(u64, 17), original.surface);
+    try std.testing.expect(!original.playing and original.looping and original.muted);
+    const token = fx.videoOwnerToken();
+    coordination_policy_probe_core.admit = false;
+    CoordinationProbe.dispatch(fx, .vload2);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqualDeep(original, fx.videoSnapshot());
+    try std.testing.expectEqual(token, fx.videoOwnerToken());
+    try std.testing.expectEqual(@as(i64, 1), CoordinationProbe.model().video2_events);
+    try fx.feedVideoEvent(.position, 123, 456, true, true, 1920, 1080);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqual(@as(f64, 123), CoordinationProbe.model().v_pos);
+    try std.testing.expectEqual(@as(f64, 456), CoordinationProbe.model().v_dur);
+    try std.testing.expectEqual(@as(f64, 1920), CoordinationProbe.model().v_w);
+    try std.testing.expectEqual(@as(f64, 1080), CoordinationProbe.model().v_h);
+    try std.testing.expect(CoordinationProbe.model().v_playing and CoordinationProbe.model().v_buffering);
+    try std.testing.expect(coordination_policy_probe_core.calls[8] >= 3);
+    try std.testing.expect(coordination_policy_probe_core.calls[10] >= 1);
+}
+
+test "media host consumes PTY slots dimensions lookup bindings complete payload and retirement" {
+    const fx = freshCoordinationProbe();
+    defer fx.deinit();
+    const engine = ts_core_host.pty_key_base + 3;
+    CoordinationProbe.dispatch(fx, .open_pty_default);
+    try std.testing.expectEqual(engine, fx.pendingPtyAt(0).?.key);
+    try std.testing.expectEqualStrings(@import("pty.zig").default_term, fx.pendingPtyAt(0).?.term);
+    coordination_policy_probe_core.lookup = false;
+    CoordinationProbe.dispatch(fx, .write_pty);
+    try std.testing.expectEqualStrings("", fx.ptyWrittenBytes(engine));
+    coordination_policy_probe_core.lookup = true;
+    CoordinationProbe.dispatch(fx, .write_pty);
+    try std.testing.expectEqualStrings("ls\n", fx.ptyWrittenBytes(engine));
+    CoordinationProbe.dispatch(fx, .resize_pty);
+    try std.testing.expectEqual(@as(u16, 31), fx.ptySize(engine).?.cols);
+    try std.testing.expectEqual(@as(u16, 9), fx.ptySize(engine).?.rows);
+    try std.testing.expectEqual(engine, CoordinationProbe.resolvePtyKey("shell"));
+    var bytes = [_]u8{ 255, 0, 27, 91, 109 };
+    try fx.feedPtyOutput(engine, &bytes);
+    CoordinationProbe.drain(fx);
+    @memset(&bytes, 0);
+    try std.testing.expectEqualSlices(u8, &.{ 255, 0, 27, 91, 109 }, CoordinationProbe.model().pty_bytes);
+    try std.testing.expectEqualStrings("shell", CoordinationProbe.model().pty_key);
+    coordination_policy_probe_core.retire = false;
+    try fx.feedPtyExit(engine, 7, 0, .exited, 13);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqual(@as(i64, 7), CoordinationProbe.model().pty_code);
+    try std.testing.expectEqual(@as(f64, 13), CoordinationProbe.model().pty_dropped);
+    try std.testing.expectEqual(engine, CoordinationProbe.resolvePtyKey("shell"));
+    // A live retained entry blocks another authored spawn; forced refusal is staged.
+    coordination_policy_probe_core.admit = false;
+    CoordinationProbe.dispatch(fx, .open_pty_default);
+    CoordinationProbe.drain(fx);
+    try std.testing.expectEqualStrings("shell", CoordinationProbe.model().pty_key);
+    try std.testing.expectEqual(mini_core.PtyReason.rejected, CoordinationProbe.model().pty_reason);
+    try std.testing.expect(coordination_policy_probe_core.calls[9] >= 8);
+}
+
+test "media host consumes PTY retirement while named bindings retain ended grids" {
+    for ([_]bool{ false, true }) |bound| {
+        const fx = freshCoordinationProbe();
+        defer fx.deinit();
+        const engine = ts_core_host.pty_key_base + 3;
+        CoordinationProbe.dispatch(fx, .open_pty_default);
+        coordination_policy_probe_core.bind = bound;
+        try std.testing.expectEqual(engine, CoordinationProbe.resolvePtyKey("shell"));
+        try fx.feedPtyExit(engine, 0, 0, .exited, 0);
+        CoordinationProbe.drain(fx);
+        try std.testing.expectEqual(if (bound) engine else @as(u64, 0), CoordinationProbe.resolvePtyKey("shell"));
+        CoordinationProbe.dispatch(fx, .write_pty);
+        try std.testing.expectEqualStrings("", fx.ptyWrittenBytes(engine));
+        CoordinationProbe.dispatch(fx, .open_pty_default);
+        try std.testing.expectEqual(engine, fx.pendingPtyAt(0).?.key);
+        CoordinationProbe.dispatch(fx, .kill_pty);
+        try std.testing.expect(fx.ptyKillRequested(engine));
+    }
+}
+
+const request_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = struct { bytes: []const u8 = "", error_bytes: []const u8 = "", done: usize = 0 };
+    pub const Msg = union(enum) { commands: []const u8, loaded: []const u8, failed: []const u8, done };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var model: Model = .{};
+    var owned: [2][1024]u8 = undefined;
+    var admit = true;
+    var route_error = false;
+    var retire = true;
+    var cancel = true;
+    var credential_suffix = false;
+    var calls: [17]usize = @splat(0);
+    pub fn initialModel() *const Model {
+        model = .{};
+        return &model;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model {
+        return value;
+    }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .loaded => |bytes| {
+                @memcpy(owned[0][0..bytes.len], bytes);
+                model.bytes = owned[0][0..bytes.len];
+            },
+            .failed => |bytes| {
+                @memcpy(owned[1][0..bytes.len], bytes);
+                model.error_bytes = owned[1][0..bytes.len];
+            },
+            .done => model.done += 1,
+        }
+        return .{ .model = &model, .cmd = "" };
+    }
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
+        calls[request[0]] += 1;
+        @memset(rt.frameAlloc(u8, 23), 173);
+        const size = referenceCoordinationPolicy(request, output);
+        if (request[0] == 11 and request[1] == 0) {
+            if (!admit) output[0] = 255 else if (request[2] == 0 and output[0] == 0) output[0] = 15;
+        } else if (request[0] == 11 and request[1] == 2) {
+            if (route_error) output[2] = 2;
+            output[4] = @intFromBool(retire);
+        } else if (request[0] == 12 and !cancel) {
+            output[0] = 255;
+            output[1] = 255;
+        } else if (request[0] == 13 and credential_suffix and output[0] == 1) {
+            const offset = std.mem.readInt(u32, output[4..8], .little);
+            const length = std.mem.readInt(u32, output[8..12], .little);
+            std.mem.writeInt(u32, output[4..8], offset + 1, .little);
+            std.mem.writeInt(u32, output[8..12], length - 1, .little);
+        } else if (request[0] == 14) {
+            if (request[1] == 0 and output[0] == 0) output[0] = 15;
+            if (request[1] == 1) {
+                if (route_error) output[4] = 2;
+                output[6] = @intFromBool(retire and output[6] == 1);
+            }
+        }
+        return size;
+    }
+};
+const RequestProbe = ts_core_host.TsCoreHost(request_policy_probe_core);
+fn freshRequestProbe(fx: *RequestProbe.Fx) void {
+    request_policy_probe_core.admit = true;
+    request_policy_probe_core.route_error = false;
+    request_policy_probe_core.retire = true;
+    request_policy_probe_core.cancel = true;
+    request_policy_probe_core.credential_suffix = false;
+    request_policy_probe_core.calls = @splat(0);
+    fx.* = RequestProbe.Fx.init(std.testing.allocator);
+    fx.executor = .fake;
+    RequestProbe.init(fx);
+}
+
+test "request host consumes compiled admission routes retirement cancellation and retains all result bytes" {
+    var fx: RequestProbe.Fx = undefined;
+    freshRequestProbe(&fx);
+    defer fx.deinit();
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", 1, 2, "body\x00\xff") });
+    const first = fx.pendingHostAt(0).?;
+    try std.testing.expectEqual(ts_core_host.request_key_base + 15, first.key);
+    try std.testing.expectEqualStrings("body\x00\xff", first.payload);
+    request_policy_probe_core.cancel = false;
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
+    request_policy_probe_core.route_error = true;
+    request_policy_probe_core.retire = false;
+    try fx.feedHostResult(first.key, true, "answer\x00\xff");
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("answer\x00\xff", RequestProbe.model().error_bytes);
+    mini_core.rt.frameReset();
+    @memset(mini_core.rt.frameAlloc(u8, 2048), 165);
+    try std.testing.expectEqualStrings("answer\x00\xff", RequestProbe.model().error_bytes);
+    // Keeping the route affects duplicate rejection after the engine terminal.
+    const duplicate = mini_core.cmdRequest("echo", "owned", 1, 2, "next");
+    @constCast(duplicate)[2 + 4 + 1 + 5 + 2] = 1;
+    RequestProbe.dispatch(&fx, .{ .commands = duplicate });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    request_policy_probe_core.cancel = true;
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdCancel("owned") });
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "owned", 1, 2, "new") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingHostCount());
+    request_policy_probe_core.admit = false;
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("echo", "other", 1, 2, "deny") });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    try std.testing.expect(request_policy_probe_core.calls[11] >= 5);
+    try std.testing.expect(request_policy_probe_core.calls[12] >= 2);
+}
+
+test "request host consumes compiled credential offsets without retaining borrowed packets" {
+    var fx: RequestProbe.Fx = undefined;
+    freshRequestProbe(&fx);
+    defer fx.deinit();
+    var backing = platform.NullPlatform.init(.{});
+    defer backing.deinit();
+    var services = backing.platform();
+    fx.bindCredentialsStore(.{ .services = &services.services, .service = "dev.native-sdk.request-test", .permitted = true });
+    request_policy_probe_core.credential_suffix = true;
+    const payload = [_]u8{ 4, 0, 0, 0, 'x', 'a', 'b', 'k', 3, 0, 0, 0, 's', 0, 255 };
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("core.credentials.set", "credential", 3, 2, &payload) });
+    const pending = fx.pendingHostAt(0).?;
+    try std.testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'a', 'b', 'k', 3, 0, 0, 0, 's', 0, 255 }, pending.payload);
+    mini_core.rt.frameReset();
+    @memset(mini_core.rt.frameAlloc(u8, 2048), 165);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'a', 'b', 'k', 3, 0, 0, 0, 's', 0, 255 }, pending.payload);
+    try fx.feedHostResult(pending.key, true, "");
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 1), RequestProbe.model().done);
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdRequest("core.credentials.set", "credential", 3, 2, payload[0..8]) });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    try std.testing.expectEqual(@as(usize, 0), fx.pendingHostCount());
+    try std.testing.expect(request_policy_probe_core.calls[13] == 2);
+}
+
+test "request host consumes compiled database admission complete routing and retirement" {
+    var fx: RequestProbe.Fx = undefined;
+    freshRequestProbe(&fx);
+    defer fx.deinit();
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdDbQuery("query", 1, 3, 2, "SELECT 1") });
+    const pending = fx.pendingDbAt(0).?;
+    try std.testing.expectEqual(ts_core_host.db_key_base + 15, pending.key);
+    request_policy_probe_core.route_error = true;
+    const page = "\x01\x00\x00\x00\x01\x00\x00\x00\x04\x00\x00\x00blob\x04\x06\x00\x00\x00rows\x00\xff";
+    try fx.feedDbResult(pending.key, .page, .ok, page);
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings(page, RequestProbe.model().error_bytes);
+    request_policy_probe_core.route_error = false;
+    request_policy_probe_core.retire = false;
+    try fx.feedDbResult(pending.key, .done, .ok, "");
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqual(@as(usize, 1), RequestProbe.model().done);
+    // The retained query route still owns the key and refuses an exec collision.
+    const exec = mini_core.rt.frameAlloc(u8, 4 + 5 + 4);
+    exec[0..2].* = .{ 0x2A, 5 };
+    @memcpy(exec[2..7], "query");
+    exec[7..9].* = .{ 3, 2 };
+    @memset(exec[9..], 0);
+    RequestProbe.dispatch(&fx, .{ .commands = exec });
+    RequestProbe.drain(&fx);
+    try std.testing.expectEqualStrings("rejected", RequestProbe.model().error_bytes);
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdCancel("query") });
+    RequestProbe.dispatch(&fx, .{ .commands = mini_core.cmdDbQuery("query", 1, 3, 2, "SELECT 2") });
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingDbCount());
+    try std.testing.expect(request_policy_probe_core.calls[14] >= 5);
+}
+
+const file_policy_probe_core = struct {
+    pub const rt = mini_core.rt;
+    pub const Model = mini_core.Model;
+    pub const Msg = mini_core.Msg;
+    pub const UpdateResult = mini_core.UpdateResult;
+    pub const initialModel = mini_core.initialModel;
+    pub const commitModelRoot = mini_core.commitModelRoot;
+    pub fn update(model: *const Model, msg: Msg) UpdateResult {
+        if (msg == .note) {
+            const key = "read";
+            const out = rt.frameAlloc(u8, 5 + key.len + 4 + 9);
+            out[0..2].* = .{ 0x2D, key.len };
+            @memcpy(out[2..][0..key.len], key);
+            out[2 + key.len ..][0..3].* = .{ 25, 9, 8 };
+            _ = mini_core.writeLongBytes(out, 5 + key.len, "notes.bin");
+            return .{ .model = model, .cmd = out };
+        }
+        return mini_core.update(model, msg);
+    }
+    pub const bootCommand = mini_core.bootCommand;
+    pub const subscriptions = mini_core.subscriptions;
+    var calls: [6]usize = @splat(0);
+    var retain: bool = false;
+    var clear_busy: bool = true;
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
+        const size = referenceCoordinationPolicy(request, output);
+        if (request[0] != 15) return size;
+        calls[request[1]] += 1;
+        if ((request[1] == 1 or request[1] == 2) and output[0] != 255) output[0] = 3;
+        if (request[1] == 5) {
+            if (retain) output[4] = 0;
+            if (!clear_busy) output[5] = 0;
+            if (output[3] == 0) output[2] = 19; // alternate void arm
+            if (output[3] == 1 or output[3] == 3) output[2] = 7; // alternate bytes arm
+            if (output[3] == 2) output[2] = 10; // alternate number arm
+        }
+        return size;
+    }
+};
+
+test "file host consumes redirected slots routes busy mutations and retained terminal ownership" {
+    const Probe = ts_core_host.TsCoreHost(file_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    file_policy_probe_core.calls = @splat(0);
+    file_policy_probe_core.retain = false;
+    file_policy_probe_core.clear_busy = false;
+    Probe.init(fx);
+    Probe.dispatch(fx, .open_save_sink);
+    const key = ts_core_host.file_stream_key_base + 3;
+    try fx.acknowledgeFakeFileStreamOpen(key);
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .write_stream_open, .outcome = .ok });
+    Probe.drain(fx);
+    try std.testing.expect(!Probe.model().saved); // .wrote was redirected
+    Probe.dispatch(fx, .write_save_chunk);
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("out_of_order", Probe.model().last_err);
+    file_policy_probe_core.clear_busy = true;
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .write_stream_open, .outcome = .ok });
+    Probe.drain(fx);
+    Probe.dispatch(fx, .write_save_chunk);
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .write_stream_chunk, .outcome = .rejected });
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("rejected", Probe.model().status); // bytes redirected to loaded
+    file_policy_probe_core.retain = true;
+    Probe.dispatch(fx, .close_save_sink);
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .write_stream_close, .outcome = .ok });
+    Probe.drain(fx);
+    Probe.dispatch(fx, .open_save_sink);
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("rejected", Probe.model().last_err);
+    try std.testing.expect(file_policy_probe_core.calls[2] == 2 and file_policy_probe_core.calls[3] == 2 and file_policy_probe_core.calls[4] == 1 and file_policy_probe_core.calls[5] == 4);
+}
+
+const clipboard_policy_probe_core = struct {
+    pub const rt = complete_core.rt;
+    pub const Model = complete_core.Model;
+    pub const Msg = union(enum) { commands: []const u8, line: complete_core.Line, exit: complete_core.Exit, clipboard: complete_core.Clipboard, alternate: complete_core.Clipboard };
+    pub const UpdateResult = complete_core.UpdateResult;
+    pub const initialModel = complete_core.initialModel;
+    pub const commitModelRoot = complete_core.commitModelRoot;
+    var alternate_route: bool = false;
+    pub fn update(model: *const Model, msg: Msg) UpdateResult {
+        return switch (msg) {
+            .commands => |wire| complete_core.update(model, .{ .commands = wire }),
+            .line => |value| complete_core.update(model, .{ .line = value }),
+            .exit => |value| complete_core.update(model, .{ .exit = value }),
+            .clipboard => |value| complete_core.update(model, .{ .clipboard = value }),
+            .alternate => |value| blk: {
+                alternate_route = true;
+                break :blk complete_core.update(model, .{ .clipboard = value });
+            },
+        };
+    }
+    var retain: bool = false;
+    var calls: [3]usize = @splat(0);
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] < 8) return media_policy_probe_core.nativeEffectPolicy(request, output);
+        if (request[0] != 16) return referenceCoordinationPolicy(request, output);
+        const size = @import("file_policy_test_reference.zig").plan(request, output);
+        calls[request[1]] += 1;
+        if (request[1] == 1 and output[0] != 255) output[0] = 15;
+        if (request[1] == 2) {
+            output[1] = 4;
+            output[2] = @intFromBool(!retain);
+        }
+        return size;
+    }
+};
+
+var clipboard_probe_channel: ts_core_host.TsCoreHost(clipboard_policy_probe_core).Fx = undefined;
+
+test "file host consumes clipboard admission and complete borrowed records before retirement" {
+    const Probe = ts_core_host.TsCoreHost(clipboard_policy_probe_core);
+    clipboard_probe_channel = Probe.Fx.init(std.testing.allocator);
+    clipboard_probe_channel.executor = .fake;
+    const fx = &clipboard_probe_channel;
+    defer fx.deinit();
+    clipboard_policy_probe_core.calls = @splat(0);
+    clipboard_policy_probe_core.retain = true;
+    clipboard_policy_probe_core.alternate_route = false;
+    Probe.init(fx);
+    const name = "copy\x00\xff";
+    Probe.dispatch(fx, .{ .commands = complete_core.clipboard(name) });
+    const key: u64 = 0x5453_4352_0000_0000 + 15;
+    try std.testing.expectEqual(key, fx.pendingClipboardAt(0).?.key);
+    try fx.feedClipboardResult(key, .ok, "ignored");
+    Probe.drain(fx);
+    try std.testing.expect(clipboard_policy_probe_core.alternate_route);
+    try std.testing.expectEqualDeep(complete_core.Clipboard{ .key = name, .operation = .write, .outcome = .ok, .text = "", .droppedBefore = 0 }, Probe.model().clipboard.?);
+    Probe.dispatch(fx, .{ .commands = complete_core.clipboard(name) });
+    Probe.drain(fx);
+    try std.testing.expectEqual(.rejected, Probe.model().clipboard.?.outcome);
+    clipboard_policy_probe_core.retain = false;
+    // Reset the deliberately retained probe owner after the OS op has ended.
+    Probe.init(fx);
+    Probe.dispatch(fx, .{ .commands = complete_core.clipboard(name) });
+    try fx.feedClipboardResult(key, .ok, "ignored");
+    Probe.drain(fx);
+    Probe.dispatch(fx, .{ .commands = complete_core.clipboard(name) });
+    try std.testing.expectEqual(key, fx.pendingClipboardAt(0).?.key);
+    try std.testing.expect(clipboard_policy_probe_core.calls[0] > 0 and clipboard_policy_probe_core.calls[1] == 4 and clipboard_policy_probe_core.calls[2] == 2);
+}
+
+test "file host consumes read replacement complete bytes and numeric terminal routes" {
+    const Probe = ts_core_host.TsCoreHost(file_policy_probe_core);
+    const fx = freshChannel();
+    defer fx.deinit();
+    file_policy_probe_core.calls = @splat(0);
+    file_policy_probe_core.retain = false;
+    file_policy_probe_core.clear_busy = true;
+    Probe.init(fx);
+    Probe.dispatch(fx, .note);
+    Probe.dispatch(fx, .note); // Replaces the same read generation in slot three.
+    const key = ts_core_host.file_stream_key_base + 3;
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .read_stream, .event = .chunk, .outcome = .ok, .bytes = "raw\x00\xff" });
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("raw\x00\xff", Probe.model().status);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().line_count);
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .read_stream, .event = .done, .outcome = .ok, .total = 4294967302 });
+    Probe.drain(fx);
+    try std.testing.expectEqual(@as(f64, 4294967302), Probe.model().stamp_ms);
+    try std.testing.expectEqual(@as(i64, 0), Probe.model().ticks);
+    Probe.dispatch(fx, .note);
+    try fx.feedFileResultDetailed(.{ .key = key, .op = .read_stream, .outcome = .io_failed });
+    Probe.drain(fx);
+    try std.testing.expectEqualStrings("io_failed", Probe.model().status);
+    try std.testing.expectEqual(@as(usize, 3), file_policy_probe_core.calls[1]);
+    try std.testing.expectEqual(@as(usize, 3), file_policy_probe_core.calls[5]);
+}
+
+test "file host consumes fresh bridge ownership after effects teardown and reinitialization" {
+    const Probe = ts_core_host.TsCoreHost(file_policy_probe_core);
+    file_policy_probe_core.retain = false;
+    file_policy_probe_core.clear_busy = true;
+    for (0..2) |_| {
+        const fx = freshChannel();
+        Probe.init(fx);
+        Probe.dispatch(fx, .open_save_sink);
+        try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base + 3);
+        fx.deinit(); // The next host installation must own an empty bridge table.
+    }
+    for (0..2) |_| {
+        const fx = freshChannel();
+        Host.init(fx);
+        Host.dispatch(fx, .open_save_sink);
+        try fx.acknowledgeFakeFileStreamOpen(ts_core_host.file_stream_key_base);
+        fx.deinit();
+    }
+}
+
+const callback_complete_probe = struct {
+    pub const rt = complete_storage_core.rt;
+    pub const Model = complete_storage_core.Model;
+    pub const Msg = complete_storage_core.Msg;
+    pub const UpdateResult = complete_storage_core.UpdateResult;
+    pub const initialModel = complete_storage_core.initialModel;
+    pub const commitModelRoot = complete_storage_core.commitModelRoot;
+    pub const update = complete_storage_core.update;
+    var retain: bool = false;
+    var complete_calls: usize = 0;
+    var completion_saw_live: bool = false;
+    var suppress_file: bool = false;
+    pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] >= 8 and request[0] != 17) return referenceCoordinationPolicy(request, output);
+        const size = @import("callback_policy_test_reference.zig").plan(request, output);
+        if (request[0] == 17) {
+            output[4] = @intFromBool(!retain);
+            output[5] = @intFromBool(suppress_file);
+        }
+        return size;
+    }
+    pub fn nativeTimerPolicy(request: []const u8, output: []u8) usize {
+        if (request[0] == 7) {
+            complete_calls += 1;
+            const size = @import("callback_policy_test_reference.zig").plan(request, output);
+            completion_saw_live = request[32 + @as(usize, output[0]) * 4] == 1;
+            output[3] = @intFromBool(!retain);
+            const timestamp = "18446744073709551615";
+            output[4] = timestamp.len;
+            @memcpy(output[16..36], timestamp);
+            return size;
+        }
+        if (request[0] == 3) {
+            // The forced owner is visible only while the copied retirement
+            // decision has left it live, regardless of the engine timer.
+            var at: usize = 2 + request[1];
+            output[0] = 255;
+            for (0..16) |slot| {
+                if (slot == 4 and request[at] == 1) output[0] = 4;
+                at += 3 + request[at + 1];
+            }
+            return 1;
+        }
+        std.debug.assert(request[0] == 6);
+        @memset(output[0..10], 0);
+        output[0] = 4;
+        output[1] = @intFromEnum(std.meta.Tag(Msg).timer);
+        std.mem.writeInt(u64, output[2..10], @bitCast(@as(f64, 1)), .little);
+        return 10;
+    }
+};
+
+test "callback host consumes complete timer decimal bytes retirement and retained owner before dispatch reset" {
+    const Probe = ts_core_host.TsCoreHost(callback_complete_probe);
+    var timer_channel = Probe.Fx.init(std.testing.allocator);
+    timer_channel.executor = .fake;
+    defer timer_channel.deinit();
+    callback_complete_probe.retain = true;
+    callback_complete_probe.complete_calls = 0;
+    callback_complete_probe.completion_saw_live = false;
+    Probe.init(&timer_channel);
+    const name = "clock\x00\xff";
+    Probe.dispatch(&timer_channel, .{ .commands = complete_storage_core.timerCommand(name, true, 1) });
+    const key = ts_core_host.delay_key_base + 4;
+    try timer_channel.fireTimer(key);
+    Probe.drain(&timer_channel);
+    try std.testing.expect(callback_complete_probe.completion_saw_live);
+    try std.testing.expectEqualDeep(complete_storage_core.Timer{ .key = name, .timestampNs = "18446744073709551615", .outcome = .fired }, Probe.model().timer.?);
+    // The policy keeps the repeating bridge entry alive for another fire.
+    callback_complete_probe.retain = false;
+    try timer_channel.fireTimer(key);
+    Probe.drain(&timer_channel);
+    try std.testing.expectEqual(@as(usize, 2), callback_complete_probe.complete_calls);
+    try std.testing.expectEqualStrings("18446744073709551615", Probe.model().timer.?.timestampNs);
+    // The engine still owns a repeating timer; the copied plan retired only
+    // the bridge. Cancel cannot rediscover that retired owner.
+    Probe.dispatch(&timer_channel, .{ .commands = mini_core.cmdCancel(name) });
+    try std.testing.expectEqual(@as(usize, 1), timer_channel.pendingTimerCount());
+}
+
+test "callback host consumes full file retirement and silent delivery while retaining complete owned metadata" {
+    const Probe = ts_core_host.TsCoreHost(callback_complete_probe);
+    var file_channel = Probe.Fx.init(std.testing.allocator);
+    file_channel.executor = .fake;
+    defer file_channel.deinit();
+    callback_complete_probe.retain = true;
+    callback_complete_probe.suppress_file = false;
+    Probe.init(&file_channel);
+    const name = "file\x00\xff";
+    Probe.dispatch(&file_channel, .{ .commands = complete_storage_core.fileCommand(name, false) });
+    const first = file_channel.pendingFileAt(0).?.key;
+    try file_channel.feedFileResultDetailed(.{ .key = first, .op = .read, .outcome = .ok, .bytes = "body\x00\xff", .total = std.math.maxInt(u64), .mtime_ms = -12345, .exists = true });
+    Probe.drain(&file_channel);
+    try std.testing.expectEqualDeep(complete_storage_core.File{ .key = name, .operation = .read, .event = .terminal, .outcome = .ok, .bytes = "body\x00\xff", .totalBytes = "18446744073709551615", .mtimeMs = "-12345", .exists = true, .droppedBefore = 0 }, Probe.model().file.?);
+    Probe.dispatch(&file_channel, .{ .commands = complete_storage_core.fileCommand(name, false) });
+    try std.testing.expectEqual(first + 1, file_channel.pendingFileAt(0).?.key);
+    callback_complete_probe.retain = false;
+    callback_complete_probe.suppress_file = true;
+    const replies = Probe.model().replies;
+    try file_channel.feedFileResultDetailed(.{ .key = first + 1, .op = .read, .outcome = .disk_full });
+    Probe.drain(&file_channel);
+    try std.testing.expectEqual(replies, Probe.model().replies);
+    try std.testing.expectEqualStrings("body\x00\xff", Probe.model().file.?.bytes);
+    try std.testing.expectEqualStrings("18446744073709551615", Probe.model().file.?.totalBytes);
+    callback_complete_probe.suppress_file = false;
+}
+
+const word_image_core = struct {
+    pub const rt = mini_core.rt;
+    const Image = struct { imageLower: f64, imageUpper: f64, state: enum { loaded, rejected, cancelled, decode_failed }, width: i64, height: i64, status: i64 };
+    pub const Model = struct { image: ?Image = null, image_replies: usize = 0, file_replies: usize = 0, file_errors: usize = 0 };
+    pub const Msg = union(enum) { commands: []const u8, image: Image, file: []const u8, failed: []const u8 };
+    pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+    var stored: Model = .{};
+    pub fn initialModel() *const Model {
+        stored = .{};
+        return &stored;
+    }
+    pub fn commitModelRoot(value: *const Model) *const Model { return value; }
+    pub fn update(value: *const Model, msg: Msg) UpdateResult {
+        switch (msg) {
+            .commands => |wire| return .{ .model = value, .cmd = wire },
+            .image => |image| { stored.image = image; stored.image_replies += 1; },
+            .file => stored.file_replies += 1,
+            .failed => stored.file_errors += 1,
+        }
+        return .{ .model = &stored, .cmd = "" };
+    }
+    fn imageCommand(buffer: []u8, op: u8, id: u64) []const u8 {
+        buffer[0] = op;
+        std.mem.writeInt(u64, buffer[1..9], id, .little);
+        if (op != 0x3b) return buffer[0..9];
+        buffer[9] = 1;
+        std.mem.writeInt(u32, buffer[10..14], 5, .little);
+        @memcpy(buffer[14..19], "a.png");
+        @memset(buffer[19..35], 0); // empty URL/cache, unspecified expected bytes
+        return buffer[0..35];
+    }
+};
+
+test "word image ABI preserves exact bounds and complete terminals after the command bytes expire" {
+    const WordHost = ts_core_host.TsCoreHost(word_image_core);
+    var fx = WordHost.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    WordHost.init(&fx);
+    var command: [64]u8 = undefined;
+    for ([_]u64{ 1, 9007199254740993, 0x7fff_ffff_ffff_ffff }) |id| {
+        WordHost.dispatch(&fx, .{ .commands = word_image_core.imageCommand(&command, 0x3b, id) });
+        @memset(&command, 255);
+        try std.testing.expectEqual(id, fx.pendingImageLoadAt(0).?.id);
+        try std.testing.expectEqualStrings("a.png", fx.pendingImageLoadAt(0).?.path);
+        try fx.feedImageResult(id, .decode_failed, 19, 23, 503, "");
+        WordHost.drain(&fx);
+        const result = WordHost.model().image.?;
+        try std.testing.expectEqual(@as(f64, @floatFromInt(@as(u32, @truncate(id)))), result.imageLower);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(@as(u32, @truncate(id >> 32)))), result.imageUpper);
+        try std.testing.expectEqual(@as(i64, 19), result.width);
+        try std.testing.expectEqual(@as(i64, 23), result.height);
+        try std.testing.expectEqual(@as(i64, 503), result.status);
+        try std.testing.expectEqual(.decode_failed, result.state);
+    }
+    for ([_]u64{ 0, 0x8000_0000_0000_0000, 0xffff_ffff_ffff_ffff }) |id| {
+        WordHost.dispatch(&fx, .{ .commands = word_image_core.imageCommand(&command, 0x3b, id) });
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(@as(usize, 0), fx.pendingImageLoadCount());
+        try std.testing.expectEqual(.rejected, WordHost.model().image.?.state);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(@as(u32, @truncate(id >> 32)))), WordHost.model().image.?.imageUpper);
+    }
+}
+
+test "image and named cancellation preserve the other family's incumbent and queued terminal" {
+    const WordHost = ts_core_host.TsCoreHost(word_image_core);
+    const key = ts_core_host.effect_key_base;
+    const read = [_]u8{ 0x07, 1, 'k', 2, 3, 1, 0, 0, 0, 'p' };
+    const cancel = [_]u8{ 0x06, 1, 'k' };
+    var command: [64]u8 = undefined;
+    var batch: [96]u8 = undefined;
+    for ([_]bool{ false, true }) |queued| {
+        var fx = WordHost.Fx.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        WordHost.init(&fx);
+        WordHost.dispatch(&fx, .{ .commands = &read });
+        if (queued) try fx.feedFileResult(key, .ok, "owned");
+        const load = word_image_core.imageCommand(&command, 0x3b, key);
+        @memcpy(batch[0..load.len], load);
+        const stop = word_image_core.imageCommand(&command, 0x3c, key);
+        @memcpy(batch[load.len..][0..stop.len], stop);
+        WordHost.dispatch(&fx, .{ .commands = batch[0 .. load.len + stop.len] });
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(.rejected, WordHost.model().image.?.state);
+        if (!queued) try fx.feedFileResult(key, .ok, "owned");
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(@as(usize, 1), WordHost.model().file_replies);
+    }
+    for ([_]bool{ false, true }) |queued| {
+        var fx = WordHost.Fx.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.executor = .fake;
+        WordHost.init(&fx);
+        WordHost.dispatch(&fx, .{ .commands = word_image_core.imageCommand(&command, 0x3b, key) });
+        if (queued) try fx.feedImageResult(key, .decode_failed, 0, 0, 0, "");
+        @memcpy(batch[0..read.len], &read);
+        @memcpy(batch[read.len..][0..cancel.len], &cancel);
+        WordHost.dispatch(&fx, .{ .commands = batch[0 .. read.len + cancel.len] });
+        WordHost.drain(&fx);
+        // Named cancellation silently drops its own refused file terminal,
+        // while the image incumbent still owns its pending completion.
+        try std.testing.expectEqual(@as(usize, 0), WordHost.model().file_errors);
+        if (!queued) try fx.feedImageResult(key, .decode_failed, 0, 0, 0, "");
+        WordHost.drain(&fx);
+        try std.testing.expectEqual(.decode_failed, WordHost.model().image.?.state);
+        try std.testing.expectEqual(@as(usize, 1), WordHost.model().image_replies);
+    }
+}

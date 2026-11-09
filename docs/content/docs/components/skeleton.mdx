@@ -1,0 +1,40 @@
+---
+title: "Skeleton"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `skeleton` as a placeholder while content loads. Set `width` and `height` to approximate the content, then replace it through a model-bound `if`. The engine animates its opacity; reduced-motion settings make it static. Use [spinner](/docs/components/spinner) for an indeterminate wait or [progress](/docs/components/progress) for a measurable fraction.
+
+<ComponentPreview name="skeleton" alt="Skeleton placeholders rendered by the engine" caption="an avatar-and-two-lines skeleton, the shape of the loaded row" />
+
+## Markup
+
+```html
+<row gap="12" width="320">
+  <skeleton width="44" height="44"></skeleton>
+  <column gap="8" grow="1" main="center">
+    <skeleton height="14"></skeleton>
+    <skeleton height="14" width="180"></skeleton>
+  </column>
+</row>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically. Skeleton has no sugar method; use `ui.el` with the element kind.
+
+```zig
+ui.row(.{ .gap = 12, .width = 320 }, .{
+    ui.el(.skeleton, .{ .width = 44, .height = 44 }, .{}),
+    ui.column(.{ .gap = 8, .grow = 1, .main = .center }, .{
+        ui.el(.skeleton, .{ .height = 14 }, .{}),
+        ui.el(.skeleton, .{ .height = 14, .width = 180 }, .{}),
+    }),
+})
+```
+
+## Attributes
+
+<AttrTable attrs={["width", "height"]} />

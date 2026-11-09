@@ -29,6 +29,7 @@
 //! encoded inputs decode-to-fit — never silent.
 
 const std = @import("std");
+const registry_policy = @import("image_registry_policy.zig");
 const canvas = @import("canvas");
 const canvas_frame_module = @import("canvas_frame.zig");
 const canvas_limits = @import("canvas_limits.zig");
@@ -94,23 +95,32 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// not be allocated; the registry is unchanged and the same
         /// registration can be retried once memory recovers).
         pub fn registerCanvasImage(self: *Runtime, id: canvas.ImageId, width: usize, height: usize, rgba8: []const u8) anyerror!void {
-            if (id == 0) return error.InvalidImageId;
-            // The high bit is the media-surface texture namespace
-            // (`canvas.media_surface_image_id_bit`): producer-pushed
-            // textures and registered images share one flat id space,
-            // so a registration inside the reserved namespace is
-            // refused loudly rather than shadowed silently.
-            if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
-            if (width == 0 or height == 0) return error.InvalidImageDimensions;
-            const row_len = std.math.mul(usize, width, 4) catch return error.InvalidImageDimensions;
-            const byte_len = std.math.mul(usize, row_len, height) catch return error.InvalidImageDimensions;
-            if (rgba8.len != byte_len) return error.InvalidImageDimensions;
-            if (byte_len > self.max_image_pixel_bytes) return error.ImageTooLarge;
+            const index = if (self.image_registry_policy) |policy| compiled: {
+                var scratch: [max_registered_canvas_images]registry_policy.Record = undefined;
+                const program = registry_policy.plan(policy, .register, registry_policy.imageRecords(self, &scratch), max_registered_canvas_images, .{ .id = id, .width = width, .height = height, .length = rgba8.len, .budget = self.max_image_pixel_bytes });
+                try program.admit();
+                break :compiled program.selected.?;
+            } else native: {
+                if (id == 0) return error.InvalidImageId;
+                // The high bit is the media-surface texture namespace
+                // (`canvas.media_surface_image_id_bit`): producer-pushed
+                // textures and registered images share one flat id space,
+                // so a registration inside the reserved namespace is
+                // refused loudly rather than shadowed silently.
+                if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
+                if (width == 0 or height == 0) return error.InvalidImageDimensions;
+                const row_len = std.math.mul(usize, width, 4) catch return error.InvalidImageDimensions;
+                const native_byte_len = std.math.mul(usize, row_len, height) catch return error.InvalidImageDimensions;
+                if (rgba8.len != native_byte_len) return error.InvalidImageDimensions;
+                if (native_byte_len > self.max_image_pixel_bytes) return error.ImageTooLarge;
 
-            const index = findCanvasImageIndex(self, id) orelse blk: {
-                if (self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
-                break :blk self.canvas_image_count;
+                const native_index = findCanvasImageIndex(self, id) orelse blk: {
+                    if (self.canvas_image_count >= max_registered_canvas_images) return error.ImageRegistryFull;
+                    break :blk self.canvas_image_count;
+                };
+                break :native native_index;
             };
+            const byte_len = rgba8.len;
             if (self.canvas_image_pixels[index].len == 0) {
                 // The slot's pixel buffer, allocated LAZILY at the
                 // slot's first registration (one slot-budget block from
@@ -163,19 +173,24 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// `registerCanvasImage` refuses (0 and the reserved
         /// media-surface namespace) and fires before any decode work.
         pub fn registerCanvasImageBytes(self: *Runtime, id: canvas.ImageId, bytes: []const u8) anyerror!RegisteredCanvasImage {
-            if (id == 0) return error.InvalidImageId;
-            // Same reserved-namespace refusal as `registerCanvasImage`
-            // (see the comment there), checked before the decode so an
-            // unusable id never reaches the platform codec — the caller
-            // gets `error.InvalidImageId`, not a codec error, and pays
-            // no decode cost for it.
-            if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
-            // Every encoded-registration entry point shares imageLoad's
-            // fixed source contract. Direct fx.registerImageBytes and
-            // Runtime.registerCanvasImageBytes calls must not hand an
-            // arbitrarily large allocation to a host codec merely because
-            // they bypassed the file/fetch executor.
-            if (bytes.len > effects_mod.max_effect_image_source_bytes) return error.ImageTooLarge;
+            if (self.image_registry_policy) |policy| {
+                const program = registry_policy.plan(policy, .encoded, &.{}, max_registered_canvas_images, .{ .id = id, .length = bytes.len, .source_limit = effects_mod.max_effect_image_source_bytes });
+                try program.admit();
+            } else {
+                if (id == 0) return error.InvalidImageId;
+                // Same reserved-namespace refusal as `registerCanvasImage`
+                // (see the comment there), checked before the decode so an
+                // unusable id never reaches the platform codec — the caller
+                // gets `error.InvalidImageId`, not a codec error, and pays
+                // no decode cost for it.
+                if ((id & canvas.media_surface_image_id_bit) != 0) return error.InvalidImageId;
+                // Every encoded-registration entry point shares imageLoad's
+                // fixed source contract. Direct fx.registerImageBytes and
+                // Runtime.registerCanvasImageBytes calls must not hand an
+                // arbitrarily large allocation to a host codec merely because
+                // they bypassed the file/fetch executor.
+                if (bytes.len > effects_mod.max_effect_image_source_bytes) return error.ImageTooLarge;
+            }
             const scratch_len = self.max_image_pixel_bytes + self.max_image_pixel_bytes / 4;
             const scratch = try imageDecodeScratch(scratch_len);
             const decoded = try self.options.platform.services.decodeImage(bytes, scratch, self.max_image_pixel_bytes / 4);
@@ -189,7 +204,12 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         /// image on their next frame (draws referencing a missing id
         /// skip, exactly like an unregistered id).
         pub fn unregisterCanvasImage(self: *Runtime, id: canvas.ImageId) bool {
-            const index = findCanvasImageIndex(self, id) orelse return false;
+            const index = if (self.image_registry_policy) |policy| compiled: {
+                var scratch: [max_registered_canvas_images]registry_policy.Record = undefined;
+                const program = registry_policy.plan(policy, .remove, registry_policy.imageRecords(self, &scratch), max_registered_canvas_images, .{ .id = id });
+                if (program.action == 0) return false;
+                break :compiled program.selected.?;
+            } else findCanvasImageIndex(self, id) orelse return false;
             const last = self.canvas_image_count - 1;
             if (index != last) {
                 self.canvas_image_entries[index] = self.canvas_image_entries[last];
@@ -289,6 +309,10 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         }
 
         fn findCanvasImageIndex(self: *const Runtime, id: canvas.ImageId) ?usize {
+            if (self.image_registry_policy) |policy| {
+                var scratch: [max_registered_canvas_images]registry_policy.Record = undefined;
+                return registry_policy.plan(policy, .lookup, registry_policy.imageRecords(self, &scratch), max_registered_canvas_images, .{ .id = id }).selected;
+            }
             for (self.canvas_image_entries[0..self.canvas_image_count], 0..) |entry, index| {
                 if (entry.id == id) return index;
             }
@@ -304,7 +328,12 @@ pub fn RuntimeCanvasImages(comptime Runtime: type) type {
         pub fn noteCanvasImagesChanged(self: *Runtime) void {
             const frame_methods = canvas_frame_module.RuntimeCanvasFrames(Runtime);
             for (self.views[0..self.view_count], 0..) |*view, index| {
-                if (!view.open or view.kind != .gpu_surface) continue;
+                if (self.image_registry_policy) |policy| {
+                    // Observe the current iterator slot after earlier frame
+                    // callbacks, retaining the original iterator's extent.
+                    const record = registry_policy.Record{ .flags = @as(u32, @intFromBool(view.open)) | (@as(u32, @intFromBool(view.kind == .gpu_surface)) << 1) };
+                    if (registry_policy.plan(policy, .repaint, &.{record}, 32, .{}).action == 0) continue;
+                } else if (!view.open or view.kind != .gpu_surface) continue;
                 view.presented_canvas_valid = false;
                 self.invalidateFor(.state, view.frame);
                 frame_methods.requestCanvasFrameForView(self, index) catch {};

@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.9.5";
+const version = "0.11.1";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -103,6 +103,21 @@ pub fn main(init: std.process.Init) !void {
             error.ResetNeedsConfirmation => fail("native db reset deletes this app's engine-owned app.db; rerun as `native db reset --yes`"),
             else => return err,
         };
+    } else if (std.mem.eql(u8, command, "update")) {
+        tooling.update.run(allocator, init.io, args[2..]) catch |err| switch (err) {
+            error.InvalidArguments => fail("usage: native update keygen [--private-key path] | sign --archive app.zip --url https://example.com/app.zip --target macos-aarch64|macos-x86_64 [--manifest app.json] [--private-key path] [--notes text] [--output native-update.json]"),
+            error.KeyAlreadyExists => fail("the private update key already exists; choose another --private-key path or move the existing key explicitly"),
+            error.InvalidArchiveUrl => fail("update archive URLs must use HTTPS and be at most 4096 bytes"),
+            error.InvalidTarget => fail("update target must be macos-aarch64 or macos-x86_64"),
+            error.UpdateArchitectureMismatch => fail("the update archive executable does not contain the architecture named by --target"),
+            error.InvalidArchive => fail("the update archive must be a non-empty .zip containing the packaged .app bundle"),
+            error.UpdatesNotConfigured => fail("the app manifest has no updates block; add feed_url and public_key before signing releases"),
+            error.InvalidManifestVersion => fail("the app manifest version must use canonical X.Y.Z numeric components without leading zeroes"),
+            error.InvalidUpdatePublicKey => fail("the app manifest update public_key is not a valid base64 Ed25519 public key"),
+            error.UpdateKeyMismatch => fail("the private update key does not match the public_key embedded in the app manifest"),
+            error.GeneratedFeedInvalid => fail("the generated update feed failed its own verification; no feed was written"),
+            else => return err,
+        };
     } else if (std.mem.eql(u8, command, "vendor")) {
         if (args.len < 3) fail("usage: native vendor [dir] <package@exact-version> [more packages...]");
         const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, init.io, init.environ_map) orelse
@@ -189,9 +204,9 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("bundled {d} assets into {s}\n", .{ stats.asset_count, output_dir });
     } else if (std.mem.eql(u8, command, "package")) {
         checkVerbFlags("package", args[2..], .{
-            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]",
-            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--team-id", "--optimize" },
-            .bool_flags = &.{ "--cef-auto-install", "--archive" },
+            .usage = "package [--target macos] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]",
+            .value_flags = &.{ "--manifest", "--target", "--output", "--binary", "--service-binary", "--assets", "--web-engine", "--web-layer", "--cef-dir", "--signing", "--identity", "--entitlements", "--notary-profile", "--optimize" },
+            .bool_flags = &.{ "--cef-auto-install", "--notarize", "--archive", "--update-archive" },
         });
         const manifest_path = try flagValue(args, "--manifest") orelse tooling.manifest.defaultPath(init.io) orelse "app.json";
         const metadata = tooling.manifest.readMetadata(allocator, init.io, manifest_path) catch |err| switch (err) {
@@ -264,8 +279,10 @@ pub fn main(init: std.process.Init) !void {
             .web_engine = web_engine.engine,
             .web_layer_setting = web_layer_setting,
             .cef_dir = web_engine.cef_dir,
-            .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .team_id = try flagValue(args, "--team-id") },
+            .signing = .{ .mode = signing, .identity = try flagValue(args, "--identity"), .entitlements = try flagValue(args, "--entitlements"), .profile = try flagValue(args, "--notary-profile") },
             .archive = archive,
+            .notarize = flagBool(args, "--notarize"),
+            .update_archive = flagBool(args, "--update-archive"),
             .env_map = init.environ_map,
         });
         tooling.package.printDiagnostic(stats);
@@ -460,6 +477,7 @@ fn usage() void {
         \\  test [dir] [--yes] [-D... zig build flags]     run the app's test suite
         \\  check [dir] [--strict]                         validate the core (src/core.ts through the subset checker), src/*.native markup, and app.json/app.zon
         \\  db new-migration <name> | status | reset --yes manage the relational schema and development database
+        \\  update keygen|sign                              generate Ed25519 keys and signed native update feeds
         \\  vendor [dir] <package@exact-version> [...]     check npm sources into src/services/vendor and pin their hashes in the app manifest
         \\  eject [dir]                                    write an owned build.zig/build.zig.zon into the app
         \\  eject component <name> [dir]                   write an owned copy of a library composite into src/components/
@@ -467,7 +485,7 @@ fn usage() void {
         \\  doctor [--strict] [--manifest app.json] [--web-engine system|chromium] [--cef-dir path] [--cef-auto-install]
         \\  validate [app.json|app.zon]
         \\  bundle-assets [app.json|app.zon] [assets] [output]
-        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--team-id id] [--archive]
+        \\  package [--target macos|windows|linux|ios|android] [--output path] [--binary path] [--service-binary path] [--assets path] [--web-engine system|chromium] [--web-layer auto|include|exclude] [--cef-dir path] [--cef-auto-install] [--signing none|adhoc|identity] [--identity name] [--entitlements path] [--notarize --notary-profile name] [--archive] [--update-archive]
         \\  dev [--manifest app.json] --binary path [--url http://127.0.0.1:5173/] [--command "npm run dev"] [--timeout-ms 30000]
         \\  package-windows [--output path] [--binary path] [--service-binary path]
         \\  package-linux [--output path] [--binary path] [--service-binary path]
@@ -554,6 +572,7 @@ fn failVerb(err: anyerror) anyerror!void {
         error.BrokenToolchainInstall,
         error.ToolchainVersionMismatch,
         error.CoreCheckFailed,
+        error.ViewCheckFailed,
         error.DevHostFailed,
         error.HostCompileFailed,
         error.SimulatorUnavailable,
@@ -654,12 +673,14 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     const sqlite_enabled = for (metadata.capabilities) |capability| {
         if (std.mem.eql(u8, capability, "sqlite")) break true;
     } else false;
+    var ts_framework_root: ?[]const u8 = null;
+    defer if (ts_framework_root) |root| allocator.free(root);
     if (core_tree == .ts) {
         const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
             std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
             return error.MissingFramework;
         };
-        defer allocator.free(framework_root);
+        ts_framework_root = framework_root;
         // Self-heal the editor surface first: node_modules/@native-sdk/core
         // (the pre-publish copy stock tsc resolves) refreshes whenever it is
         // missing or version-skewed vs the SDK — one info line, never a
@@ -715,8 +736,19 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     try collectMarkupFiles(allocator, io, "src", &markup_files);
     var outcome = markup_cli.CheckOutcome{};
     if (markup_files.items.len > 0) {
-        outcome = try markup_cli.checkFiles(allocator, io, markup_files.items);
+        outcome = try markup_cli.checkFiles(allocator, io, markup_files.items, .{
+            .import_root_for_file = markup_cli.importRootForFile,
+            .typescript_views_checked = core_tree == .ts,
+        });
         if (outcome.failures > 0) return error.MarkupCheckFailed;
+    }
+    // A TypeScript core's views compile beside it: check them with the
+    // build's own view compiler against the contract checkCore just wrote,
+    // once every file is structurally sound.
+    if (ts_framework_root) |framework_root| {
+        const views = try tooling.ts_core.checkViews(allocator, io, env_map, framework_root);
+        if (views.errors > 0) return error.MarkupCheckFailed;
+        outcome.warnings += views.warnings;
     }
 
     // The build-graph web-layer inference, surfaced where authors look:
@@ -731,7 +763,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     }
     const checked_markup = markup_files.items.len;
     const contract_note: []const u8 = if (outcome.contract_checked) " against the model contract" else "";
-    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean)" else "";
+    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean, views typed against the core)" else "";
     std.debug.print("checked {d} markup file{s}{s}, {s}{s}\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note, manifest_path, core_note });
     if (strict and outcome.warnings > 0) {
         std.debug.print("{d} warning{s} promoted to errors (--strict)\n", .{ outcome.warnings, if (outcome.warnings == 1) "" else "s" });
@@ -802,13 +834,29 @@ fn runEjectComponent(io: std.Io, name: []const u8) !void {
         }
         std.process.exit(1);
     };
-    tooling.eject_components.eject(io, ".", component) catch |err| switch (err) {
+    const core = switch (tooling.ts_core.detect(io)) {
+        .ts => tooling.eject_components.ComponentCore.ts,
+        .zig => tooling.eject_components.ComponentCore.zig,
+        .both => return tooling.ts_core.failBothCores(),
+        .neither => {
+            std.debug.print("no app core found — `native eject component` needs src/core.ts or src/main.zig\n", .{});
+            return error.MissingManifest;
+        },
+    };
+    const selection = tooling.eject_components.forCore(component, core) orelse {
+        std.debug.print(
+            "cannot eject {s} into this app's core — no compatible component form is available; compose it in the app's existing authoring tier\n",
+            .{component.name},
+        );
+        std.process.exit(1);
+    };
+    tooling.eject_components.ejectSelection(io, ".", selection) catch |err| switch (err) {
         error.AlreadyEjected => {
-            std.debug.print("already ejected at {s} - delete it to re-eject\n", .{component.path});
+            std.debug.print("already ejected at {s} - delete it to re-eject\n", .{selection.path});
             std.process.exit(1);
         },
         error.WriteFailed => {
-            std.debug.print("cannot write {s} — check the app directory is writable\n", .{component.path});
+            std.debug.print("cannot write {s} — check the app directory is writable\n", .{selection.path});
             std.process.exit(1);
         },
     };
@@ -818,7 +866,7 @@ fn runEjectComponent(io: std.Io, name: []const u8) !void {
         \\library form keeps working wherever you have not migrated. Run
         \\`native check` to validate the app afterwards.
         \\
-    , .{ component.path, component.form });
+    , .{ selection.path, selection.form });
 }
 
 fn initAppName(allocator: std.mem.Allocator, io: std.Io, destination: []const u8) !struct { []const u8, bool } {
@@ -957,7 +1005,7 @@ fn positionalArg(args: []const []const u8) ?[]const u8 {
                 std.mem.eql(u8, arg, "--signing") or
                 std.mem.eql(u8, arg, "--identity") or
                 std.mem.eql(u8, arg, "--entitlements") or
-                std.mem.eql(u8, arg, "--team-id") or
+                std.mem.eql(u8, arg, "--notary-profile") or
                 std.mem.eql(u8, arg, "--command") or
                 std.mem.eql(u8, arg, "--url") or
                 std.mem.eql(u8, arg, "--timeout-ms") or

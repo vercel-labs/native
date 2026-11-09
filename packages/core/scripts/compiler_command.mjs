@@ -1,15 +1,15 @@
 // Resolve a compiler command into the argv prefix used by the core and
 // service drivers. On Windows npm exposes package bins as .cmd shims, which
-// Node's spawnSync cannot execute directly. For the installed scriptc bin,
-// unwrap the shim through the package's own `bin` declaration and execute the
-// declared JavaScript entry with Node. This preserves published-bin changes
-// (for example dist/main.js -> dist/bootstrap.js) without a shell boundary.
+// Node's spawnSync cannot execute directly. Unwrap the shim through the
+// package's own `bin` declaration. Current scriptc releases install a native
+// executable there; older JavaScript bins still run through Node.
 
 import fs from "node:fs";
+import { installedRelease } from "./scriptc_toolchain.mjs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
-function npmBinJavaScript(command) {
+function npmBinTarget(command) {
   const binName = path.basename(command).replace(/\.(?:cmd|bat)$/i, "");
   const nodeModules = path.dirname(path.dirname(command));
   const packageJson = path.join(nodeModules, binName, "package.json");
@@ -33,6 +33,10 @@ function npmBinJavaScript(command) {
   return target;
 }
 
+function publishedBinArgv(target, node) {
+  return /\.(?:cjs|mjs|js)$/i.test(target) ? [node, target] : [target];
+}
+
 export function compilerArgv(command, options = {}) {
   const platform = options.platform ?? process.platform;
   const node = options.node ?? process.execPath;
@@ -40,20 +44,21 @@ export function compilerArgv(command, options = {}) {
   const argv = fs.existsSync(command) ? [command] : command.split(/\s+/);
   if (platform !== "win32" || argv.length !== 1 || !/\.(?:cmd|bat)$/i.test(argv[0])) return argv;
 
-  const npmTarget = npmBinJavaScript(argv[0]);
-  if (npmTarget !== null) return [node, npmTarget];
+  const npmTarget = npmBinTarget(argv[0]);
+  if (npmTarget !== null) return publishedBinArgv(npmTarget, node);
 
   // Development overrides may name an arbitrary batch file rather than an
   // npm bin. cmd.exe is the Windows executable format's required launcher.
   return [env.ComSpec ?? env.COMSPEC ?? "cmd.exe", "/d", "/s", "/c", argv[0]];
 }
 
-/// Resolve scriptc through its published package `bin` declaration. This is
-/// intentionally not `scriptc/dist/main.js`: 0.0.35's bin points at the Node
-/// 24 compile-cache bootstrap, and future package entrypoint changes should
-/// reach every Native check/build invocation automatically.
+// Resolve scriptc through its published package `bin` declaration. The
+// installed scriptc bin is native, so invoke it directly; keep JavaScript bin
+// support for older toolchain fixtures and explicit version probes.
 export function publishedScriptcArgv(origin, options = {}) {
   const node = options.node ?? process.execPath;
+  const release = installedRelease(origin, options);
+  if (release) return [path.join(release.root, "release", "bin", process.platform === "win32" ? "scriptc.exe" : "scriptc")];
   const packageJson = createRequire(origin).resolve("scriptc/package.json");
   const manifest = JSON.parse(fs.readFileSync(packageJson, "utf8"));
   const declared = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.scriptc;
@@ -67,5 +72,5 @@ export function publishedScriptcArgv(origin, options = {}) {
     throw new Error("scriptc package's published binary entrypoint escapes its package");
   }
   if (!fs.statSync(target).isFile()) throw new Error("scriptc package's published binary entrypoint is missing");
-  return [node, target];
+  return publishedBinArgv(target, node);
 }

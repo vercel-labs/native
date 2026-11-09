@@ -24,14 +24,28 @@
 //   node stage_external_core.mjs --src <app src dir> --sdk <sdk dir>
 //     --static <compile-surface core.ts> --facade <core_facade.ts>
 //     --profile <core_profile.json> --out <stage dir>
+//     [--view-markup <app.native> --view-contract <core.contract.json>
+//      [--view-reload]]
+//
+// --view-reload (Debug builds for `native dev` only) also stages the
+// development view evaluator and its two exports, so the running app can
+// replace its views from markup edits without a rebuild.
 
 import fs from "node:fs";
 import path from "node:path";
+import { compileViewProgram } from "../src/view_frontend.ts";
+import { appViewSources } from "../src/view_sources.ts";
+import { stageContractTypes } from "./scriptc_toolchain.mjs";
 
 function parseArgs(argv) {
   const args = {};
   for (let i = 2; i < argv.length; i += 2) {
     const key = argv[i];
+    if (key === "--view-reload") {
+      args["view-reload"] = true;
+      i -= 1;
+      continue;
+    }
     const value = argv[i + 1];
     if (!key.startsWith("--") || value === undefined) {
       console.error("usage: stage_external_core.mjs --src <dir> --sdk <dir> --static <file> --facade <file> --profile <file> --out <dir>");
@@ -73,7 +87,9 @@ function resolveSpecifiers(text, rel) {
     return spelled.startsWith(".") ? spelled : `./${spelled}`;
   };
   return text
+    .replaceAll('"@native-sdk/core/bytes"', `"${toSdk("bytes.ts")}"`)
     .replaceAll('"@native-sdk/core/text"', `"${toSdk("text.ts")}"`)
+    .replaceAll('"@native-sdk/core/theme"', `"${toSdk("theme.ts")}"`)
     .replaceAll('"@native-sdk/core/events"', `"${toSdk("events.ts")}"`)
     .replaceAll('"@native-sdk/core"', `"${toSdk("core.ts")}"`)
     .replaceAll('"@native-sdk/services"', `"${path.posix.relative(path.posix.dirname(rel), "services.gen.ts").startsWith(".") ? path.posix.relative(path.posix.dirname(rel), "services.gen.ts") : `./${path.posix.relative(path.posix.dirname(rel), "services.gen.ts")}`}"`)
@@ -120,6 +136,8 @@ function dedupeAliases(text, dropNames) {
 
 const args = parseArgs(process.argv);
 fs.rmSync(args.out, { recursive: true, force: true });
+// Keep @scriptc/types imports intact: local aliases lose compiler provenance.
+stageContractTypes(args.out, import.meta.url);
 fs.mkdirSync(path.join(args.out, "sdk"), { recursive: true });
 
 // Author sources, at their entry-relative (src-relative) paths.
@@ -134,10 +152,11 @@ for (const rel of authorFiles) {
 
 // Transform 5: the staged SDK library modules spell their exported
 // records as object-literal aliases (value storage).
-for (const sdkFile of ["text.ts", "events.ts"]) {
+for (const sdkFile of ["bytes.ts", "text.ts", "events.ts", "theme.ts", "internal/image_identity.ts", "internal/markdown_policy.ts"]) {
   const staged = fs
     .readFileSync(path.join(args.sdk, sdkFile), "utf8")
     .replace(/^export interface ([A-Za-z0-9_]+) \{/gm, "export type $1 = {");
+  fs.mkdirSync(path.dirname(path.join(args.out, "sdk", sdkFile)), { recursive: true });
   fs.writeFileSync(path.join(args.out, "sdk", sdkFile), staged);
   aliasNames.push(...exportedAliasNames(staged));
 }
@@ -150,6 +169,54 @@ fs.writeFileSync(path.join(args.out, "sdk", "core.ts"), dedupeAliases(fs.readFil
 // the profile's entry spelling expects.
 fs.copyFileSync(args.facade, path.join(args.out, "core_facade.ts"));
 fs.copyFileSync(args.profile, path.join(args.out, "profile.json"));
+if (args["view-reload"] && !args["view-markup"]) throw new Error("--view-reload requires compiled views (--view-markup)");
+if (args["view-markup"]) {
+  if (!args["view-contract"]) throw new Error("compiled views require --view-contract");
+  const contract = JSON.parse(fs.readFileSync(args["view-contract"], "utf8"));
+  const { sources, windows } = appViewSources(args.src);
+  const reload = args["view-reload"] === true;
+  const compiled = compileViewProgram(fs.readFileSync(args["view-markup"], "utf8"), contract, { sources }, windows, undefined, reload);
+  const view = compiled.text;
+  fs.appendFileSync(path.join(args.out, "core_facade.ts"), resolveSpecifiers(view, "core_facade.ts"));
+  if (reload) {
+    const { viewReloadFacade, viewReloadIdentity } = await import("../src/view_reload.ts");
+    const identity = viewReloadIdentity(contract, { windows: windows.map((window) => window.label), virtual: compiled.virtual });
+    fs.appendFileSync(path.join(args.out, "core_facade.ts"), viewReloadFacade(contract, identity));
+  }
+  const profile = JSON.parse(fs.readFileSync(args.profile, "utf8"));
+  profile.exports.push({ export: "native_view", symbol: `${profile.abi.prefix}native_view`, params: [], returns: "bytes" });
+  if (windows.length) profile.exports.push({ export: "native_window_view", symbol: `${profile.abi.prefix}native_window_view`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_media_view", symbol: `${profile.abi.prefix}native_media_view`, params: ["bytes"], returns: "bytes" });
+  if (windows.length) profile.exports.push({ export: "native_media_window_view", symbol: `${profile.abi.prefix}native_media_window_view`, params: ["bytes", "bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_radio_policy", symbol: `${profile.abi.prefix}native_radio_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_tabs_policy", symbol: `${profile.abi.prefix}native_tabs_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_tree_policy", symbol: `${profile.abi.prefix}native_tree_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_list_policy", symbol: `${profile.abi.prefix}native_list_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_menu_policy", symbol: `${profile.abi.prefix}native_menu_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_toggle_policy", symbol: `${profile.abi.prefix}native_toggle_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_accordion_policy", symbol: `${profile.abi.prefix}native_accordion_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_slider_policy", symbol: `${profile.abi.prefix}native_slider_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_split_policy", symbol: `${profile.abi.prefix}native_split_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_scroll_policy", symbol: `${profile.abi.prefix}native_scroll_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_resizable_policy", symbol: `${profile.abi.prefix}native_resizable_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_text_policy", symbol: `${profile.abi.prefix}native_text_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_timer_policy", symbol: `${profile.abi.prefix}native_timer_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_db_policy", symbol: `${profile.abi.prefix}native_db_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_effect_policy", symbol: `${profile.abi.prefix}native_effect_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_stream_policy", symbol: `${profile.abi.prefix}native_stream_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_window_policy", symbol: `${profile.abi.prefix}native_window_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_theme_policy", symbol: `${profile.abi.prefix}native_theme_policy`, params: ["bytes"], returns: "bytes" });
+  profile.exports.push({ export: "native_status_policy", symbol: `${profile.abi.prefix}native_status_policy`, params: ["bytes"], returns: "bytes" });
+  if (view.includes("export function native_virtual_requests(")) {
+    profile.exports.push({ export: "native_virtual_requests", symbol: `${profile.abi.prefix}native_virtual_requests`, params: ["bytes", "bytes"], returns: "bytes" });
+    profile.exports.push({ export: "native_virtual_view", symbol: `${profile.abi.prefix}native_virtual_view`, params: ["bytes", "bytes", "bytes"], returns: "bytes" });
+  }
+  if (reload) {
+    profile.exports.push({ export: "native_dev_view_prepare", symbol: `${profile.abi.prefix}native_dev_view_prepare`, params: ["bytes"], returns: "bytes" });
+    profile.exports.push({ export: "native_dev_view_reset", symbol: `${profile.abi.prefix}native_dev_view_reset`, params: [], returns: "bytes" });
+  }
+  fs.writeFileSync(path.join(args.out, "profile.json"), JSON.stringify(profile, null, 2) + "\n");
+}
 if (args["services-client"]) {
   const client = resolveSpecifiers(fs.readFileSync(args["services-client"], "utf8"), "services.gen.ts");
   fs.writeFileSync(path.join(args.out, "services.gen.ts"), client);

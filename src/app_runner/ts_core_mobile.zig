@@ -5,7 +5,8 @@
 //! embed host's AppDef contract (`Model`, `Msg`, `initModel`,
 //! `mobileOptions` — see `src/embed/ui_host.zig`) over the same staged
 //! mirror (core.zig), markup (app.native), service registry (services.zig),
-//! and carrier constant (service_carrier.zig) the desktop wiring uses.
+//! carrier constant (service_carrier.zig), and comptime-compiled root
+//! markup closure the desktop wiring uses.
 //!
 //! What differs from ts_core_main.zig is only the shell:
 //!
@@ -38,19 +39,25 @@ const manifest = @import("app_manifest_zon");
 pub const core = @import("core.zig");
 const services = @import("services.zig");
 const service_carrier = @import("service_carrier.zig");
+const app_sources = @import("app_sources.zig");
+const app_markup_root = @import("app_markup_root");
 
-const Adapter = native_sdk.TsUiApp(core);
+/// Shared with the embed host: its UiApp type must use the same feature set
+/// as this module's TypeScript adapter or their Options types are distinct.
+pub const features: native_sdk.UiAppFeatures = .{ .runtime_markup = false, .compiled_model = ts_view.enabled };
+const Adapter = native_sdk.TsUiAppWithFeatures(core, features);
 
-/// Re-exported for the embed host's AppDef contract (and any test that
-/// reflects the core's real surface).
-pub const Model = core.Model;
+/// The embed host stores the selected runtime representation. Contract
+/// reflection continues to use the complete source state.
+pub const Model = Adapter.Model;
+pub const SourceModel = core.Model;
 pub const Msg = core.Msg;
 
-extern const native_sdk_app_markup: u8;
-extern const native_sdk_app_markup_len: usize;
-pub fn appMarkup() []const u8 {
-    return @as([*]const u8, @ptrCast(&native_sdk_app_markup))[0..native_sdk_app_markup_len];
-}
+const app_markup_sources = [_]native_sdk.canvas.ui_markup.SourceFile{
+    .{ .path = "app.native", .source = app_markup_root.source },
+} ++ app_sources.sources;
+const ts_view = @import("compiled_view.zig");
+const CompiledAppView = if (ts_view.enabled) ts_view else native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 
 comptime {
     // The build graph resolves the carrier before staging this file; a
@@ -90,18 +97,18 @@ var data_root_env_count: usize = 0;
 /// The embed host calls `mobileOptions()` first (UiAppHost.create), so the
 /// boot model is committed by the time `initModel` reads it.
 pub fn initModel() Model {
-    return Adapter.Host.model().*;
+    return Adapter.Host.runtimeModel().*;
 }
 
 pub fn mobileOptions() Adapter.Options {
-    if (comptime @hasDecl(core.Model, "windows")) {
+    if (comptime core.has_windows) {
         @compileError("model-declared secondary windows are a desktop shell capability; omit windows(model) from mobile targets");
     }
     var options: Adapter.Options = .{
         .name = manifest.name,
         .scene = mobile_scene,
         .canvas_label = native_sdk.embed.mobile_gpu_surface_label,
-        .markup = .{ .source = appMarkup() },
+        .view = if (ts_view.enabled) ts_view.buildRuntime else CompiledAppView.build,
         // app.zon's theme pack and one-accent override, same as desktop.
         .theme = comptime manifestThemePack(),
         .theme_accent = comptime manifestThemeAccent(),
@@ -148,6 +155,11 @@ fn coreOptions() Adapter.CoreOptions {
                 // ambient value for this reserved variable.
                 data_root_env_indices[data_root_env_count] = env_entry_count;
                 data_root_env_count += 1;
+                env_entries[env_entry_count] = .{ .msg = entry.msg, .value = "" };
+                env_entry_count += 1;
+            } else if (comptime std.mem.eql(u8, entry.env, "NATIVE_SDK_APP_CACHE_DIR")) {
+                // URL media caching has no mobile cache-root capability yet.
+                // Report its absence without reading an ambient path override.
                 env_entries[env_entry_count] = .{ .msg = entry.msg, .value = "" };
                 env_entry_count += 1;
             } else if (std.c.getenv(entry.env)) |value| {

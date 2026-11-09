@@ -43,6 +43,22 @@ pub const RuntimeWindow = struct {
     title_storage: [platform.max_window_title_bytes]u8 = undefined,
     main_parent_storage: [platform.max_view_label_bytes]u8 = undefined,
     source_storage: RuntimeSourceStorage = .{},
+
+    /// A table move copies inline storage but its slices still address the
+    /// old slot. Rebind every owned field before that slot can be reused.
+    pub fn rebindStorage(self: *RuntimeWindow) void {
+        self.info.label = self.label_storage[0..self.info.label.len];
+        self.info.title = self.title_storage[0..self.info.title.len];
+        if (self.main_parent) |parent| self.main_parent = self.main_parent_storage[0..parent.len];
+        if (self.source) |*source| {
+            source.bytes = self.source_storage.bytes[0..source.bytes.len];
+            if (source.asset_options) |*assets| {
+                assets.root_path = self.source_storage.asset_root_path[0..assets.root_path.len];
+                assets.entry = self.source_storage.asset_entry[0..assets.entry.len];
+                assets.origin = self.source_storage.asset_origin[0..assets.origin.len];
+            }
+        }
+    }
 };
 
 pub const RuntimeMainWebViewState = struct {

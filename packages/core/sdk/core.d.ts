@@ -1,9 +1,19 @@
-export declare function asciiBytes(s: string): Uint8Array;
-export declare function utf8Bytes(s: string): Uint8Array;
+export interface ImageWordsCommand {
+    readonly operation: "load" | "cancel" | "unregister";
+    readonly identity: ImageIdentity;
+    readonly path: Uint8Array;
+    readonly url: Uint8Array;
+    readonly cachePath: Uint8Array;
+    readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.js";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.js";
+import { type ImageIdentity } from "./internal/image_identity.js";
+export { asciiBytes, utf8Bytes } from "./bytes.js";
 export type Msgish = {
     readonly kind: string;
 };
-import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.js";
+import { type GlobalShortcutEvent, type GlobalShortcutState, type WindowDescriptor, type WindowDescriptorSpec } from "./events.js";
 export declare function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor;
 /** Cooperative cancellation capability supplied by generated service hosts. */
 export interface ServiceCancellation {
@@ -47,6 +57,18 @@ export type AudioEventArm = {
     readonly buffering: boolean;
     readonly bands: Uint8Array;
 };
+/** Complete native audio reports. Identities and millisecond counters are
+ * canonical unsigned decimal bytes, preserving every u64 value. */
+export type ExactAudioEventArm = {
+    readonly key: Uint8Array;
+    readonly state: AudioState;
+    readonly positionMs: Uint8Array;
+    readonly durationMs: Uint8Array;
+    readonly playing: boolean;
+    readonly buffering: boolean;
+    readonly bands: Uint8Array;
+};
+export type ExactAudioEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ExactAudioEventArm] ? [keyof ExactAudioEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ExactAudioEventArm ? [AudioState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
 export type AudioEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof AudioEventArm] ? [keyof AudioEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & AudioEventArm ? [AudioState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
 export type VideoState = "loaded" | "position" | "completed" | "failed" | "rejected";
 export type VideoEventArm = {
@@ -79,6 +101,26 @@ export type ChannelEventArm = {
 export type ChannelEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ChannelEventArm] ? [keyof ChannelEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ChannelEventArm ? [ChannelState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
 export interface ChannelRoute<M extends Msgish> {
     readonly event: ChannelEventKind<M>;
+}
+/** The immediate outcome of starting an external producer. A refused open
+ * skips startup; a started producer alone may post. Failure bytes describe the
+ * native startup error. Replay supplies this outcome without starting a source.
+ */
+export type ChannelSourceState = "started" | "skipped" | "failed";
+export type ChannelSourceArm = {
+    readonly key: number;
+    readonly state: ChannelSourceState;
+    readonly bytes: Uint8Array;
+};
+export type ChannelSourceKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ChannelSourceArm] ? [keyof ChannelSourceArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ChannelSourceArm ? [ChannelSourceState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
+export type GlobalShortcutKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof GlobalShortcutEvent] ? [keyof GlobalShortcutEvent] extends [Exclude<keyof M, "kind">] ? M extends Msgish & GlobalShortcutEvent ? [GlobalShortcutState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
+export interface GlobalShortcutBinding {
+    readonly key: Uint8Array;
+    readonly primary?: boolean;
+    readonly command?: boolean;
+    readonly control?: boolean;
+    readonly option?: boolean;
+    readonly shift?: boolean;
 }
 export type AudioCaptureSource = "microphone" | "system";
 export type AudioCaptureState = "started" | "data" | "failed" | "stopped" | "rejected";
@@ -191,6 +233,99 @@ export interface FetchStreamRoute<M extends Msgish> {
     readonly ok: TimestampKind<M>;
     readonly err: BytesKind<M>;
 }
+export type SpawnExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export type ClipboardOutcome = "ok" | "failed" | "rejected" | "cancelled";
+export type ClipboardOp = "read" | "write";
+export type VideoSourceKind = "local" | "stream";
+export interface SpawnLineEventArm {
+    readonly key: Uint8Array;
+    readonly line: Uint8Array;
+    readonly truncated: boolean;
+    readonly droppedBefore: number;
+}
+export interface SpawnExitEventArm {
+    readonly key: Uint8Array;
+    readonly code: number;
+    readonly reason: SpawnExitReason;
+    readonly droppedLines: number;
+    readonly output: Uint8Array;
+    readonly outputTruncated: boolean;
+    readonly stderrTail: Uint8Array;
+    readonly stderrTruncated: boolean;
+}
+export interface ClipboardEventArm {
+    readonly key: Uint8Array;
+    readonly operation: ClipboardOp;
+    readonly outcome: ClipboardOutcome;
+    readonly text: Uint8Array;
+    readonly droppedBefore: number;
+}
+export interface VideoSnapshotArm {
+    readonly key: Uint8Array;
+    readonly active: boolean;
+    readonly surface: number;
+    readonly playing: boolean;
+    readonly buffering: boolean;
+    readonly completed: boolean;
+    readonly looping: boolean;
+    readonly muted: boolean;
+    readonly source: VideoSourceKind;
+    readonly positionMs: number;
+    readonly durationMs: number;
+    readonly width: number;
+    readonly height: number;
+    readonly volume: number;
+}
+export type CapabilityKind<M extends Msgish, P> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof P] ? [keyof P] extends [Exclude<keyof M, "kind">] ? M extends Msgish & P ? P extends Omit<M, "kind"> ? M["kind"] : never : never : never : never : never;
+export interface SpawnEventsRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly stdin?: Uint8Array;
+    readonly collect?: boolean;
+    readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+    readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+/** Native subprocess identity and complete results, without numeric rounding. */
+export interface ExactSpawnEventsRoute<M extends Msgish> {
+    readonly stdin?: Uint8Array;
+    readonly collect?: boolean;
+    readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+    readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
+export type FileEvent = "terminal" | "chunk" | "done";
+export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
+export interface FileResultArm {
+    readonly key: Uint8Array;
+    readonly operation: FileOperation;
+    readonly event: FileEvent;
+    readonly outcome: FileOutcome;
+    readonly bytes: Uint8Array;
+    readonly totalBytes: Uint8Array;
+    readonly mtimeMs: Uint8Array;
+    readonly exists: boolean;
+    readonly droppedBefore: number;
+}
+export type TimerOutcome = "fired" | "rejected";
+export interface TimerResultArm {
+    readonly key: Uint8Array;
+    readonly timestampNs: Uint8Array;
+    readonly outcome: TimerOutcome;
+}
+export interface FileResultRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly replace?: boolean;
+    readonly result: CapabilityKind<M, FileResultArm>;
+}
+export interface TimerResultRoute<M extends Msgish> {
+    readonly result: CapabilityKind<M, TimerResultArm>;
+}
+export interface ClipboardResultRoute<M extends Msgish> {
+    readonly key?: string;
+    readonly result: CapabilityKind<M, ClipboardEventArm>;
+}
+export interface VideoSnapshotRoute<M extends Msgish> {
+    readonly snapshot: CapabilityKind<M, VideoSnapshotArm>;
+}
 export interface SpawnRoute<M extends Msgish> {
     readonly key?: string;
     readonly stdin?: Uint8Array;
@@ -214,6 +349,18 @@ export interface AudioSource {
 export interface AudioRoute<M extends Msgish> {
     readonly event: AudioEventKind<M>;
 }
+export interface ExactAudioSource extends AudioSource {
+    /** Derive a content-addressed path for the URL when cachePath is empty.
+     * Empty or omitted disables caching. */
+    readonly cacheDir?: Uint8Array;
+}
+export interface ExactAudioRoute<M extends Msgish> {
+    readonly event: ExactAudioEventKind<M>;
+}
+/** Controls for the single native player. Volume is remembered while idle;
+ * seek positions use canonical unsigned decimal bytes. */
+export { type AudioTransport } from "./events.js";
+import { type AudioTransport } from "./events.js";
 export interface VideoSource {
     readonly surface: number;
     readonly path?: Uint8Array;
@@ -230,6 +377,19 @@ export interface ImageSource {
     readonly url?: Uint8Array;
     readonly cachePath?: Uint8Array;
     readonly expectedBytes?: number;
+}
+/** Complete image terminal with a lossless requested identity. */
+export type ImageWordsEventArm = {
+    readonly imageLower: number;
+    readonly imageUpper: number;
+    readonly state: ImageState;
+    readonly width: number;
+    readonly height: number;
+    readonly status: number;
+};
+export type ImageWordsEventKind<M extends Msgish> = M extends Msgish ? [Exclude<keyof M, "kind">] extends [keyof ImageWordsEventArm] ? [keyof ImageWordsEventArm] extends [Exclude<keyof M, "kind">] ? M extends Msgish & ImageWordsEventArm ? [ImageState] extends [M["state"]] ? M["kind"] : never : never : never : never : never;
+export interface ImageWordsRoute<M extends Msgish> {
+    readonly event: ImageWordsEventKind<M>;
 }
 export interface ImageRoute<M extends Msgish> {
     readonly event: ImageEventKind<M>;
@@ -256,6 +416,7 @@ export interface NotificationSpec {
     readonly actionCommand?: Uint8Array;
 }
 export type LocalTimeStyle = "date" | "time" | "datetime";
+export type KeyChord = GlobalShortcutBinding;
 export type Cmd<M extends Msgish> = {
     readonly op: "none";
 } | {
@@ -422,6 +583,77 @@ export type Cmd<M extends Msgish> = {
     readonly op: "clip_write";
     readonly bytes: Uint8Array;
 } | {
+    readonly op: "wall_time";
+    readonly msgKind: string;
+} | {
+    readonly op: "read_file_result_key";
+    readonly replace: boolean;
+    readonly key: Uint8Array;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "write_file_result_key";
+    readonly replace: boolean;
+    readonly key: Uint8Array;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "cancel_key";
+    readonly key: Uint8Array;
+} | {
+    readonly op: "read_file_result";
+    readonly replace: boolean;
+    readonly key: string;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+} | {
+    readonly op: "write_file_result";
+    readonly replace: boolean;
+    readonly key: string;
+    readonly resultKind: string;
+    readonly path: Uint8Array;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "timer_result_exact";
+    readonly key: string;
+    readonly afterMs: Uint8Array;
+    readonly mode: "one_shot" | "repeating";
+    readonly msgKind: string;
+} | {
+    readonly op: "timer_result";
+    readonly key: string;
+    readonly afterMs: number;
+    readonly mode: "one_shot" | "repeating";
+    readonly msgKind: string;
+} | {
+    readonly op: "clip_write_result";
+    readonly key: string;
+    readonly resultKind: string;
+    readonly bytes: Uint8Array;
+} | {
+    readonly op: "spawn_events";
+    readonly key: string;
+    readonly lineKind: string;
+    readonly exitKind: string;
+    readonly collect: boolean;
+    readonly argv: readonly Uint8Array[];
+    readonly stdin: Uint8Array;
+} | {
+    readonly op: "spawn_events_exact";
+    readonly key: Uint8Array;
+    readonly lineKind: string;
+    readonly exitKind: string;
+    readonly collect: boolean;
+    readonly argv: readonly Uint8Array[];
+    readonly stdin: Uint8Array;
+} | {
+    readonly op: "cancel_exact";
+    readonly key: Uint8Array;
+} | {
+    readonly op: "video_snapshot";
+    readonly snapshotKind: string;
+} | {
     readonly op: "clip_read";
     readonly key: string;
     readonly okKind: string;
@@ -462,6 +694,18 @@ export type Cmd<M extends Msgish> = {
     readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
     readonly value: number;
 } | {
+    readonly op: "audio_play_exact";
+    readonly key: Uint8Array;
+    readonly eventKind: string;
+    readonly path: Uint8Array;
+    readonly url: Uint8Array;
+    readonly cachePath: Uint8Array;
+    readonly cacheDir: Uint8Array;
+    readonly expectedBytes: number;
+} | {
+    readonly op: "audio_transport";
+    readonly transport: AudioTransport;
+} | {
     readonly op: "video_load";
     readonly key: string;
     readonly eventKind: string;
@@ -474,13 +718,19 @@ export type Cmd<M extends Msgish> = {
 } | {
     readonly op: "video_ctl";
     readonly key: string;
-    readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+    readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
     readonly value: number;
 } | {
     readonly op: "window_show";
     readonly label: string;
 } | {
     readonly op: "window_hide";
+    readonly label: string;
+} | {
+    readonly op: "window_close";
+    readonly label: string;
+} | {
+    readonly op: "window_minimize";
     readonly label: string;
 } | {
     readonly op: "dock_presence";
@@ -496,6 +746,20 @@ export type Cmd<M extends Msgish> = {
     readonly cachePath: Uint8Array;
     readonly expectedBytes: number;
 } | {
+    readonly op: "image_load_words";
+    readonly identity: ImageIdentity;
+    readonly eventKind: string;
+    readonly path: Uint8Array;
+    readonly url: Uint8Array;
+    readonly cachePath: Uint8Array;
+    readonly expectedBytes: number;
+} | {
+    readonly op: "image_cancel_words";
+    readonly identity: ImageIdentity;
+} | {
+    readonly op: "image_unregister_words";
+    readonly identity: ImageIdentity;
+} | {
     readonly op: "image_cancel";
     readonly id: number;
 } | {
@@ -506,6 +770,14 @@ export type Cmd<M extends Msgish> = {
     readonly key: number;
     readonly eventKind: string;
     readonly maxPending: number;
+} | {
+    readonly op: "channel_open_source";
+    readonly key: number;
+    readonly eventKind: string;
+    readonly startedKind: string;
+    readonly maxPending: number;
+    readonly source: string;
+    readonly payload: Uint8Array;
 } | {
     readonly op: "channel_close";
     readonly key: number;
@@ -561,6 +833,14 @@ export declare const Cmd: {
     none: Cmd<never>;
     persist(): Cmd<never>;
     now<M extends Msgish>(msgKind: TimestampKind<M>): Cmd<M>;
+    wallTime<M extends Msgish>(msgKind: BytesKind<M>): Cmd<M>;
+    readFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    writeFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    cancelKey(key: Uint8Array): Cmd<never>;
+    readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M>;
+    timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M>;
+    timerResultExact<M extends Msgish>(key: string, afterMs: Uint8Array, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M>;
     host: typeof hostCmd;
     request<M extends Msgish>(name: string, payload: Uint8Array | HostRecord, route: RequestRoute<M>): Cmd<M>;
     serviceRequest<M extends Msgish, P>(name: string, payload: Uint8Array, route: ServiceRoute<M, P>): Cmd<M>;
@@ -593,20 +873,43 @@ export declare const Cmd: {
     };
     fetch: typeof fetchCmd;
     clipboardWrite(bytes: Uint8Array): Cmd<never>;
+    clipboardWriteResult<M extends Msgish>(bytes: Uint8Array, route: ClipboardResultRoute<M>): Cmd<M>;
     clipboardRead<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     showNotification(spec: NotificationSpec): Cmd<never>;
     openExternalUrl(url: Uint8Array): Cmd<never>;
     revealPath(path: Uint8Array): Cmd<never>;
+    keyboard: {
+        sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M>;
+        accessStatus<M extends Msgish>(options: {
+            readonly prompt?: boolean;
+        }, route: RequestRoute<M>): Cmd<M>;
+    };
     formatLocalTime<M extends Msgish>(timestampMs: number, style: LocalTimeStyle, route: RequestRoute<M>): Cmd<M>;
     delay<M extends Msgish>(key: string, ms: number, msgKind: TimestampKind<M>): Cmd<M>;
     spawn<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnRoute<M> | SpawnCollectRoute<M>): Cmd<M>;
+    spawnEvents<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnEventsRoute<M>): Cmd<M>;
+    /** Stream complete subprocess records under a canonical unsigned decimal key.
+     * Native admission owns duplicate-key refusal and the one terminal per request.
+     * A refused request retains its own completion route without replacing a live child.
+     * Malformed keys fail admission before any native operation. */
+    spawnEventsExact<M extends Msgish>(key: Uint8Array, argv: readonly Uint8Array[], route: ExactSpawnEventsRoute<M>): Cmd<M>;
+    /** Cancel an engine effect by its exact native identity. Its ordinary terminal remains routed. */
+    cancelExact(key: Uint8Array): Cmd<never>;
     audioPlay<M extends Msgish>(key: string, source: AudioSource, route: AudioRoute<M>): Cmd<M>;
+    /** Open the single player with an exact caller-chosen u64 identity.
+     * Deferred rejections and failures retain their load's route and key after replacement.
+     * A rejected source reports its own key without replacing the active player.
+     * Malformed identities fail admission before any native operation. */
+    audioPlayExact<M extends Msgish>(key: Uint8Array, source: ExactAudioSource, route: ExactAudioRoute<M>): Cmd<M>;
+    audioTransport(transport: AudioTransport): Cmd<never>;
     audioPause(key: string): Cmd<never>;
     audioResume(key: string): Cmd<never>;
     audioStop(key: string): Cmd<never>;
     audioSeek(key: string, ms: number): Cmd<never>;
     audioSetVolume(key: string, volume: number): Cmd<never>;
     videoLoad<M extends Msgish>(key: string, source: VideoSource, route: VideoRoute<M>): Cmd<M>;
+    videoSnapshot<M extends Msgish>(route: VideoSnapshotRoute<M>): Cmd<M>;
+    videoRestart(key: string): Cmd<never>;
     videoPlay(key: string): Cmd<never>;
     videoPause(key: string): Cmd<never>;
     videoStop(key: string): Cmd<never>;
@@ -616,14 +919,32 @@ export declare const Cmd: {
     videoSetLoop(key: string, loop: boolean): Cmd<never>;
     showWindow(label: string): Cmd<never>;
     hideWindow(label: string): Cmd<never>;
+    closeWindow(label: string): Cmd<never>;
+    minimizeWindow(label: string): Cmd<never>;
     setDockPresence(visible: boolean): Cmd<never>;
     launchAtLoginStatus<M extends Msgish>(route: RequestRoute<M>): Cmd<M>;
     setLaunchAtLogin<M extends Msgish>(enabled: boolean, route: RequestRoute<M>): Cmd<M>;
     quitApp(): Cmd<never>;
     imageLoad<M extends Msgish>(id: number, source: ImageSource, route: ImageRoute<M>): Cmd<M>;
+    /** Lossless 63-bit identities: a 32-bit lower word and a 31-bit upper word. */
+    imageLoadWords<M extends Msgish>(identity: ImageIdentity, source: ImageSource, route: ImageWordsRoute<M>): Cmd<M>;
+    imageCancelWords(identity: ImageIdentity): Cmd<never>;
+    imageUnregisterWords(identity: ImageIdentity): Cmd<never>;
+    imageBatchWords<M extends Msgish>(commands: readonly ImageWordsCommand[], route: ImageWordsRoute<M>): Cmd<M>;
     imageCancel(id: number): Cmd<never>;
     imageUnregister(id: number): Cmd<never>;
     channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M>;
+    /** Open a channel and attempt native producer startup in the same dispatch.
+     * The source name is 1–255 UTF-8 bytes and arguments are at most 4096 bytes.
+     * Startup runs only for this newly accepted occupancy; a refused open never
+     * starts an existing producer. The started arm runs before the settled view,
+     * while channel events retain their normal drain boundary. On failure the
+     * app closes the channel. The built-in native-sdk.process.samples source
+     * takes empty arguments and posts process readings every 500 ms.
+     */
+    channelOpenSource<M extends Msgish>(key: number, source: string, payload: Uint8Array, route: ChannelRoute<M> & {
+        readonly started: ChannelSourceKind<M>;
+    }): Cmd<M>;
     channelClose(key: number): Cmd<never>;
     audioCaptureStart<M extends Msgish>(key: number, spec: AudioCaptureSpec, route: AudioCaptureRoute<M>): Cmd<M>;
     audioCaptureStop(key: number): Cmd<never>;
@@ -641,6 +962,12 @@ export type Sub<M extends Msgish> = {
     readonly everyMs: number;
     readonly msgKind: string;
 } | {
+    readonly op: "global_shortcut";
+    readonly id: string;
+    readonly key: Uint8Array;
+    readonly modifiers: number;
+    readonly msgKind: string;
+} | {
     readonly op: "db_live";
     readonly key: string;
     readonly pageKind: string;
@@ -656,6 +983,6 @@ export type Sub<M extends Msgish> = {
 export declare const Sub: {
     none: Sub<never>;
     timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M>;
+    globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M>;
     batch<M extends Msgish>(subs: readonly Sub<M>[]): Sub<M>;
 };
-export {};

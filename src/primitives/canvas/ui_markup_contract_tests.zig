@@ -203,6 +203,15 @@ const fixtures = [_]Fixture{
         .expect = null,
     },
     .{
+        .name = "digit-only text attributes remain text",
+        .source =
+        \\<column padding="8">
+        \\  <text-field placeholder="123" label="456" />
+        \\</column>
+        ,
+        .expect = null,
+    },
+    .{
         .name = "a missing model field rejects",
         .source =
         \\<column>
@@ -865,6 +874,55 @@ test "app: icon references check against the contract's registered icon list" {
     try testing.expectEqualStrings(markup.app_icon_prefix, contract.app_icon_prefix);
 }
 
+test "segmented-control bindings and messages check through the model contract" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const document = try parseFixture(arena,
+        \\<row>
+        \\  <segmented-control selected="{active}" icon="settings" on-press="add">Settings</segmented-control>
+        \\</row>
+    );
+    var usage = try contract.Usage.init(arena, &model_contract);
+    try testing.expectEqual(null, try contract.checkDocument(arena, document, &model_contract, &usage));
+}
+
+test "the contract checker validates a forwarded template-root press" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const document = try parseFixture(arena,
+        \\<template name="item" args="title">
+        \\  <timeline-item title="{title}" />
+        \\</template>
+        \\<row>
+        \\  <use template="item" title="Build" on-press="remove:{profile.age}" />
+        \\</row>
+    );
+    try testing.expectEqual(null, try contract.checkDocument(arena, document, &model_contract, null));
+}
+test "the contract checker validates stepper slot content in the consumer scope" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const document = try parseFixture(arena,
+        \\<template name="stepper" args="active">
+        \\  <stepper active="{active}">
+        \\    <slot/>
+        \\  </stepper>
+        \\</template>
+        \\<row>
+        \\  <use template="stepper" active="{count}">
+        \\    <step>{missing}</step>
+        \\  </use>
+        \\</row>
+    );
+    const message = (try contractMessage(arena, document, null)).?;
+    try testing.expect(std.mem.startsWith(u8, message, contract.binding_model_message));
+}
+
 // ------------------------------------------------------------ dead state
 
 test "dead state warns on unbound model state and undispatched Msg tags" {
@@ -1314,4 +1372,23 @@ test "a declared mirror union classifies as a text_input payload" {
         }
     }
     try testing.expect(saw_edit);
+}
+
+test "direct virtual contract checks reject repeated attributes before scope lookup" {
+    const empty_contract = contract.Contract{};
+    for ([_][]const u8{ "virtual-window", "virtual-list" }) |name| {
+        const allowed: []const []const u8 = if (std.mem.eql(u8, name, "virtual-window")) &markup.virtual_window_attrs else &markup.virtual_list_attrs;
+        for (allowed) |attribute| {
+            const attrs = [_]markup.MarkupAttr{
+                .{ .name = attribute, .value = "1", .line = 2, .column = 3 },
+                .{ .name = attribute, .value = "2", .line = 4, .column = 5 },
+            };
+            const document = markup.MarkupDocument{ .root = .{ .kind = .element, .name = name, .attrs = &attrs, .src_path = "view.native" } };
+            const info = (try contract.checkDocument(testing.allocator, document, &empty_contract, null)).?;
+            try testing.expectEqualStrings("duplicate virtual markup attribute", info.message);
+            try testing.expectEqual(@as(usize, 4), info.line);
+            try testing.expectEqual(@as(usize, 5), info.column);
+            try testing.expectEqualStrings("view.native", info.path);
+        }
+    }
 }

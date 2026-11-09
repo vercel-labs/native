@@ -66,6 +66,8 @@ export interface FrontendResult {
   readonly servicesContract: string | null;
   /// The generated typed-client module projected from the service sidecar.
   readonly servicesClient: string | null;
+  /// The declaration module for `servicesClient`.
+  readonly servicesClientDeclarations: string | null;
   readonly diagnostics: SubsetDiagnostic[];
   /// Non-fatal capability and persistence-contract teaching notices:
   /// surfaced as warnings, never failing the check.
@@ -87,7 +89,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     options.sdkCorePath,
   );
   if (graph.diagnostics.length > 0) {
-    return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: graph.diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
 
   const loadProgramFiles = (program: ts.Program): {
@@ -111,7 +113,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   let program = createSubsetProgram(entry, graph.files, new Map(), options.sdkCorePath);
   let loaded = loadProgramFiles(program);
   if (loaded === null || loaded.files.length === 0) {
-    return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: [], warnings: [], typeErrors: [`cannot read ${entry}`], inputs: [...graph.files] };
   }
   let tast = new TypedAst(program);
   let coreFiles = loaded.coreFiles;
@@ -129,7 +131,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     options.servicePackages ?? [],
   );
   if (serviceSurface.diagnostics.length > 0) {
-    return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
 
   // The typed client is virtual during checking: authors import the stable
@@ -142,7 +144,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     program = createSubsetProgram(entry, graph.files, new Map([[generatedPath, serviceSurface.client]]), options.sdkCorePath);
     loaded = loadProgramFiles(program);
     if (loaded === null) {
-      return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [], warnings: [], typeErrors: ["cannot materialize the generated service client"], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: [], warnings: [], typeErrors: ["cannot materialize the generated service client"], inputs: [...graph.files] };
     }
     tast = new TypedAst(program);
     coreFiles = loaded.coreFiles;
@@ -160,7 +162,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
       options.servicePackages ?? [],
     );
     if (serviceSurface.diagnostics.length > 0) {
-      return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: [...serviceSurface.diagnostics], warnings: [], typeErrors: [], inputs: [...graph.files] };
     }
   }
 
@@ -180,7 +182,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
     }
   }
   if (typeErrors.length > 0) {
-    return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: [], warnings: [], typeErrors: [...new Set(typeErrors)], inputs: [...graph.files] };
   }
 
   if (infer.conflicts.length > 0) {
@@ -195,7 +197,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
         column,
       );
     });
-    return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics, warnings: [], typeErrors: [], inputs: [...graph.files] };
   }
   const serviceOps = serviceSurface.contract === null
     ? null
@@ -213,7 +215,7 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
   );
   const checkResult = checker.check();
   if (checkResult.diagnostics.length > 0) {
-    return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: checkResult.diagnostics, warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
   }
   try {
     // The contract sidecar emits from the SAME checked analysis, so a
@@ -228,13 +230,13 @@ export function checkFile(entry: string, options: FrontendOptions = {}): Fronten
       warnings.push(...checkPersistSchemaState(coreFiles[0], options.persistStatePath, options.persistVersion, fingerprint));
     }
     const contract = options.contractEntry !== undefined ? emittedContract : null;
-    return { ok: true, contract, servicesContract: serviceSurface.contract, servicesClient: serviceSurface.client, diagnostics: [], warnings, typeErrors: [], inputs: [...graph.files] };
+    return { ok: true, contract, servicesContract: serviceSurface.contract, servicesClient: serviceSurface.client, servicesClientDeclarations: serviceSurface.clientDeclarations, diagnostics: [], warnings, typeErrors: [], inputs: [...graph.files] };
   } catch (e) {
     if (e instanceof ContractError) {
       const file = e.node.getSourceFile();
       const { line, column } = lineColumn(file, e.node.getStart());
       const d = makeDiagnostic("NS1063", `${e.message[0].toUpperCase()}${e.message.slice(1)}.`, file.fileName, line, column);
-      return { ok: false, contract: null, servicesContract: null, servicesClient: null, diagnostics: [d], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
+      return { ok: false, contract: null, servicesContract: null, servicesClient: null, servicesClientDeclarations: null, diagnostics: [d], warnings: checkResult.warnings, typeErrors: [], inputs: [...graph.files] };
     }
     throw e;
   }

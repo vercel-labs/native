@@ -13,11 +13,12 @@
 //! present but no rebuild; a keystroke records emit without a rebuild —
 //! so each stage keeps its own ring and sample count instead of one
 //! row per frame. Percentiles are computed only at snapshot time
-//! (nearest-rank over a copied, insertion-sorted window), never in the
+//! (nearest-rank over a copied, sorted window), never in the
 //! frame path.
 
 const std = @import("std");
 const runtime_clock = @import("clock.zig");
+const snapshot = @import("snapshot_policy.zig");
 
 /// Rolling window length per stage. 128 samples is ~2 s of 60 fps
 /// present-side stages and a long memory for sparse stages (rebuilds),
@@ -78,12 +79,12 @@ pub const FrameProfileStageStats = struct {
 };
 
 /// The profile state itself: one bool gate plus per-stage rings. Lives
-/// by value on the Runtime; small enough that `Runtime.initAt`'s
-/// default-copy covers it.
+/// by value on the Runtime and initialized explicitly by `Runtime.initAt`.
 pub const FrameProfile = struct {
     /// The runtime toggle (`native automate profile on|off`). Every
     /// stamp site checks this before reading the clock.
     enabled: bool = false,
+    policy: snapshot.Policy = null,
     lens: [frame_profile_stage_count]u16 = @splat(0),
     heads: [frame_profile_stage_count]u16 = @splat(0),
     totals: [frame_profile_stage_count]u64 = @splat(0),
@@ -102,7 +103,8 @@ pub const FrameProfile = struct {
     pub inline fn end(self: *FrameProfile, stage: FrameProfileStage, begin_ns: u64) void {
         if (begin_ns == 0) return;
         const now = runtime_clock.monotonicNanoseconds();
-        self.recordNs(stage, now -| begin_ns);
+        const elapsed = snapshot.plan(self.policy, .elapsed, .{ .words = .{ begin_ns, now, 0, 0, 0, 0, 0, 0 } });
+        self.recordNs(stage, elapsed.words[0]);
     }
 
     /// Record an externally measured duration (host-stamped decode/draw
@@ -110,28 +112,27 @@ pub const FrameProfile = struct {
     pub fn recordNs(self: *FrameProfile, stage: FrameProfileStage, elapsed_ns: u64) void {
         if (!self.enabled) return;
         const index = @intFromEnum(stage);
-        const us = elapsed_ns / std.time.ns_per_us;
-        const sample: u32 = @intCast(@min(us, std.math.maxInt(u32)));
-        self.samples_us[index][self.heads[index]] = sample;
-        self.heads[index] = @intCast((self.heads[index] + 1) % max_frame_profile_samples);
-        if (self.lens[index] < max_frame_profile_samples) self.lens[index] += 1;
-        self.totals[index] +%= 1;
+        const projection = snapshot.plan(self.policy, .record, .{ .flags = 1, .words = .{ elapsed_ns, self.lens[index], self.heads[index], self.totals[index], 0, 0, 0, 0 } });
+        self.samples_us[index][self.heads[index]] = @intCast(projection.words[3]);
+        self.lens[index] = @intCast(projection.words[0]);
+        self.heads[index] = @intCast(projection.words[1]);
+        self.totals[index] = projection.words[2];
     }
 
     /// Drop every recorded sample (enable state is left alone).
     pub fn reset(self: *FrameProfile) void {
-        self.lens = @splat(0);
-        self.heads = @splat(0);
-        self.totals = @splat(0);
+        const projection = snapshot.plan(self.policy, .reset, .{});
+        self.lens = @splat(@intCast(projection.words[0]));
+        self.heads = @splat(@intCast(projection.words[1]));
+        self.totals = @splat(projection.words[2]);
     }
 
     /// True when any stage holds samples — the snapshot's "print the
     /// frame_profile line at all" gate.
     pub fn hasSamples(self: *const FrameProfile) bool {
-        for (self.lens) |len| {
-            if (len > 0) return true;
-        }
-        return false;
+        var lengths: [frame_profile_stage_count]u32 = undefined;
+        for (self.lens, &lengths) |len, *slot| slot.* = len;
+        return snapshot.plan(self.policy, .has_samples, .{ .samples = &lengths }).flags != 0;
     }
 
     /// Percentiles for one stage over its current window. Copies and
@@ -140,24 +141,14 @@ pub const FrameProfile = struct {
     pub fn stats(self: *const FrameProfile, stage: FrameProfileStage) FrameProfileStageStats {
         const index = @intFromEnum(stage);
         const len: usize = self.lens[index];
-        if (len == 0) return .{ .total = self.totals[index] };
-        var sorted: [max_frame_profile_samples]u32 = undefined;
-        @memcpy(sorted[0..len], self.samples_us[index][0..len]);
-        std.sort.pdq(u32, sorted[0..len], {}, std.sort.asc(u32));
+        const projection = snapshot.plan(self.policy, .stats, .{ .words = .{ len, self.totals[index], 0, 0, 0, 0, 0, 0 }, .samples = self.samples_us[index][0..len] });
         return .{
-            .p50_us = sorted[nearestRank(len, 50)],
-            .p90_us = sorted[nearestRank(len, 90)],
-            .max_us = sorted[len - 1],
-            .window_len = len,
-            .total = self.totals[index],
+            .p50_us = projection.words[2],
+            .p90_us = projection.words[3],
+            .max_us = projection.words[4],
+            .window_len = @intCast(projection.words[0]),
+            .total = projection.words[1],
         };
-    }
-
-    /// Nearest-rank percentile index (ceil(p/100 * n), 1-based rank →
-    /// 0-based index) — the same convention the perf harness gates on.
-    fn nearestRank(len: usize, percentile: usize) usize {
-        const rank = (len * percentile + 99) / 100;
-        return @max(rank, 1) - 1;
     }
 };
 

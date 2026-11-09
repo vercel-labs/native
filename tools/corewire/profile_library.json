@@ -1,0 +1,29 @@
+{
+  "profile_format": 1,
+  "name": "native-sdk-profile-generator",
+  "entry": "emit_profile.ts",
+  "emission": "llvm",
+  "optimization": "release",
+  "abi": {
+    "prefix": "nsc_profile_",
+    "init_symbol": "nsc_profile_init",
+    "sink_register_symbol": "nsc_profile_set_panic_sink",
+    "collect_symbol": "nsc_profile_collect",
+    "result_reset_symbol": "nsc_profile_reset"
+  },
+  "exports": [
+    { "export": "generate", "symbol": "nsc_profile_generate", "params": ["string", "string", "string"], "returns": "string" },
+    { "export": "generateServices", "symbol": "nsc_profile_generate_services", "params": ["string", "string", "string"], "returns": "string" },
+    { "export": "validateServices", "symbol": "nsc_profile_validate_services", "params": ["string"], "returns": "string" },
+    { "export": "corePolicy", "symbol": "nsc_profile_core_policy", "params": ["string", "string"], "returns": "string" },
+    { "export": "generateMirror", "symbol": "nsc_profile_generate_mirror", "params": ["string"], "returns": "string" },
+    { "export": "generateFacade", "symbol": "nsc_profile_generate_facade", "params": ["string"], "returns": "string" },
+    { "export": "invocationPlan", "symbol": "nsc_profile_invocation_plan", "params": ["string"], "returns": "string" },
+    { "export": "invocationAliases", "symbol": "nsc_profile_invocation_aliases", "params": ["string"], "returns": "string" },
+    { "export": "coreInvocation", "symbol": "nsc_profile_core_invocation", "params": ["string"], "returns": "string" },
+    { "export": "effectiveSidecar", "symbol": "nsc_profile_effective_sidecar", "params": ["string"], "returns": "string" },
+    { "export": "contractIntake", "symbol": "nsc_profile_contract_intake", "params": ["string", "string"], "returns": "string" },
+    { "export": "entryPolicy", "symbol": "nsc_profile_entry_policy", "params": ["string"], "returns": "string" },
+    { "export": "filesystemPolicy", "symbol": "nsc_profile_filesystem_policy", "params": ["string"], "returns": "string" }
+  ]
+}

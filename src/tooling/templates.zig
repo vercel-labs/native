@@ -1410,6 +1410,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
         \\    const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
         \\    const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+        \\    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
         \\    const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
         \\    const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
         \\    const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
@@ -1433,6 +1434,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    }
         \\    const app_config = appManifestBuildConfig(b);
         \\    const web_engine = web_engine_override orelse app_config.web_engine;
+        \\    if (app_config.updates_enabled and selected_platform == .macos and web_engine == .chromium) {
+        \\        @panic("\nnative updates currently require the system macOS host; use web_engine = \"system\" or remove the updates block\n");
+        \\    }
         \\    const cef_dir = cef_dir_override orelse defaultCefDir(selected_platform, app_config.cef_dir);
         \\    const cef_auto_install = cef_auto_install_override orelse app_config.cef_auto_install;
         \\    if (web_engine == .chromium and selected_platform != .macos) {
@@ -1457,6 +1461,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    options.addOption([]const u8, "web_engine", @tagName(web_engine));
         \\    options.addOption(bool, "debug_overlay", debug_overlay);
         \\    options.addOption(bool, "automation", automation_enabled);
+        \\    // Resolve the default inside each runner so the separate packaged
+        \\    // release binary never inherits the development binary's setting.
+        \\    options.addOption(?bool, "webview_inspection", webview_inspection);
         \\    options.addOption(bool, "js_bridge", js_bridge_enabled);
         \\    options.addOption(bool, "web_layer", web_layer);
         \\    const options_mod = options.createModule();
@@ -1589,6 +1596,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    // exe/package agreement structural.
         \\    package.addArgs(&.{ "--web-layer", if (web_layer) "include" else "exclude" });
         \\    if (cef_auto_install) package.addArg("--cef-auto-install");
+        \\    if (app_config.updates_enabled and package_target == .macos and b.graph.host.result.os.tag == .macos) package.addArg("--update-archive");
         \\    package.step.dependOn(&package_exe.step);
         \\    package.step.dependOn(&frontend_build.step);
         \\    const package_step = b.step("package", "Create a local package artifact");
@@ -2047,6 +2055,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    system_audio_permission: bool = false,
         \\    sqlite_capability: bool = false,
         \\    relational_capability: bool = false,
+        \\    updates_enabled: bool = false,
         \\    /// The first web declaration found (for teaching messages), or
         \\    /// null when app.zon declares no web use. `web_engine = "system"`
         \\    /// alone is NOT web intent — it is the default in many canvas
@@ -2068,6 +2077,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        auto_install: bool = false,
         \\    } = .{},
         \\    frontend: ?struct {} = null,
+        \\    updates: ?struct {} = null,
         \\    shell: struct {
         \\        windows: []const struct {
         \\            views: []const struct {
@@ -2104,6 +2114,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\        .system_audio_permission = hasManifestPermission(raw.permissions, "system_audio"),
         \\        .sqlite_capability = hasManifestCapability(raw.capabilities, "store") or hasManifestCapability(raw.capabilities, "sqlite"),
         \\        .relational_capability = hasManifestCapability(raw.capabilities, "sqlite"),
+        \\        .updates_enabled = raw.updates != null,
         \\    };
         \\    config.web_declaration = blk: {
         \\        if (raw.frontend != null) break :blk "a .frontend block";
@@ -2392,17 +2403,29 @@ fn runnerZig() []const u8 {
     \\    relational_store: ?native_sdk.RelationalStoreBinding = null,
     \\    file_access: ?native_sdk.FileAccessBinding = null,
     \\    file_access_enforce: bool = true,
+    \\    /// Explicit compatibility capability for an app's former data identity.
+    \\    legacy_data_directory: bool = false,
     \\    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
     \\        var info: native_sdk.AppInfo = .{
     \\            .app_name = self.app_name,
+    \\            .display_name = manifestStringField("display_name"),
+    \\            .version = manifestStringField("version"),
+    \\            .description = manifestStringField("description"),
     \\            .has_web_content = manifestHasWebContent(),
+    \\            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+    \\                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+    \\            else
+    \\                @import("builtin").mode == .Debug,
     \\            .declares_tray = manifestDeclaresTrayCapability(),
     \\            .dock_visible = manifestDockVisible(),
     \\            .window_title = self.window_title,
     \\            .bundle_id = self.bundle_id,
     \\            .icon_path = self.icon_path,
+    \\            .update_feed_url = manifestUpdateString("feed_url"),
+    \\            .update_public_key = manifestUpdateString("public_key"),
+    \\            .update_check_on_start = manifestUpdateCheckOnStart(),
     \\        };
     \\        const windows = manifestWindowOptions(buffers);
     \\        if (windows.len > 0) {
@@ -2453,6 +2476,30 @@ fn runnerZig() []const u8 {
     \\        return self.menus orelse storage.fromManifest();
     \\    }
     \\};
+    \\
+    \\fn manifestStringField(comptime field: []const u8) []const u8 {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), field)) return "";
+    \\    const value = @field(app_manifest, field);
+    \\    if (comptime @TypeOf(value) == @TypeOf(null)) return "";
+    \\    return value;
+    \\}
+    \\
+    \\fn manifestUpdateString(comptime field: []const u8) []const u8 {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return "";
+    \\    const updates = app_manifest.updates;
+    \\    if (comptime !@hasField(@TypeOf(updates), field)) return "";
+    \\    const value = @field(updates, field);
+    \\    return switch (@typeInfo(@TypeOf(value))) {
+    \\        .optional => value orelse "",
+    \\        else => value,
+    \\    };
+    \\}
+    \\
+    \\fn manifestUpdateCheckOnStart() bool {
+    \\    if (comptime !@hasField(@TypeOf(app_manifest), "updates")) return false;
+    \\    if (comptime !@hasField(@TypeOf(app_manifest.updates), "check_on_start")) return false;
+    \\    return app_manifest.updates.check_on_start;
+    \\}
     \\
     \\const CommandStorage = struct {
     \\    commands: [native_sdk.app_manifest.max_commands]native_sdk.Command = undefined,
@@ -2856,7 +2903,8 @@ fn runnerZig() []const u8 {
     \\    var record_store_open = false;
     \\    var resolved_options = options;
     \\    var file_root_buffers: [6][1024]u8 = undefined;
-    \\    var file_roots: [6][]const u8 = undefined;
+    \\    var file_roots: [7][]const u8 = undefined;
+    \\    var legacy_data_buffer: [1024]u8 = undefined;
     \\    const resolved_file_dirs = native_sdk.app_dirs.resolve(
     \\        .{ .name = options.bundle_id },
     \\        native_sdk.app_dirs.currentPlatform(),
@@ -2865,8 +2913,17 @@ fn runnerZig() []const u8 {
     \\    ) catch null;
     \\    var file_root_count: usize = 0;
     \\    if (resolved_file_dirs) |dirs| {
-    \\        file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
-    \\        file_root_count = file_roots.len;
+    \\        file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+    \\        file_root_count = 6;
+    \\    }
+    \\    if (options.legacy_data_directory) {
+    \\        if (native_sdk.app_dirs.resolveOne(
+    \\            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
+    \\            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
+    \\        )) |directory| {
+    \\            file_roots[file_root_count] = directory;
+    \\            file_root_count += 1;
+    \\        } else |_| {}
     \\    }
     \\    resolved_options.file_access = .{
     \\        .roots = file_roots[0..file_root_count],
@@ -3437,7 +3494,7 @@ fn nextPackageJson(allocator: std.mem.Allocator, names: TemplateNames) ![]const 
         \\    "@types/node": "^25.6.2",
         \\    "@types/react": "^19.2.14",
         \\    "@types/react-dom": "^19.2.3",
-        \\    "typescript": "^6.0.3"
+        \\    "typescript": "^7.0.2"
         \\  }
         \\}
         \\
@@ -4190,9 +4247,13 @@ test "writeDefaultApp emits Vite project files" {
     // loader when native-only).
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "b.option(WebLayerOption, \"web-layer\", \"Override app.zon webview_layer: auto, include, exclude\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "const web_layer = resolveWebLayer(app_config, web_engine, web_layer_override)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "app_config.updates_enabled and selected_platform == .macos and web_engine == .chromium") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "updates: ?struct {} = null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, ".updates_enabled = raw.updates != null") != null);
     // The emitted package step forwards the graph's resolved decision so
     // the packaged artifact structurally agrees with the compiled exe.
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArgs(&.{ \"--web-layer\", if (web_layer) \"include\" else \"exclude\" })") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "package.addArg(\"--update-archive\")") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "options.addOption(bool, \"web_layer\", web_layer)") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "std.json.parseFromSliceLeaky(InferenceManifest") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_zig_text, "fn appManifestModule") != null);
@@ -4251,6 +4312,10 @@ test "writeDefaultApp emits Vite project files" {
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "resolvedShortcuts") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "const manifest_windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn appInfo(self: RunOptions, buffers: *StateBuffers)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".version = manifestStringField(\"version\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_feed_url = manifestUpdateString(\"feed_url\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_public_key = manifestUpdateString(\"public_key\")") != null);
+    try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, ".update_check_on_start = manifestUpdateCheckOnStart()") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "fn manifestWindowOptions") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "info.windows = windows") != null);
     try std.testing.expect(std.mem.indexOf(u8, runner_zig_text, "for (restored_windows, 0..)") != null);

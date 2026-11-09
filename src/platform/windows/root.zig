@@ -3,6 +3,8 @@ const geometry = @import("geometry");
 const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
+const global_shortcuts = @import("global_shortcuts.zig");
+const keyboard_input = @import("keyboard_input.zig");
 
 const bundled_geist_regular = @embedFile("../../primitives/canvas/fonts/Geist-Regular.ttf");
 const bundled_geist_mono = @embedFile("../../primitives/canvas/fonts/GeistMono-Regular.ttf");
@@ -322,6 +324,7 @@ pub const WindowsPlatform = struct {
     /// latch-gated free.
     channel_wake_abandoned: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     audio_capture_sinks: [2]platform_mod.AudioCaptureSink = [_]platform_mod.AudioCaptureSink{.{}} ** 2,
+    global_shortcuts: global_shortcuts.Registry = .{},
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!WindowsPlatform {
         return initWithEngine(title, size, .system);
@@ -411,6 +414,7 @@ pub const WindowsPlatform = struct {
             std.debug.print("windows platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
             return;
         }
+        self.global_shortcuts.deinit();
         native_sdk_windows_destroy(self.host);
     }
 
@@ -472,6 +476,8 @@ pub const WindowsPlatform = struct {
                 .remove_tray_fn = removeTray,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = keyboard_input.sendKeyChord,
+                .keyboard_input_access_fn = keyboard_input.access,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .set_credential_fn = setCredential,
@@ -496,6 +502,7 @@ pub const WindowsPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
+                .configure_global_shortcuts_fn = configureGlobalShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
@@ -564,6 +571,8 @@ pub const WindowsPlatform = struct {
             // app that skips the capability check still learns exactly
             // what is missing.
             .video_playback => false,
+            .global_shortcuts => global_shortcuts.available(),
+            .keyboard_input => true,
         };
     }
 
@@ -771,6 +780,7 @@ fn gpuSurfaceInputEventFromWindowsEvent(event: *const WindowsEvent) platform_mod
         .window_id = event.window_id,
         .label = event.view_label[0..event.view_label_len],
         .kind = gpuSurfaceInputKindFromInt(event.input_kind),
+        .scroll_is_detented = event.input_kind == 15,
         .timestamp_ns = event.timestamp_ns,
         .x = @floatCast(event.x),
         .y = @floatCast(event.y),
@@ -798,6 +808,7 @@ fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
         9 => .ime_commit_composition,
         10 => .ime_cancel_composition,
         11 => .pointer_cancel,
+        15 => .scroll,
         else => .pointer_move,
     };
 }
@@ -1917,6 +1928,11 @@ fn configureMenus(context: ?*anyopaque, menus: []const platform_mod.Menu) anyerr
     self.menus_active = menus.len > 0;
 }
 
+fn configureGlobalShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut, sink: platform_mod.GlobalShortcutSink, statuses: []platform_mod.GlobalShortcutStatus) anyerror!void {
+    const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
+    return self.global_shortcuts.configure(shortcuts, sink, statuses);
+}
+
 fn configureShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut) anyerror!void {
     const self: *WindowsPlatform = @ptrCast(@alignCast(context.?));
     if (shortcuts.len > platform_mod.max_shortcuts) return error.InvalidShortcut;
@@ -2753,4 +2769,5 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "windows platform module exports type" {
     _ = WindowsPlatform;
+    _ = global_shortcuts;
 }

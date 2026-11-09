@@ -306,8 +306,8 @@ When changing app behavior, keep tests in the app's existing authoring tier. Typ
 ## Examples to inspect
 
 - `examples/chatbot`: a substantial app authored entirely in TypeScript + Native markup, with streaming fetch effects and modules.
-- `examples/soundboard-ts`: TypeScript + Native markup port of the full music-player showcase.
-- `examples/system-monitor-ts`: TypeScript + Native markup app using spawn effects, timers, and tables.
+- `examples/soundboard`: TypeScript + Native markup music-player showcase.
+- `examples/system-monitor`: TypeScript + Native markup app using spawn effects, timers, and tables.
 - `examples/hello`: smallest lower-level inline HTML/WebView app.
 - `examples/webview`: bridge and WebView runtime example.
 - `examples/browser`: layered WebView/browser-style example.

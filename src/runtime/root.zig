@@ -150,6 +150,12 @@ pub const EffectChannelEventKind = runtime_effects.EffectChannelEventKind;
 pub const EffectAudioCaptureEvent = runtime_effects.EffectAudioCaptureEvent;
 pub const EffectAudioCaptureEventKind = runtime_effects.EffectAudioCaptureEventKind;
 pub const decodeAudioCaptureChannelEvent = runtime_effects.decodeAudioCaptureChannelEvent;
+pub const EffectGlobalShortcutEvent = runtime_effects.EffectGlobalShortcutEvent;
+pub const EffectGlobalShortcutEventKind = runtime_effects.EffectGlobalShortcutEventKind;
+pub const HostChannelSourceBinding = runtime_effects.HostChannelSourceBinding;
+pub const EffectChannelSourceState = runtime_effects.EffectChannelSourceState;
+pub const EffectChannelSourceResult = runtime_effects.EffectChannelSourceResult;
+pub const max_channel_source_payload = runtime_effects.max_channel_source_payload;
 pub const ChannelHandle = runtime_effects.ChannelHandle;
 pub const max_effect_channels = runtime_effects.max_effect_channels;
 pub const max_effect_channel_bytes = runtime_effects.max_effect_channel_bytes;
@@ -181,6 +187,7 @@ pub const max_terminal_sessions = runtime_terminal_session.max_sessions;
 
 const runtime_ts_core_host = @import("ts_core_host.zig");
 pub const TsCoreHost = runtime_ts_core_host.TsCoreHost;
+pub const TsCoreHostWithRuntimeModel = runtime_ts_core_host.TsCoreHostWithRuntimeModel;
 pub const ts_core_request_key_base = runtime_ts_core_host.request_key_base;
 pub const ts_core_timer_key_base = runtime_ts_core_host.timer_key_base;
 pub const ts_core_effect_key_base = runtime_ts_core_host.effect_key_base;
@@ -193,7 +200,9 @@ pub const ts_core_db_key_base = runtime_ts_core_host.db_key_base;
 pub const ts_core_file_stream_key_base = runtime_ts_core_host.file_stream_key_base;
 
 const runtime_ts_ui_app = @import("ts_ui_app.zig");
+pub const view_reload = @import("view_reload.zig");
 pub const TsUiApp = runtime_ts_ui_app.TsUiApp;
+pub const TsUiAppWithFeatures = runtime_ts_ui_app.TsUiAppWithFeatures;
 
 const runtime_session_journal = @import("session_journal.zig");
 const runtime_session_record = @import("session_record.zig");
@@ -203,6 +212,7 @@ const runtime_persist_store = @import("persist_store.zig");
 const runtime_record_store = @import("record_store.zig");
 const runtime_relational_store = @import("relational_store.zig");
 pub const session_journal = runtime_session_journal;
+pub const session_codec_reference = @import("session_codec_reference.zig");
 pub const session_blobs = runtime_session_blobs;
 pub const persist_store = runtime_persist_store;
 pub const PersistStore = runtime_persist_store.Store;
@@ -220,6 +230,8 @@ pub const SessionBlobDirStore = runtime_session_blobs.DirBlobStore;
 pub const SessionHeader = runtime_session_journal.Header;
 pub const sessionHeaderNow = runtime_session_record.headerNow;
 pub const sessionPlatformName = runtime_session_replay.currentPlatformName;
+pub const replay_policy = @import("replay_policy.zig");
+pub const component_policy = @import("component_policy.zig");
 pub const replaySession = runtime_session_replay.replaySession;
 pub const ReplayOptions = runtime_session_replay.ReplayOptions;
 pub const ReplayReport = runtime_session_replay.ReplayReport;
@@ -269,4 +281,8 @@ pub const CanvasPixelSize = core.CanvasPixelSize;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tests.zig");
+    _ = @import("ts_canvas_hooks_tests.zig");
 }
+
+pub const host_flow_policy = @import("host_flow_policy.zig");
+pub const host_event_pump = @import("host_event_pump.zig");

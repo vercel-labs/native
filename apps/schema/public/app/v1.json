@@ -12,7 +12,7 @@
     "name": { "type": "string", "minLength": 1, "description": "Short machine-readable app name." },
     "display_name": { "type": "string", "minLength": 1, "description": "Human-readable app name." },
     "description": { "type": "string", "minLength": 1, "maxLength": 256 },
-    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
     "icons": { "$ref": "#/$defs/stringArray" },
     "platforms": {
       "type": "array",
@@ -77,6 +77,7 @@
       "type": "array",
       "items": { "$ref": "#/$defs/urlScheme" }
     },
+    "updates": { "$ref": "#/$defs/updates" },
     "dmg": { "$ref": "#/$defs/dmg" }
   },
   "$defs": {
@@ -128,6 +129,16 @@
         "name": { "type": "string", "minLength": 1 },
         "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
         "content_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "updates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feed_url", "public_key"],
+      "properties": {
+        "feed_url": { "type": "string", "pattern": "^https://", "maxLength": 4096 },
+        "public_key": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" },
+        "check_on_start": { "type": "boolean", "default": false }
       }
     },
     "bridge": {
@@ -202,6 +213,19 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "fonts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "path"],
+            "properties": {
+              "id": { "type": "integer", "minimum": 64, "maximum": 9007199254740991 },
+              "path": { "type": "string", "pattern": "^assets/", "minLength": 8 }
+            }
+          }
+        },
         "images": {
           "type": "array",
           "items": {

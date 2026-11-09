@@ -109,6 +109,60 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// lifetime: valid until the next frame_reset, dispatch entry,
         /// or init.
         pub const boot_cmd = Symbol(fn (cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "boot_cmd");
+        /// Optional Native SDK view extension. Versioned tree data evaluated
+        /// against the committed TS model; borrowed until frame_reset.
+        pub const native_view = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_view");
+        pub const native_media_view = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_media_view");
+        pub const native_media_window_view = Symbol(fn (label: [*]const u8, label_len: usize, request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_media_window_view");
+        pub const native_virtual_requests = Symbol(fn (label: [*]const u8, label_len: usize, video: [*]const u8, video_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_virtual_requests");
+        pub const native_virtual_view = Symbol(fn (label: [*]const u8, label_len: usize, context: [*]const u8, context_len: usize, video: [*]const u8, video_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_virtual_view");
+        /// Debug-only development view: prepare a changed markup program, or
+        /// return to the compiled view. Results borrow until frame_reset.
+        pub const native_dev_view_prepare = Symbol(fn (program: [*]const u8, program_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_dev_view_prepare");
+        pub const native_dev_view_reset = Symbol(fn (out: *[*]const u8, len: *usize) callconv(.c) void, "native_dev_view_reset");
+        pub const native_window_view = Symbol(fn (label: [*]const u8, label_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_view");
+
+        /// Pure retained radio policy over native tree/eligibility bytes.
+        /// The result is borrowed until frame_reset; the host copies it first.
+        pub const native_radio_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_radio_policy");
+        pub const native_tabs_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_tabs_policy");
+        pub const native_tree_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_tree_policy");
+        pub const native_list_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_list_policy");
+        pub const native_menu_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_menu_policy");
+        pub const native_toggle_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_toggle_policy");
+        pub const native_accordion_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_accordion_policy");
+        pub const native_slider_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_slider_policy");
+        pub const native_split_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_split_policy");
+        pub const native_scroll_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_scroll_policy");
+        pub const native_resizable_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_resizable_policy");
+        pub const native_text_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_text_policy");
+
+        /// Pure timer reconciliation extension. Inputs are borrowed; the host
+        /// copies the result and retains the cycle arena until all commands
+        /// and subscriptions have been consumed. This call never resets the dispatch frame.
+        pub const native_timer_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_timer_policy");
+
+        /// Pure database reconciliation extension. Inputs are borrowed;
+        /// results are copied and finishCycle retains arena reset ownership.
+        pub const native_db_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_db_policy");
+
+        /// Pure named-effect coordination. Borrow inputs, copy outputs; the
+        /// host retains command-cycle and completion-frame reset ownership.
+        pub const native_effect_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_effect_policy");
+        /// Stream decisions borrow input and copy output within the dispatch cycle.
+        pub const native_stream_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_stream_policy");
+
+        /// Pure window reconciliation. Borrow inputs and copy outputs;
+        /// view/cycle consumers retain ownership of the compiler frame.
+        pub const native_window_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_window_policy");
+
+        /// Stock-theme decisions. Borrowed requests and copied results retain
+        /// dispatch lifetime; finishCycle owns the frame reset.
+        pub const native_theme_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_theme_policy");
+
+        /// Pure status-item reconciliation. Borrowed requests and copied
+        /// results retain the cycle arena until finishCycle.
+        pub const native_status_policy = Symbol(fn (request: [*]const u8, request_len: usize, out: *[*]const u8, len: *usize) callconv(.c) void, "native_status_policy");
 
         // ---------------------------------------------------- dispatch
         pub const dispatch_void = Symbol(fn (tag: u8, cmd: *[*]const u8, cmd_len: *usize) callconv(.c) void, "dispatch_void");
@@ -175,6 +229,7 @@ pub fn Bindings(comptime prefix: []const u8) type {
         // above) through the ordinary out-pointer pair.
         pub const command_msg = Symbol(fn (name: [*]const u8, name_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "command_msg");
         pub const frame_msg = Symbol(fn (width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "frame_msg");
+        pub const frame_msg_ns = Symbol(fn (width: f64, height: f64, timestamp_ms: f64, interval_ms: f64, timestamp_ns: [*]const u8, timestamp_ns_len: usize, interval_ns: [*]const u8, interval_ns_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "frame_msg_ns");
         pub const key_msg = Symbol(fn (key: [*]const u8, key_len: usize, shift: u8, control: u8, alt: u8, super_mod: u8, out: *[*]const u8, out_len: *usize) callconv(.c) void, "key_msg");
         pub const pinch_msg = Symbol(fn (window_id: f64, label: [*]const u8, label_len: usize, phase: u32, scale: f64, x: f64, y: f64, out: *[*]const u8, out_len: *usize) callconv(.c) void, "pinch_msg");
         pub const drop_msg = Symbol(fn (event: [*]const u8, event_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "drop_msg");

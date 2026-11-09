@@ -24,6 +24,13 @@ const semanticActions = event_model.semanticActions;
 const max_widget_depth: usize = 32;
 
 pub fn collectWidgetSemantics(layout: anytype, output: []WidgetSemanticsNode, scroll_semantics_fn: anytype) Error![]const WidgetSemanticsNode {
+    if (layoutPolicy(layout)) |policy| {
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("semantic_tree_policy.zig").Plan.init(scratch.get(), policy, layout, null, output.len, null, @import("widget_layout.zig").virtualWidgetScrollContentExtent, true) catch @panic("semantic tree allocation failed");
+        defer plan.deinit();
+        plan.run();
+        return plan.copy(layout, output);
+    }
     var len: usize = 0;
     var semantic_stack: [max_widget_depth]?usize = [_]?usize{null} ** max_widget_depth;
     var hidden_depth: ?usize = null;
@@ -436,6 +443,13 @@ pub const WidgetScrollSemantics = struct {
 /// `widgetScrollSemantics` picks the primary axis for the assistive
 /// node.
 pub fn widgetScrollAxisMetrics(layout: anytype, node_index: usize, virtual_content_extent_fn: anytype, comptime axis: ScrollAxis, viewport: geometry.RectF) WidgetScrollMetrics {
+    if (layoutPolicy(layout)) |policy| {
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("semantic_tree_policy.zig").Plan.init(scratch.get(), policy, layout, node_index, 1, viewport, virtual_content_extent_fn, axis == .vertical) catch @panic("scroll observation allocation failed");
+        defer plan.deinit();
+        plan.run();
+        return plan.axis(axis == .horizontal);
+    }
     const node = layout.nodes[node_index];
     switch (axis) {
         .vertical => {
@@ -475,6 +489,13 @@ pub fn widgetScrollAxisMetrics(layout: anytype, node_index: usize, virtual_conte
 /// (`widgetSemanticScrollDelta`).
 pub fn widgetScrollSemantics(layout: anytype, node_index: usize, virtual_content_extent_fn: anytype) WidgetScrollSemantics {
     if (node_index >= layout.nodes.len) return .{};
+    if (layoutPolicy(layout)) |policy| {
+        var scratch = std.heap.stackFallback(4096, std.heap.page_allocator);
+        const plan = @import("semantic_tree_policy.zig").Plan.init(scratch.get(), policy, layout, node_index, 1, null, virtual_content_extent_fn, true) catch @panic("scroll semantics allocation failed");
+        defer plan.deinit();
+        plan.run();
+        return plan.scroll();
+    }
     const node = layout.nodes[node_index];
     if (!widgetExposesScrollSemantics(node.widget)) return .{};
 
@@ -595,4 +616,8 @@ fn skipSubtree(layout: anytype, index: usize) usize {
 
 fn nonNegative(value: f32) f32 {
     return if (value < 0) 0 else value;
+}
+
+fn layoutPolicy(layout: anytype) ?@import("surface_layout_policy.zig").Policy {
+    return if (@hasField(@TypeOf(layout), "semantic_policy")) layout.semantic_policy else null;
 }

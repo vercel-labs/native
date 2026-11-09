@@ -101,8 +101,8 @@ export function cancelOrder(request: ParseRequest, cancel: ServiceCancellation):
   return parse(request);
 }
 
-// A detected runtime trap (typed-array read out of bounds) that no catch
-// can absorb: the in-process suite proves it poisons exactly one instance.
+// An out-of-range read now produces JavaScript undefined. The in-process
+// trap suites inject an unrepresentable native ABI length at this operation.
 export function trap(): ParseResult {
   const tiny = new Uint8Array(1);
   let index = 1;

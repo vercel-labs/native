@@ -469,6 +469,16 @@ test "text edit state applies utf8-aware caret insert and delete events" {
 }
 
 test "widget keyboard control intents map activation keys" {
+    const composed = Widget{ .kind = .stack, .semantics = .{ .role = .listitem, .focusable = true, .actions = .{ .press = true } } };
+    for ([_][]const u8{ "enter", "space" }) |key| {
+        try std.testing.expectEqual(WidgetControlIntentKind.press, widgetKeyboardControlIntent(composed, .{ .phase = .key_down, .key = key }).?.kind);
+    }
+    try std.testing.expect(widgetKeyboardControlIntent(.{ .kind = .stack }, .{ .phase = .key_down, .key = "enter" }) == null);
+    try std.testing.expect(widgetKeyboardControlIntent(composed, .{ .phase = .key_up, .key = "enter" }) == null);
+    try std.testing.expect(widgetKeyboardControlIntent(composed, .{ .phase = .key_down, .key = "enter", .modifiers = .{ .super = true } }) == null);
+    var disabled_composed = composed;
+    disabled_composed.state.disabled = true;
+    try std.testing.expect(widgetKeyboardControlIntent(disabled_composed, .{ .phase = .key_down, .key = "space" }) == null);
     const press = widgetKeyboardControlIntent(.{ .kind = .button, .text = "Save" }, .{ .phase = .key_down, .key = "enter" }).?;
     try std.testing.expectEqual(WidgetControlIntentKind.press, press.kind);
     try std.testing.expect(press.actions.press);

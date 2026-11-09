@@ -1,3 +1,11 @@
+export interface ImageWordsCommand {
+  readonly operation: "load" | "cancel" | "unregister";
+  readonly identity: ImageIdentity;
+  readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.ts";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.ts";
+import { type ImageIdentity } from "./internal/image_identity.ts";
 // The compiled-core stage's restatement of @native-sdk/core: the SAME
 // inert Cmd/Sub data values the reference module's factories build
 // (packages/core/sdk/core.ts — the transpiler lane lowers references by
@@ -11,76 +19,8 @@
 // and the product lane's stager (packages/core/scripts/
 // stage_external_core.mjs) alike.
 
-export function asciiBytes(s: string): Uint8Array {
-  for (let i = 0; i < s.length; i++) {
-    if (s.charCodeAt(i) > 0x7f) {
-      throw new RangeError("asciiBytes accepts ASCII only; use utf8Bytes for Unicode text");
-    }
-  }
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
-}
-
-export function utf8Bytes(s: string): Uint8Array {
-  let byteLength = 0;
-  for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i);
-    if (code <= 0x7f) {
-      byteLength += 1;
-    } else if (code <= 0x7ff) {
-      byteLength += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
-      const next = s.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        byteLength += 4;
-        i += 1;
-      } else {
-        byteLength += 3;
-      }
-    } else {
-      byteLength += 3;
-    }
-  }
-
-  const out = new Uint8Array(byteLength);
-  let at = 0;
-  for (let i = 0; i < s.length; i++) {
-    let code = s.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
-      const next = s.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
-        i += 1;
-      } else {
-        code = 0xfffd;
-      }
-    } else if (code >= 0xd800 && code <= 0xdfff) {
-      code = 0xfffd;
-    }
-
-    if (code <= 0x7f) {
-      out[at] = code;
-      at += 1;
-    } else if (code <= 0x7ff) {
-      out[at] = 0xc0 | (code >> 6);
-      out[at + 1] = 0x80 | (code & 0x3f);
-      at += 2;
-    } else if (code <= 0xffff) {
-      out[at] = 0xe0 | (code >> 12);
-      out[at + 1] = 0x80 | ((code >> 6) & 0x3f);
-      out[at + 2] = 0x80 | (code & 0x3f);
-      at += 3;
-    } else {
-      out[at] = 0xf0 | (code >> 18);
-      out[at + 1] = 0x80 | ((code >> 12) & 0x3f);
-      out[at + 2] = 0x80 | ((code >> 6) & 0x3f);
-      out[at + 3] = 0x80 | (code & 0x3f);
-      at += 4;
-    }
-  }
-  return out;
-}
+import { utf8Bytes } from "./bytes.ts";
+export { asciiBytes, utf8Bytes } from "./bytes.ts";
 
 export type Msgish = { readonly kind: string };
 
@@ -176,6 +116,19 @@ export interface FileReadStreamRoute<M extends Msgish> {
   readonly err: M["kind"];
 }
 
+export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
+export type FileEvent = "terminal" | "chunk" | "done";
+export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
+export interface FileResultArm {
+  readonly key: Uint8Array; readonly operation: "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete"; readonly event: "terminal" | "chunk" | "done";
+  readonly outcome: "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full"; readonly bytes: Uint8Array; readonly totalBytes: Uint8Array;
+  readonly mtimeMs: Uint8Array; readonly exists: boolean; readonly droppedBefore: number;
+}
+export type TimerOutcome = "fired" | "rejected";
+export interface TimerResultArm { readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: "fired" | "rejected"; }
+export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly replace?: boolean; readonly result: M["kind"]; }
+export interface TimerResultRoute<M extends Msgish> { readonly result: M["kind"]; }
+
 export interface FileStatArm { readonly exists: boolean; readonly size: number; readonly mtimeMs: number; }
 export interface FileStatRoute<M extends Msgish> { readonly key?: string; readonly ok: M["kind"]; readonly err: M["kind"]; }
 
@@ -256,6 +209,12 @@ export interface AudioSource {
 export interface AudioRoute<M extends Msgish> {
   readonly event: M["kind"];
 }
+
+export interface ExactAudioSource extends AudioSource {
+  readonly cacheDir?: Uint8Array;
+}
+export { type AudioTransport } from "./events.ts";
+import { type AudioTransport } from "./events.ts";
 
 export interface VideoSource {
   readonly surface: number;
@@ -347,6 +306,8 @@ export interface NotificationSpec {
 }
 
 export type LocalTimeStyle = "date" | "time" | "datetime";
+
+export type KeyChord = GlobalShortcutBinding;
 
 /// The inert command data — the reference module's Cmd<M> union with
 /// the type parameter erased (M constrains only the factories' arm-name
@@ -473,6 +434,19 @@ export type CmdData =
       readonly body: Uint8Array;
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "wall_time"; readonly msgKind: string }
+  | { readonly op: "read_file_result_key"; readonly replace: boolean; readonly key: Uint8Array; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result_key"; readonly replace: boolean; readonly key: Uint8Array; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "cancel_key"; readonly key: Uint8Array }
+  | { readonly op: "read_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "timer_result_exact"; readonly key: string; readonly afterMs: Uint8Array; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
+  | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
+  | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
+  | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "spawn_events_exact"; readonly key: Uint8Array; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "cancel_exact"; readonly key: Uint8Array }
+  | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
   | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
@@ -501,6 +475,8 @@ export type CmdData =
       readonly verb: "pause" | "resume" | "stop" | "seek" | "volume";
       readonly value: number;
     }
+  | { readonly op: "audio_play_exact"; readonly key: Uint8Array; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly cacheDir: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "audio_transport"; readonly transport: AudioTransport }
   | {
       readonly op: "video_load";
       readonly key: string;
@@ -515,11 +491,13 @@ export type CmdData =
   | {
       readonly op: "video_ctl";
       readonly key: string;
-      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "window_close"; readonly label: string }
+  | { readonly op: "window_minimize"; readonly label: string }
   | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
@@ -531,9 +509,13 @@ export type CmdData =
       readonly cachePath: Uint8Array;
       readonly expectedBytes: number;
     }
+  | { readonly op: "image_load_words"; readonly identity: ImageIdentity; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "image_cancel_words"; readonly identity: ImageIdentity }
+  | { readonly op: "image_unregister_words"; readonly identity: ImageIdentity }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
+  | { readonly op: "channel_open_source"; readonly key: number; readonly eventKind: string; readonly startedKind: string; readonly maxPending: number; readonly source: string; readonly payload: Uint8Array }
   | { readonly op: "channel_close"; readonly key: number }
   | { readonly op: "audio_capture_start"; readonly key: number; readonly source: "microphone" | "system"; readonly sampleRate: number; readonly channels: number; readonly eventKind: string }
   | { readonly op: "audio_capture_stop"; readonly key: number }
@@ -591,6 +573,11 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
   return out;
 }
 
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
+}
+
 function serviceU32(value: number): Uint8Array {
   const out = new Uint8Array(4);
   out[0] = value % 256;
@@ -606,7 +593,7 @@ export function serviceConcat(parts: readonly Uint8Array[]): Uint8Array {
   const out = new Uint8Array(length);
   let at = 0;
   for (const part of parts) {
-    for (let i = 0; i < part.length; i++) out[at + i] = part[i]!;
+    out.set(part, at);
     at += part.length;
   }
   return out;
@@ -682,6 +669,36 @@ export const Cmd = {
 
   now(msgKind: string): CmdData {
     return { op: "now", msgKind };
+  },
+
+  /// Journaled signed-i64 milliseconds as canonical decimal bytes.
+  wallTime<M extends Msgish>(msgKind: string): CmdData { return { op: "wall_time", msgKind }; },
+
+  /// Read a whole file with every terminal field, including loss metadata.
+  /// Byte keys retain exact identities generated by app state, including u64 decimals.
+  readFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "read_file_result_key", replace: route.replace ?? true, key, resultKind: route.result, path };
+  },
+  writeFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "write_file_result_key", replace: route.replace ?? true, key, resultKind: route.result, path, bytes };
+  },
+  cancelKey(key: Uint8Array): Cmd<never> { return { op: "cancel_key", key }; },
+  readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): CmdData {
+    return { op: "read_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path };
+  },
+  /// Write with the complete terminal. Named keys follow readFile's replace
+  /// and silent-cancel policy; unrelated live capabilities refuse the request.
+  writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): CmdData {
+    return { op: "write_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path, bytes };
+  },
+  /// One-shot or repeating timer with an observable host rejection. Re-arming replaces
+  /// the same key; cancellation remains silent, like Cmd.delay.
+  timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): CmdData {
+    return { op: "timer_result", key, afterMs, mode, msgKind: route.result };
+  },
+  /// Canonical unsigned decimal milliseconds; zero and nanosecond overflow reject.
+  timerResultExact<M extends Msgish>(key: string, afterMs: Uint8Array, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): CmdData {
+    return { op: "timer_result_exact", key, afterMs, mode, msgKind: route.result };
   },
 
   host: hostCmd,
@@ -850,6 +867,10 @@ export const Cmd = {
     return { op: "clip_write", bytes };
   },
 
+  clipboardWriteResult(bytes: Uint8Array, route: { readonly key?: string; readonly result: string }): CmdData {
+    return { op: "clip_write_result", key: route.key ?? "", resultKind: route.result, bytes };
+  },
+
   clipboardRead(route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
     return { op: "clip_read", key: route.key ?? "", okKind: route.ok, errKind: route.err };
   },
@@ -872,6 +893,15 @@ export const Cmd = {
 
   revealPath(path: Uint8Array): CmdData {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  keyboard: {
+    sendChord(chord: KeyChord, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return Cmd.request("native-sdk.keyboard.sendChord", hostRecordBytes({ key: chord.key, modifiers: shortcutModifierBits(chord) }), route);
+    },
+    accessStatus(options: { readonly prompt?: boolean }, route: { readonly key?: string; readonly ok: string; readonly err: string }): CmdData {
+      return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
+    },
   },
 
   formatLocalTime(
@@ -904,6 +934,16 @@ export const Cmd = {
     };
   },
 
+  spawnEvents(argv: readonly Uint8Array[], route: { readonly key?: string; readonly stdin?: Uint8Array; readonly collect?: boolean; readonly line?: string; readonly exit: string }): CmdData {
+    return { op: "spawn_events", key: route.key ?? "", lineKind: route.collect ? "" : (route.line ?? ""), exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
+  spawnEventsExact(key: Uint8Array, argv: readonly Uint8Array[], route: { readonly stdin?: Uint8Array; readonly collect?: boolean; readonly line?: string; readonly exit: string }): CmdData {
+    return { op: "spawn_events_exact", key, lineKind: route.collect ? "" : (route.line ?? ""), exitKind: route.exit,
+      collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+  cancelExact(key: Uint8Array): CmdData { return { op: "cancel_exact", key }; },
+
   audioPlay(key: string, source: AudioSource, route: { readonly event: string }): CmdData {
     return {
       op: "audio_play",
@@ -914,6 +954,14 @@ export const Cmd = {
       cachePath: source.cachePath ?? new Uint8Array(0),
       expectedBytes: source.expectedBytes ?? 0,
     };
+  },
+
+  audioPlayExact(key: Uint8Array, source: ExactAudioSource, route: { readonly event: string }): CmdData {
+    return { op: "audio_play_exact", key, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), cacheDir: source.cacheDir ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+
+  audioTransport(transport: AudioTransport): CmdData {
+    return { op: "audio_transport", transport };
   },
 
   audioPause(key: string): CmdData {
@@ -949,6 +997,9 @@ export const Cmd = {
       muted: source.muted ?? false,
     };
   },
+
+  videoSnapshot(route: { readonly snapshot: string }): CmdData { return { op: "video_snapshot", snapshotKind: route.snapshot }; },
+  videoRestart(key: string): CmdData { return { op: "video_ctl", key, verb: "restart", value: 0 }; },
 
   videoPlay(key: string): CmdData {
     return { op: "video_ctl", key, verb: "play", value: 0 };
@@ -986,6 +1037,14 @@ export const Cmd = {
     return { op: "window_hide", label };
   },
 
+  closeWindow(label: string): CmdData {
+    return { op: "window_close", label };
+  },
+
+  minimizeWindow(label: string): CmdData {
+    return { op: "window_minimize", label };
+  },
+
   setDockPresence(visible: boolean): CmdData {
     return { op: "dock_presence", visible };
   },
@@ -1014,6 +1073,21 @@ export const Cmd = {
     };
   },
 
+  /** Lossless 63-bit identities. Each word is an unsigned 32-bit integer. */
+  imageLoadWords(identity: ImageIdentity, source: ImageSource, route: { readonly event: string }): CmdData {
+    return { op: "image_load_words", identity, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+  imageCancelWords(identity: ImageIdentity): CmdData { return { op: "image_cancel_words", identity }; },
+  imageUnregisterWords(identity: ImageIdentity): CmdData { return { op: "image_unregister_words", identity }; },
+  imageBatchWords(commands: readonly ImageWordsCommand[], route: { readonly event: string }): CmdData {
+    const cmds: CmdData[] = [];
+    for (const command of commands) {
+      if (command.operation === "load") cmds.push({ op: "image_load_words", identity: command.identity, eventKind: route.event, path: command.path, url: command.url, cachePath: command.cachePath, expectedBytes: command.expectedBytes });
+      else if (command.operation === "cancel") cmds.push({ op: "image_cancel_words", identity: command.identity });
+      else cmds.push({ op: "image_unregister_words", identity: command.identity });
+    }
+    return { op: "batch", cmds };
+  },
   imageCancel(id: number): CmdData {
     return { op: "image_cancel", id };
   },
@@ -1024,6 +1098,10 @@ export const Cmd = {
 
   channelOpen(key: number, route: { readonly event: string }): CmdData {
     return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
+  },
+
+  channelOpenSource(key: number, source: string, payload: Uint8Array, route: { readonly event: string; readonly started: string }): CmdData {
+    return { op: "channel_open_source", key, source, payload, eventKind: route.event, startedKind: route.started, maxPending: 64 };
   },
 
   channelClose(key: number): CmdData {
@@ -1077,6 +1155,7 @@ export const Cmd = {
 export type SubData =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "global_shortcut"; readonly id: string; readonly key: Uint8Array; readonly modifiers: number; readonly msgKind: string }
   | { readonly op: "db_live"; readonly key: string; readonly pageKind: string; readonly doneKind: string; readonly errKind: string; readonly sql: string; readonly params: ReadonlyArray<DbValue>; readonly tables: readonly string[] }
   | { readonly op: "batch"; readonly subs: readonly SubData[] };
 
@@ -1089,9 +1168,22 @@ export const Sub = {
     return { op: "timer", key, everyMs, msgKind };
   },
 
+  globalShortcut(id: string, binding: GlobalShortcutBinding, msgKind: string): SubData {
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
+  },
+
   // @native-sqlite-generated-subs
 
   batch(subs: readonly SubData[]): SubData {
     return { op: "batch", subs };
   },
 };
+
+export interface GlobalShortcutBinding {
+  readonly key: Uint8Array;
+  readonly primary?: boolean;
+  readonly command?: boolean;
+  readonly control?: boolean;
+  readonly option?: boolean;
+  readonly shift?: boolean;
+}

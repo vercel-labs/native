@@ -84,14 +84,38 @@ pub const max_composite_components: usize = 8;
 
 /// The bundled Geist Regular face (OFL), embedded so the reference
 /// renderer paints real text without any platform font machinery. It
-/// serves the sans font ids (weight/italic span variants included) at
-/// their estimator advances; additional faces can be bundled without
-/// changing callers.
+/// serves regular sans text; the matching medium and bold faces below
+/// preserve the weight chosen by widgets and inline spans.
 pub const geist_regular_bytes: []const u8 = @embedFile("fonts/Geist-Regular.ttf");
 
 /// Comptime-validated view over the bundled face. Using a comptime
 /// constant means table presence and offsets are proven at build time.
 pub const geist_regular = Face.parse(geist_regular_bytes) catch @compileError("bundled Geist-Regular.ttf failed to parse");
+
+pub const geist_medium_bytes: []const u8 = @embedFile("fonts/Geist-Medium.ttf");
+pub const geist_medium = Face.parse(geist_medium_bytes) catch @compileError("bundled Geist-Medium.ttf failed to parse");
+
+pub const geist_bold_bytes: []const u8 = @embedFile("fonts/Geist-Bold.ttf");
+pub const geist_bold = Face.parse(geist_bold_bytes) catch @compileError("bundled Geist-Bold.ttf failed to parse");
+
+pub const bundled_sans_faces = [_]*const Face{ &geist_regular, &geist_medium, &geist_bold };
+
+/// The reserved sans ids share one face selection for layout and drawing.
+/// Italic ids retain their weight using upright outlines until an italic
+/// face is bundled. Unknown ids keep the regular fallback.
+pub fn bundledSansFaceIndex(font_id: u64) usize {
+    const canvas = @import("root.zig");
+    return switch (font_id) {
+        canvas.default_sans_medium_font_id => 1,
+        canvas.default_sans_bold_font_id, canvas.default_sans_bold_italic_font_id => 2,
+        else => 0,
+    };
+}
+
+pub fn bundledFaceForFontId(font_id: u64) *const Face {
+    if (font_id == @import("root.zig").default_mono_font_id) return &geist_mono;
+    return bundled_sans_faces[bundledSansFaceIndex(font_id)];
+}
 
 /// The bundled Geist Mono Regular face (OFL, same family): mono runs
 /// ink real fixed-pitch outlines. Before this face landed, mono font

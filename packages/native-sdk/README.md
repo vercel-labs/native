@@ -1,8 +1,8 @@
 # @native-sdk/cli
 
-The command line for [Native SDK](https://native-sdk.dev): the complete toolkit for building native desktop applications.
+The command-line tools for [Native SDK](https://native-sdk.dev). Create, build, test, and package native desktop applications with TypeScript and Native markup.
 
-Apps are authored in TypeScript + declarative Native markup by default. The TypeScript core compiles ahead of time to native code, and Native SDK's own engine draws every pixel into real OS windows — no browser, WebView, JS runtime, or interpreter in the binary. Zig is a first-class app-core alternative by explicit choice and the language the toolkit itself is built in.
+The default app core uses a checked TypeScript subset and compiles to native code. Native markup defines the interface, which the toolkit renders in OS windows. Apps can also use Zig cores or embed web content.
 
 ## Install
 
@@ -10,7 +10,7 @@ Apps are authored in TypeScript + declarative Native markup by default. The Type
 npm install -g @native-sdk/cli
 ```
 
-The install runs no scripts: the `native` binary arrives as a per-platform optional dependency (`@native-sdk/cli-<platform>`), and this package carries the SDK source your apps build against, so `native init` and `native dev` work offline after install. The pinned Zig toolchain is fetched into `~/.native/toolchains/` on first build unless a compatible `zig` is already on your PATH.
+The `native` binary arrives as a per-platform optional dependency (`@native-sdk/cli-<platform>`). Installation also downloads the exact scriptc release, verifies its checksum, and installs the matching compiler API and runtime packs into `~/.native/toolchains/scriptc/`. This package carries the SDK source your apps build against, so `native init` and `native dev` work offline after installation. If npm install scripts are disabled, run `node packages/core/scripts/install_scriptc.mjs` from the installed CLI package before building. `NATIVE_SDK_SCRIPTC_CACHE` selects another toolchain cache directory. The pinned Zig toolchain is fetched into `~/.native/toolchains/` on first build unless a compatible `zig` is already on your PATH.
 
 ## Use
 
@@ -20,11 +20,13 @@ cd my_app
 native dev
 ```
 
-A native window opens with a working counter. The primary scaffold is three files of truth and no build config: `src/core.ts` (`Model`, `Msg`, `update`), `src/app.native` (the UI), and `app.json` (the manifest, with JSON Schema completion). Existing `app.zon` manifests remain supported. `native dev|build|test` own the generated build; `src/app.native` hot-reloads while the app runs, keeping your state; `native dev --core` runs the TypeScript logic loop under node; and `native check` validates the core and every view in milliseconds without building. Prefer a Zig core? Use `native init my_app --template zig-core`.
+The generated counter app uses `src/core.ts` for its model and updates, `src/app.native` for its view, and `app.json` for configuration. Existing `app.zon` manifests remain supported.
+
+`native dev` reloads markup while preserving app state. Core changes rebuild and restart the app. Use `native dev --core` to exercise TypeScript logic under Node.js without a window, `native check` to validate the project, and `native build` for a release binary. Use `--template zig-core` with `native init` to create a Zig core instead.
 
 When part of your product is the web, WebView surfaces coexist with the native canvas; web-frontend scaffolds (`--frontend next`, `--frontend vite`, and more) install their generated frontend dependencies automatically on first run.
 
-Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick-start).
+Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/docs/quick-start).
 
 ## Commands
 
@@ -47,6 +49,6 @@ Read the full guide at [native-sdk.dev/quick-start](https://native-sdk.dev/quick
 
 ## More
 
-The full documentation is at [native-sdk.dev](https://native-sdk.dev) — the [quick start](https://native-sdk.dev/quick-start), [TypeScript cores](https://native-sdk.dev/typescript), [native UI authoring](https://native-sdk.dev/native-ui), [app model](https://native-sdk.dev/app-model), [components](https://native-sdk.dev/components), [testing](https://native-sdk.dev/testing), [automation](https://native-sdk.dev/automation), [capabilities](https://native-sdk.dev/capabilities), [packaging](https://native-sdk.dev/packaging), and [platform support](https://native-sdk.dev/platform-support).
+The full documentation is at [native-sdk.dev](https://native-sdk.dev) — the [quick start](https://native-sdk.dev/docs/quick-start), [TypeScript cores](https://native-sdk.dev/typescript), [native UI authoring](https://native-sdk.dev/native-ui), [app model](https://native-sdk.dev/app-model), [components](https://native-sdk.dev/components), [testing](https://native-sdk.dev/docs/testing), [automation](https://native-sdk.dev/docs/automation), [capabilities](https://native-sdk.dev/docs/capabilities), [packaging](https://native-sdk.dev/docs/packaging), and [platform support](https://native-sdk.dev/docs/platform-support).
 
 Native SDK is pre-1.0 and Apache-2.0 licensed; the source lives at [github.com/vercel-labs/native](https://github.com/vercel-labs/native).

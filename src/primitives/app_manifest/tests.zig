@@ -106,6 +106,25 @@ test "valid minimal manifest" {
     try validateManifest(manifest);
 }
 
+test "updates require paired HTTPS feed and Ed25519 public key" {
+    try validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+        .check_on_start = true,
+    });
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+    }));
+    try std.testing.expectError(error.InvalidUrl, validateUpdates(.{
+        .feed_url = "http://example.com/native-update.json",
+        .public_key = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+    }));
+    try std.testing.expectError(error.MissingRequiredField, validateUpdates(.{
+        .feed_url = "https://example.com/native-update.json",
+        .public_key = "not-a-public-key",
+    }));
+}
+
 test "accessory startup requires the tray capability" {
     const tray_capabilities = [_]Capability{.tray};
     try validateManifest(.{
@@ -754,12 +773,15 @@ test "bridge validation catches duplicate commands and invalid origins" {
 test "security validation catches invalid navigation and external policies" {
     try validateSecurity(.{ .navigation = .{
         .allowed_origins = &.{ "zero://app", "https://example.com" },
-        .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{"https://example.com/*"} },
+        .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{ "https://example.com/docs", "https://example.com/*", "*" } },
     } });
 
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .allowed_origins = &.{"bad origin"} } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"ssh://example.com"} } } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"https://example.com*"} } } }));
+    for ([_][]const u8{ "https://*.example.com/*", "https://*/*", "https://*/", "https://example.com/*/docs" }) |pattern| {
+        try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{pattern} } } }));
+    }
 }
 
 test "package metadata validation catches empty authors and invalid keywords" {

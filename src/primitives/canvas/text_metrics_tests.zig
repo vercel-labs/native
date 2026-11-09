@@ -74,14 +74,37 @@ test "estimator fallbacks charge notdef and east asian wide cells" {
     try testing.expectEqual(@as(f32, 0.8), estimatorAdvanceEm(canvas.default_sans_font_id, "☑"));
     try testing.expectEqual(@as(f32, 0.8), estimatorAdvanceEm(canvas.default_sans_font_id, "⌘"));
 
-    // Mono keeps its documented 0.6 em design pitch (Geist Mono's real
-    // advance; no mono face is bundled), and the sans span variants keep
-    // their width factors on top of the derived regular advances.
+    // Mono keeps its documented 0.6 em design pitch.
     try testing.expectEqual(@as(f32, 0.6), estimatorAdvanceEm(canvas.default_mono_font_id, "M"));
     try testing.expectEqual(@as(f32, 0.6), estimatorAdvanceEm(canvas.default_mono_font_id, "i"));
-    const regular = estimatorAdvanceEm(canvas.default_sans_font_id, "n");
-    try testing.expectEqual(regular * 1.02, estimatorAdvanceEm(canvas.default_sans_medium_font_id, "n"));
-    try testing.expectEqual(regular * 1.04, estimatorAdvanceEm(canvas.default_sans_bold_font_id, "n"));
+}
+
+test "bundled sans weights measure their own glyphs and elision markers" {
+    const cases = .{
+        .{ canvas.default_sans_font_id, &font_ttf.geist_regular },
+        .{ canvas.default_sans_medium_font_id, &font_ttf.geist_medium },
+        .{ canvas.default_sans_bold_font_id, &font_ttf.geist_bold },
+        .{ canvas.default_sans_italic_font_id, &font_ttf.geist_regular },
+        .{ canvas.default_sans_bold_italic_font_id, &font_ttf.geist_bold },
+    };
+    inline for (cases) |case| {
+        const font_id = case[0];
+        const face = case[1];
+        var byte: u8 = 0x20;
+        while (byte < 0x7f) : (byte += 1) {
+            const bytes = [_]u8{byte};
+            const glyph = face.glyphIndex(byte);
+            try testing.expect(glyph != 0);
+            try testing.expectEqual(face.advance(glyph) / face.units_per_em, estimatorAdvanceEm(font_id, &bytes));
+        }
+        for (covered_multibyte_samples) |sample| {
+            try testing.expectEqual(text_metrics.estimateTextWidthForFace(face, sample, 13.25), text_metrics.estimateTextWidthForFont(font_id, sample, 13.25));
+        }
+        for ([_][]const u8{ "中", "☑", "\x01", "\xc3", "A café → notes…" }) |sample| {
+            try testing.expectEqual(text_metrics.estimateTextWidthForFace(face, sample, 13.25), text_metrics.estimateTextWidthForFont(font_id, sample, 13.25));
+        }
+        try testing.expectEqual(text_metrics.estimateTextWidthForFont(font_id, "…", 13.25), text_metrics.estimatedTextEllipsisAdvance(font_id, 13.25));
+    }
 }
 
 // ---- CoreText agreement (macOS) --------------------------------------
@@ -129,12 +152,34 @@ extern const kCFTypeDictionaryValueCallBacks: [6]usize;
 const cf_string_encoding_utf8: u32 = 0x0800_0100;
 
 fn bundledCoreTextFont(size: f64) !?*anyopaque {
-    const bytes = font_ttf.geist_regular_bytes;
+    return coreTextFontFromBytes(font_ttf.geist_regular_bytes, size);
+}
+
+fn coreTextFontFromBytes(bytes: []const u8, size: f64) !?*anyopaque {
     const data = CFDataCreate(null, bytes.ptr, @intCast(bytes.len)) orelse return error.SkipZigTest;
     defer CFRelease(data);
     const descriptor = CTFontManagerCreateFontDescriptorFromData(data) orelse return error.SkipZigTest;
     defer CFRelease(descriptor);
     return CTFontCreateWithFontDescriptor(descriptor, size, null) orelse error.SkipZigTest;
+}
+
+test "bundled sans weight advances agree with CoreText" {
+    if (comptime builtin.os.tag != .macos) return error.SkipZigTest;
+    const cases = .{
+        .{ canvas.default_sans_medium_font_id, font_ttf.geist_medium_bytes },
+        .{ canvas.default_sans_bold_font_id, font_ttf.geist_bold_bytes },
+    };
+    inline for (cases) |case| {
+        const font = try coreTextFontFromBytes(case[1], 1000);
+        defer CFRelease(font);
+        var unit: u16 = 0x20;
+        while (unit < 0x7f) : (unit += 1) {
+            const byte = [_]u8{@intCast(unit)};
+            const estimated: f64 = @floatCast(estimatorAdvanceEm(case[0], &byte));
+            const shaped = try coreTextGlyphAdvanceEm(font, 1000, unit);
+            try testing.expect(@abs(estimated - shaped) <= 0.001);
+        }
+    }
 }
 
 fn coreTextGlyphAdvanceEm(font: ?*anyopaque, size: f64, unit: u16) !f64 {

@@ -1,0 +1,1 @@
+<virtual-window id="fixed" as="visible" item-count="{count}" item-extent="28" viewport-fallback="180"><column gap="8"><text>Fixed rows</text><button on-press="append">Append</button><virtual-list window="visible" each="rows" as="row" height="180"><list-item key="{row.ordinal}" height="28">Row {row.ordinal}</list-item></virtual-list></column></virtual-window>

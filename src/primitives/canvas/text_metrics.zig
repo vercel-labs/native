@@ -149,48 +149,60 @@ comptime {
         @compileError("bundled mono face pitch drifted from the estimator's mono advance");
 }
 
-/// The bundled face's `.notdef` advance in em units (0.6 em in Geist).
-/// This is the width the face itself declares for "I do not have this
-/// glyph", so it is what layout charges for codepoints outside the
-/// face's coverage (and for control or malformed bytes, which paint as
-/// the same block fallback).
-const notdef_advance_em: f32 = faceAdvanceEm(&font_ttf.geist_regular, 0);
-
 /// Em-unit advances for the printable ASCII range, read from the
-/// bundled face's `cmap`/`hmtx` at comptime. Layout therefore measures
+/// bundled faces' `cmap`/`hmtx` at comptime. Layout therefore measures
 /// with exactly the advances the reference renderer inks; a bundle
 /// swap that drops ASCII coverage is a compile error.
-const ascii_advance_em: [0x7F - 0x20]f32 = blk: {
-    @setEvalBranchQuota(400_000);
-    var table: [0x7F - 0x20]f32 = undefined;
-    for (&table, 0x20..) |*slot, codepoint| {
-        const glyph = font_ttf.geist_regular.glyphIndex(codepoint);
-        if (glyph == 0) @compileError("bundled Geist face is missing printable ASCII coverage");
-        slot.* = faceAdvanceEm(&font_ttf.geist_regular, glyph);
+const ascii_advance_em: [font_ttf.bundled_sans_faces.len][0x7F - 0x20]f32 = blk: {
+    @setEvalBranchQuota(1_200_000);
+    var tables: [font_ttf.bundled_sans_faces.len][0x7F - 0x20]f32 = undefined;
+    for (&tables, font_ttf.bundled_sans_faces) |*table, face| {
+        for (table, 0x20..) |*slot, codepoint| {
+            const glyph = face.glyphIndex(codepoint);
+            if (glyph == 0) @compileError("bundled Geist face is missing printable ASCII coverage");
+            slot.* = faceAdvanceEm(face, glyph);
+        }
     }
-    break :blk table;
+    break :blk tables;
 };
 
 fn faceAdvanceEm(face: *const font_ttf.Face, glyph: u16) f32 {
     return face.advance(glyph) / face.units_per_em;
 }
 
+/// Immutable bundled-font primitive for copied scalar requests. Printable
+/// ASCII uses the same comptime hmtx facts as the native reference, avoiding
+/// repeated cmap walks when an editor measures long numeric drafts.
+pub fn bundledGlyphAdvanceEm(codepoint: u21) ?f32 {
+    return bundledGlyphAdvanceEmForFont(default_sans_font_id, codepoint);
+}
+
+pub fn bundledGlyphAdvanceEmForFont(font_id: FontId, codepoint: u21) ?f32 {
+    if (font_id != default_mono_font_id and codepoint >= 0x20 and codepoint < 0x7f) return ascii_advance_em[font_ttf.bundledSansFaceIndex(font_id)][codepoint - 0x20];
+    const face = font_ttf.bundledFaceForFontId(font_id);
+    const glyph = face.glyphIndex(codepoint);
+    return if (glyph == 0) null else faceAdvanceEm(face, glyph);
+}
+
 pub fn estimateTextAdvanceForBytes(font_id: FontId, bytes: []const u8, size: f32) f32 {
     if (bytes.len == 0) return 0;
     if (font_id == default_mono_font_id) return size * mono_advance_em;
-    const weight = sansVariantWidthFactor(font_id);
-    return size * clusterAdvanceEm(bytes) * weight;
+    return size * clusterAdvanceEm(font_id, bytes);
 }
 
 /// The bundled face's U+2026 HORIZONTAL ELLIPSIS advance in em units,
 /// read at comptime like the ASCII table. Elision consults the marker's
 /// advance once per overflowing line every frame, so the estimator path
 /// answers from this constant instead of re-walking the `cmap`.
-const ellipsis_advance_em: f32 = blk: {
-    @setEvalBranchQuota(400_000);
-    const glyph = font_ttf.geist_regular.glyphIndex(0x2026);
-    if (glyph == 0) @compileError("bundled Geist face is missing U+2026 (the elision marker)");
-    break :blk faceAdvanceEm(&font_ttf.geist_regular, glyph);
+const ellipsis_advance_em: [font_ttf.bundled_sans_faces.len]f32 = blk: {
+    @setEvalBranchQuota(1_200_000);
+    var advances: [font_ttf.bundled_sans_faces.len]f32 = undefined;
+    for (&advances, font_ttf.bundled_sans_faces) |*advance, face| {
+        const glyph = face.glyphIndex(0x2026);
+        if (glyph == 0) @compileError("bundled Geist face is missing U+2026 (the elision marker)");
+        advance.* = faceAdvanceEm(face, glyph);
+    }
+    break :blk advances;
 };
 
 /// Estimator advance of the elision marker ("…"): bit-identical to
@@ -198,7 +210,7 @@ const ellipsis_advance_em: f32 = blk: {
 /// codepoint lookup.
 pub fn estimatedTextEllipsisAdvance(font_id: FontId, size: f32) f32 {
     if (font_id == default_mono_font_id) return size * mono_advance_em;
-    return size * ellipsis_advance_em * sansVariantWidthFactor(font_id);
+    return size * ellipsis_advance_em[font_ttf.bundledSansFaceIndex(font_id)];
 }
 
 /// Deterministic width of `text` measured against an arbitrary parsed
@@ -256,10 +268,12 @@ fn clusterAdvanceEmForFace(face: *const font_ttf.Face, bytes: []const u8) f32 {
 /// glyph should occupy), uncovered symbol/pictograph blocks charge
 /// 0.8 em (the AppleSymbols cascade class real macOS text falls back
 /// to), everything else charges the face's own `.notdef` advance.
-fn clusterAdvanceEm(bytes: []const u8) f32 {
+fn clusterAdvanceEm(font_id: FontId, bytes: []const u8) f32 {
+    const face = font_ttf.bundledFaceForFontId(font_id);
+    const notdef_advance_em = faceAdvanceEm(face, 0);
     if (bytes.len == 1) {
         const byte = bytes[0];
-        if (byte >= 0x20 and byte < 0x7F) return ascii_advance_em[byte - 0x20];
+        if (byte >= 0x20 and byte < 0x7F) return ascii_advance_em[font_ttf.bundledSansFaceIndex(font_id)][byte - 0x20];
         return notdef_advance_em;
     }
     // `utf8Decode` asserts (rather than errors) when the slice length
@@ -267,7 +281,6 @@ fn clusterAdvanceEm(bytes: []const u8) f32 {
     // the end of a run — take the notdef fallback explicitly.
     if (bytes.len != utf8SequenceLength(bytes[0])) return notdef_advance_em;
     const codepoint = std.unicode.utf8Decode(bytes) catch return notdef_advance_em;
-    const face = &font_ttf.geist_regular;
     const glyph = face.glyphIndex(codepoint);
     if (glyph != 0) return faceAdvanceEm(face, glyph);
     if (isEastAsianWideCodepoint(codepoint)) return 1.0;
@@ -321,16 +334,19 @@ fn isEastAsianWideCodepoint(codepoint: u21) bool {
     };
 }
 
-/// Width factor for the reserved sans variant ids (span weight/slant).
-/// The regular id keeps factor 1 exactly, so existing single-style text
-/// measurements — and every golden derived from them — are unchanged.
-fn sansVariantWidthFactor(font_id: FontId) f32 {
-    if (font_id == canvas.default_sans_medium_font_id) return 1.02;
-    if (font_id == canvas.default_sans_bold_font_id) return 1.04;
-    if (font_id == canvas.default_sans_bold_italic_font_id) return 1.04;
-    return 1;
-}
-
 pub fn estimatedGlyphAdvance(glyph: Glyph, size: f32) f32 {
     return @max(size * 0.25, glyph.advance);
+}
+
+pub fn measureTextWidthForFontWithPolicy(provider: ?*const TextMeasureProvider, policy: ?@import("text_scalar_policy.zig").Policy, font_id: FontId, text: []const u8, size: f32) f32 {
+    const owner = policy orelse return measureTextWidthForFont(provider, font_id, text, size);
+    return @import("text_scalar_policy.zig").width(owner, provider, font_id, text, size);
+}
+pub fn estimateTextAdvanceForBytesWithPolicy(policy: ?@import("text_scalar_policy.zig").Policy, font_id: FontId, bytes: []const u8, size: f32) f32 {
+    const owner = policy orelse return estimateTextAdvanceForBytes(font_id, bytes, size);
+    return @import("text_scalar_policy.zig").estimate(owner, font_id, bytes, size, true);
+}
+pub fn measureTextInkWithPolicy(provider: *const TextMeasureProvider, policy: ?@import("text_scalar_policy.zig").Policy, font_id: FontId, size: f32, text: []const u8) ?TextInkMetrics {
+    const owner = policy orelse return provider.measureInk(font_id, size, text);
+    return @import("text_scalar_policy.zig").ink(owner, provider, font_id, text, size);
 }

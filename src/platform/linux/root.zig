@@ -484,6 +484,8 @@ pub const LinuxPlatform = struct {
             // app that skips the capability check still learns exactly
             // what is missing.
             .video_playback => false,
+            .global_shortcuts => false,
+            .keyboard_input => false,
         };
     }
 
@@ -692,6 +694,7 @@ fn gpuSurfaceInputEventFromGtkEvent(event: *const GtkEvent) platform_mod.GpuSurf
         .window_id = event.window_id,
         .label = event.view_label[0..event.view_label_len],
         .kind = gpuSurfaceInputKindFromInt(event.input_kind),
+        .scroll_is_detented = event.input_kind == 15,
         .timestamp_ns = event.timestamp_ns,
         .x = @floatCast(event.x),
         .y = @floatCast(event.y),
@@ -719,6 +722,7 @@ fn gpuSurfaceInputKindFromInt(value: c_int) platform_mod.GpuSurfaceInputKind {
         9 => .ime_commit_composition,
         10 => .ime_cancel_composition,
         11 => .pointer_cancel,
+        15 => .scroll,
         else => .pointer_move,
     };
 }

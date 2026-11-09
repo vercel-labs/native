@@ -1,4 +1,6 @@
 const std = @import("std");
+const coordination = @import("shell_coordination_policy.zig");
+const lifecycle = @import("window_lifecycle_policy.zig");
 const geometry = @import("geometry");
 const validation = @import("validation.zig");
 const shell_layout = @import("shell_layout.zig");
@@ -99,6 +101,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         pub const viewTreeHasFocusedDepth = WindowViewRuntimeMethods.viewTreeHasFocusedDepth;
 
         pub fn closeWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return Self.executeWindowCapability(self, policy, .close, window_id);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             // Flip the runtime flag BEFORE the platform call: hosts that
             // run the close delegate synchronously (macOS `performClose`
@@ -124,12 +127,43 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             self.windows[index].info.focused = false;
             self.windows[index].info.hidden = false;
             self.options.platform.services.closeWindow(window_id) catch |err| {
-                self.windows[index].info.open = was_open;
-                self.windows[index].info.focused = was_focused;
-                self.windows[index].info.hidden = was_hidden;
-                return err;
+                // Replay adopts startup windows from recorded host events.
+                // They have runtime ownership but may have no native owner
+                // on the headless host. Preserve the app's close transition
+                // before the later recorded native close notification.
+                if (!self.replay_window_chrome_active or err != error.WindowNotFound) {
+                    self.windows[index].info.open = was_open;
+                    self.windows[index].info.focused = was_focused;
+                    self.windows[index].info.hidden = was_hidden;
+                    return err;
+                }
             };
             Self.removeWindowRuntimeViews(self, window_id);
+            self.invalidated = true;
+        }
+
+        /// Replay a successful native window capability without entering the
+        /// platform. The journal supplies the outcome; native retains view
+        /// ownership and applies the corresponding bookkeeping transition.
+        pub fn restoreWindowCapabilityResult(self: *Runtime, label: []const u8, closed: bool) void {
+            if (self.window_lifecycle_policy) |policy| {
+                const program = lifecycle.plan(policy, self, .replay, .{ .label = label, .value = closed });
+                if (program.has(64)) return;
+                const index = program.selected.?;
+                program.apply(&self.windows[index].info);
+                if (program.has(1)) Self.removeWindowRuntimeViews(self, self.windows[index].info.id);
+                if (program.has(4)) Self.setFocusedIndex(self, index) catch return;
+                if (program.has(2)) self.invalidated = true;
+                return;
+            }
+            const index = Self.findWindowIndexByLabel(self, label) orelse return;
+            if (!self.windows[index].info.open) return;
+            self.windows[index].info.hidden = false;
+            if (closed) {
+                self.windows[index].info.open = false;
+                self.windows[index].info.focused = false;
+                Self.removeWindowRuntimeViews(self, self.windows[index].info.id);
+            } else Self.setFocusedIndex(self, index) catch return;
             self.invalidated = true;
         }
 
@@ -138,6 +172,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// bookkeeping moves: a minimized window stays open and keeps
         /// its views — it comes back from the Dock/taskbar.
         pub fn minimizeWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return Self.executeWindowCapability(self, policy, .minimize, window_id);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             // The same liveness gate as showWindow below: a retained
             // closed slot must not reach the platform (the CEF host
@@ -150,6 +185,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// `showWindow` brings it back. This is an app-driven hide, not a
         /// close, so identity and rendered state are retained.
         pub fn hideWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return Self.executeWindowCapability(self, policy, .hide, window_id);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             if (!self.windows[index].info.open) return error.WindowNotFound;
             const was_hidden = self.windows[index].info.hidden;
@@ -172,6 +208,18 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         /// back on platform failure. A window that was never hidden
         /// just comes to the front.
         pub fn showWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            return Self.showWindowWithNative(self, window_id, true);
+        }
+
+        /// Apply the same immediate show transition during replay. Native
+        /// window notifications still arrive from the journal afterward.
+        pub fn restoreWindowShow(self: *Runtime, label: []const u8) void {
+            const index = Self.findWindowIndexByLabel(self, label) orelse return;
+            Self.showWindowWithNative(self, self.windows[index].info.id, false) catch return;
+        }
+
+        fn showWindowWithNative(self: *Runtime, window_id: platform.WindowId, execute_native: bool) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return Self.executeWindowCapabilityWithNative(self, policy, .show, window_id, execute_native);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             // A closed window keeps its table slot (the id and label
             // release lazily, at the next create), so resolving the id
@@ -184,7 +232,7 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             if (!self.windows[index].info.open) return error.WindowNotFound;
             const was_hidden = self.windows[index].info.hidden;
             self.windows[index].info.hidden = false;
-            self.options.platform.services.showWindow(window_id) catch |err| {
+            if (execute_native) self.options.platform.services.showWindow(window_id) catch |err| {
                 self.windows[index].info.hidden = was_hidden;
                 return err;
             };
@@ -196,6 +244,44 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 try Self.setFocusedIndex(self, index);
             }
             self.invalidated = true;
+        }
+
+        /// Executes the capability sequence selected from fresh observations.
+        /// Outcome classification crosses the policy boundary; rollback fields,
+        /// replay exceptions and follow-up focus stay in the compiled program.
+        pub fn executeWindowCapability(self: *Runtime, policy: lifecycle.Policy, verb: lifecycle.Verb, window_id: platform.WindowId) anyerror!void {
+            return Self.executeWindowCapabilityWithNative(self, policy, verb, window_id, true);
+        }
+
+        fn executeWindowCapabilityWithNative(self: *Runtime, policy: lifecycle.Policy, verb: lifecycle.Verb, window_id: platform.WindowId, execute_native: bool) anyerror!void {
+            const begin = lifecycle.plan(policy, self, .begin, .{ .id = window_id, .variant = @intFromEnum(verb) });
+            try begin.admitted();
+            const index = begin.selected.?;
+            const saved = lifecycle.flags(self.windows[index].info);
+            begin.apply(&self.windows[index].info);
+            if (begin.has(16)) try Self.showWindow(self, window_id);
+            var failure: ?anyerror = null;
+            if (execute_native) switch (verb) {
+                .close => self.options.platform.services.closeWindow(window_id) catch |err| {
+                    failure = err;
+                },
+                .hide => self.options.platform.services.hideWindow(window_id) catch |err| {
+                    failure = err;
+                },
+                .show => self.options.platform.services.showWindow(window_id) catch |err| {
+                    failure = err;
+                },
+                .focus => self.options.platform.services.focusWindow(window_id) catch |err| {
+                    failure = err;
+                },
+                .minimize => return self.options.platform.services.minimizeWindow(window_id),
+            };
+            const finish = lifecycle.plan(policy, self, .finish, .{ .cursor = index, .variant = @intFromEnum(verb), .saved = saved, .value = self.replay_window_chrome_active, .outcome = if (failure) |err| (if (err == error.WindowNotFound) .window_not_found else .failed) else .success });
+            finish.apply(&self.windows[index].info);
+            if (finish.has(8)) return failure.?;
+            if (finish.has(1)) Self.removeWindowRuntimeViews(self, window_id);
+            if (finish.has(4)) try Self.setFocusedIndex(self, index);
+            if (finish.has(2)) self.invalidated = true;
         }
 
         /// The graceful app quit: ask the platform to terminate through
@@ -244,9 +330,9 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 .resizable = shell_window.resizable,
                 .restore_state = shell_window.restore_state,
                 .restore_policy = shellRestorePolicy(shell_window.restore_policy),
-                .initial_placement = if (shell_window.x != null or shell_window.y != null) .explicit else .default,
+                .initial_placement = if (self.shell_coordination_policy) |policy| coordination.presentation(policy, shell_window).placement else if (shell_window.x != null or shell_window.y != null) .explicit else .default,
                 .titlebar = shell_layout.shellTitlebarStyle(shell_window.titlebar),
-                .show = shell_layout.shellWindowShowMode(shell_window),
+                .show = if (self.shell_coordination_policy) |policy| coordination.presentation(policy, shell_window).show else shell_layout.shellWindowShowMode(shell_window),
                 .transparent = shell_window.transparent,
                 .always_on_top = shell_window.always_on_top,
                 .click_through = shell_window.click_through,
@@ -264,7 +350,11 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         }
 
         pub fn createShellViews(self: *Runtime, window_id: platform.WindowId, views: []const app_manifest.ShellView, bounds: geometry.RectF) anyerror!void {
-            if (views.len > app_manifest.max_shell_views_per_window) return error.ViewLimitReached;
+            if (self.shell_coordination_policy) |policy| {
+                var request = coordination.request(.admission, 0, 0, 2);
+                std.mem.writeInt(u64, request[16..24], views.len, .little);
+                try coordination.plan(policy, &request).admit();
+            } else if (views.len > app_manifest.max_shell_views_per_window) return error.ViewLimitReached;
             try Self.validateShellViewCreatePlan(self, window_id, views);
 
             var main_state: RuntimeMainWebViewState = undefined;
@@ -290,6 +380,27 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             var native_view_count: usize = 0;
             var child_webview_count: usize = 0;
             for (views, 0..) |view, index| {
+                if (self.shell_coordination_policy) |policy| {
+                    var duplicate = false;
+                    for (views[0..index]) |previous| {
+                        if (coordination.equal(policy, previous.label, view.label)) duplicate = true;
+                    }
+                    const main_label = coordination.equal(policy, view.label, "main");
+                    var exists = main_label;
+                    for (self.views[0..self.view_count]) |stored| {
+                        if (stored.open and stored.window_id == window_id and coordination.equal(policy, stored.label, view.label)) exists = true;
+                    }
+                    for (self.webviews[0..self.webview_count]) |stored| {
+                        if (stored.open and stored.window_id == window_id and coordination.equal(policy, stored.label, view.label)) exists = true;
+                    }
+                    var request = coordination.request(.admission, @as(u32, @intFromBool(duplicate)) | (@as(u32, @intFromBool(exists)) << 1) | (@as(u32, @intFromBool(main_label)) << 2), 0, 0);
+                    coordination.put(&request, 16, @intFromEnum(view.kind));
+                    const program = coordination.plan(policy, &request);
+                    try program.admit();
+                    if (program.decisions == 1) child_webview_count += 1;
+                    if (program.decisions == 2) native_view_count += 1;
+                    continue;
+                }
                 for (views[0..index]) |previous| {
                     if (std.mem.eql(u8, previous.label, view.label)) return error.DuplicateViewLabel;
                 }
@@ -304,11 +415,35 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
                 }
             }
 
+            if (self.shell_coordination_policy) |policy| {
+                var request = coordination.request(.admission, 0, 0, 1);
+                coordination.put(&request, 20, @intCast(native_view_count));
+                coordination.put(&request, 24, @intCast(child_webview_count));
+                coordination.put(&request, 28, @intCast(self.view_count));
+                coordination.put(&request, 32, @intCast(self.webview_count));
+                return coordination.plan(policy, &request).admit();
+            }
             if (native_view_count > platform.max_views - self.view_count) return error.ViewLimitReached;
             if (child_webview_count > platform.max_webviews - self.webview_count) return error.WebViewLimitReached;
         }
 
         pub fn applyShellViews(self: *Runtime, window_id: platform.WindowId, views: []const app_manifest.ShellView, bounds: geometry.RectF, mode: ShellApplyMode, tracked_labels: ?*[app_manifest.max_shell_views_per_window][]const u8, tracked_count: ?*usize) anyerror!void {
+            if (self.shell_layout_policy) |policy| {
+                const plan = shell_layout.compiledShellPlan(policy, bounds, views);
+                for (plan.items[0..plan.count]) |item| {
+                    const view = views[item.index];
+                    const did_create = try Self.applyShellView(self, shell_layout.shellViewOptionsWithFrame(window_id, view, item.platform_frame), mode);
+                    if (did_create) {
+                        if (tracked_labels) |labels| {
+                            const count = tracked_count.?;
+                            labels[count.*] = view.label;
+                            count.* += 1;
+                        }
+                    }
+                }
+                if (plan.invalid_parents) return error.InvalidViewOptions;
+                return;
+            }
             var layout = ShellLayout.init(bounds, views);
             var created: [app_manifest.max_shell_views_per_window]bool = [_]bool{false} ** app_manifest.max_shell_views_per_window;
             var created_count: usize = 0;
@@ -336,6 +471,25 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
         }
 
         pub fn applyShellView(self: *Runtime, options: platform.ViewOptions, mode: ShellApplyMode) anyerror!bool {
+            if (self.shell_coordination_policy) |policy| {
+                const main_label = coordination.equal(policy, options.label, "main");
+                const facts = @as(u32, @intFromBool(mode == .update)) | (@as(u32, @intFromBool(main_label)) << 1);
+                var request = coordination.request(.apply, facts, 0, 0);
+                coordination.put(&request, 16, @intFromEnum(options.kind));
+                const program = coordination.plan(policy, &request);
+                if (program.decisions & 1 != 0) try Self.setMainWebViewParent(self, options.window_id, options.parent);
+                if (program.decisions & 2 != 0) {
+                    _ = try Self.createView(self, options);
+                    return true;
+                }
+                _ = Self.updateView(self, options.window_id, options.label, .{ .frame = options.frame, .layer = options.layer }) catch |err| {
+                    var finish = request;
+                    coordination.put(&finish, 4, facts | (@as(u32, @intFromBool(err == error.ViewNotFound or err == error.WebViewNotFound)) << 2));
+                    if (coordination.plan(policy, &finish).decisions & 8 != 0) return false;
+                    return err;
+                };
+                return false;
+            }
             switch (mode) {
                 .create => {
                     if (options.kind == .webview and isMainWebViewLabel(options.label)) {
@@ -369,6 +523,15 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
 
         pub fn rollbackCreatedShellViews(self: *Runtime, window_id: platform.WindowId, labels: []const []const u8) void {
             var index = labels.len;
+            if (self.shell_coordination_policy) |policy| {
+                while (true) {
+                    const request = coordination.request(.rollback, 0, @intCast(labels.len), @intCast(index));
+                    const slot = coordination.plan(policy, &request).selected orelse break;
+                    Self.closeView(self, window_id, labels[slot]) catch {};
+                    index = slot;
+                }
+                return;
+            }
             while (index > 0) {
                 index -= 1;
                 Self.closeView(self, window_id, labels[index]) catch {};
@@ -391,13 +554,18 @@ pub fn RuntimeWindowViews(comptime Runtime: type) type {
             const window = self.windows[index];
             var restore_error: ?anyerror = null;
 
-            if (window.source != null) {
-                if (window.main_frame_set != state.frame_set or !Self.rectsEqual(window.main_frame, state.frame)) {
+            const restore = if (self.shell_coordination_policy) |policy| compiled: {
+                var request = coordination.request(.restore, @as(u32, @intFromBool(window.source != null)) | (@as(u32, @intFromBool(window.main_frame_set != state.frame_set)) << 1), @bitCast(window.main_layer), @bitCast(state.layer));
+                for ([_]f32{ window.main_frame.x, window.main_frame.y, window.main_frame.width, window.main_frame.height, state.frame.x, state.frame.y, state.frame.width, state.frame.height }, 0..) |value, i| coordination.put(&request, 16 + i * 4, @bitCast(value));
+                break :compiled coordination.plan(policy, &request).decisions;
+            } else @as(u32, if (window.source != null and (window.main_frame_set != state.frame_set or !Self.rectsEqual(window.main_frame, state.frame))) 1 else 0) | @as(u32, if (window.source != null and window.main_layer != state.layer) 2 else 0);
+            {
+                if (restore & 1 != 0) {
                     self.options.platform.services.setWebViewFrame(window_id, "main", state.frame) catch |err| {
                         restore_error = err;
                     };
                 }
-                if (window.main_layer != state.layer) {
+                if (restore & 2 != 0) {
                     self.options.platform.services.setWebViewLayer(window_id, "main", state.layer) catch |err| {
                         if (restore_error == null) restore_error = err;
                     };

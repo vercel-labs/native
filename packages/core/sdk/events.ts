@@ -1,3 +1,16 @@
+/** Complete synchronous registration result for a declared boot image.
+ * `id` is canonical decimal ASCII for the native u64 identity. Failure keeps
+ * dimensions zero and supplies the complete native error name. No pixels or
+ * encoded image storage enter the core's model heap.
+ */
+export type BootImageResult = {
+  readonly id: Uint8Array;
+  readonly registered: boolean;
+  readonly width: number;
+  readonly height: number;
+  readonly errorName: Uint8Array;
+};
+
 // @native-sdk/core/events — the canonical event record types the host and
 // markup deliver into an app core, an SDK LIBRARY module: pure type
 // declarations in the app-core subset, emitted into your core when imported
@@ -46,10 +59,49 @@
 
 export type { TextCaretDirection, TextCaretMove, TextSelection, TextInputEvent } from "./text.ts";
 
+/// One scene-declared WebView driven by committed model state. Export
+/// `webPanes(model): readonly WebViewPane[]` to anchor it to a canvas widget
+/// label, or provide an explicit frame when `anchor` is null. Changing `url`
+/// navigates; changing `reloadToken` reloads the same URL. Native owns the
+/// WebView and applies the manifest's navigation policy. At most four panes
+/// are applied in declaration order.
+export interface WebViewPane {
+  readonly label: Uint8Array;
+  readonly anchor: Uint8Array | null;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly url: Uint8Array;
+  readonly reloadToken: number;
+}
+
+/// Exact decimal reload token for applications retaining all u64 states.
+/// The host accepts ASCII digits in 0..18446744073709551615, without rounding.
+export interface ExactWebViewPane {
+  readonly label: Uint8Array;
+  readonly anchor: Uint8Array | null;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly url: Uint8Array;
+  readonly reloadToken: Uint8Array;
+}
+
+/// Runtime-owned terminal view state, echoed by on-terminal.
+export interface TerminalState {
+  readonly scrollback: number;
+  readonly history: number;
+  readonly cols: number;
+  readonly rows: number;
+}
+
 /// The stock theme axes a TypeScript core may derive from committed model
 /// state. Omit `pack`/`accent` to inherit app.zon; omit `colorScheme` (or
-/// return `"system"`) to follow the OS. High contrast and reduced motion
-/// remain system-owned, and high contrast suppresses accent overrides.
+/// return `"system"`) to follow the OS. Omit the accessibility flags to
+/// follow the OS, or retain observed flags in the model for replay.
+/// Effective high contrast suppresses accent overrides.
 export type ThemeStatePack = "house" | "geist";
 
 export type ThemeStateColorScheme = "light" | "dark" | "system";
@@ -58,6 +110,10 @@ export type ThemeState = {
   readonly pack?: ThemeStatePack;
   readonly colorScheme?: ThemeStateColorScheme;
   readonly accent?: string;
+  /// Omission follows the OS. Explicit values retain observed appearance
+  /// in the committed model, including when a session is replayed.
+  readonly highContrast?: boolean;
+  readonly reduceMotion?: boolean;
 };
 
 /// One row in a menu-bar status item's menu. Non-separator rows need a
@@ -248,6 +304,14 @@ export interface ScrollState {
   readonly contentExtentY: number;
 }
 
+/** Retained main-canvas slider observation at the update/rebuild boundary.
+ * Ids retain all native bits; values are the applied native f32 widened exactly. */
+export interface SliderState {
+  readonly id: Uint8Array;
+  readonly label: Uint8Array;
+  readonly value: number;
+}
+
 /// The presented-frame channel's record (`frameMsg(model, frame)`): the
 /// canvas size in points plus the frame clock in fractional milliseconds.
 /// Return null from `frameMsg` for frames that change nothing — the idle
@@ -257,6 +321,133 @@ export interface FrameEvent {
   readonly height: number;
   readonly timestampMs: number;
   readonly intervalMs: number;
+  /// Exact unsigned nanoseconds, encoded as ASCII decimal bytes. Native
+  /// copies these values into the channel arena before entering the core.
+  readonly timestampNs: Uint8Array;
+  readonly intervalNs: Uint8Array;
+}
+
+/// Copied presentation facts for `canvasFrameMsg(model, frame)`. Counters
+/// and clocks are exact unsigned decimal bytes, including values above 2^53.
+export type CanvasFrameRisk = "idle" | "low" | "moderate" | "high";
+export interface CanvasFrameEvent {
+  readonly width: number;
+  readonly height: number;
+  readonly timestampNs: Uint8Array;
+  readonly intervalNs: Uint8Array;
+  readonly risk: CanvasFrameRisk;
+  readonly workUnits: Uint8Array;
+  readonly commands: Uint8Array;
+  readonly batches: Uint8Array;
+  readonly representable: boolean;
+  readonly dirtyRatio: number;
+}
+
+export interface CanvasColor {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+  readonly a: number;
+}
+export interface CanvasRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+export interface CanvasPoint { readonly x: number; readonly y: number; }
+export interface CanvasGradientStop { readonly offset: number; readonly color: CanvasColor; }
+export type CanvasFill =
+  | { readonly kind: "color"; readonly color: CanvasColor }
+  | { readonly kind: "linear_gradient"; readonly start: CanvasPoint; readonly end: CanvasPoint; readonly stops: readonly CanvasGradientStop[] };
+export interface CanvasStroke { readonly fill: CanvasFill; readonly width: number; }
+export interface CanvasRadius {
+  readonly topLeft: number; readonly topRight: number;
+  readonly bottomRight: number; readonly bottomLeft: number;
+}
+/// The complete native path vocabulary. All three point slots are carried
+/// explicitly, including unused zero points, so snapshots stay lossless.
+export type CanvasPathVerb = "move_to" | "line_to" | "quad_to" | "cubic_to" | "close";
+export type CanvasLineCap = "butt" | "round";
+export interface CanvasPathElement {
+  readonly verb: CanvasPathVerb;
+  readonly first: CanvasPoint; readonly second: CanvasPoint; readonly third: CanvasPoint;
+}
+export type CanvasIconPaint =
+  | { readonly kind: "none" }
+  | { readonly kind: "current_color" }
+  | { readonly kind: "color"; readonly color: CanvasColor };
+export type CanvasIconLineJoin = "miter" | "round";
+export interface CanvasIconShape {
+  readonly start: number;
+  readonly count: number;
+  readonly fill: CanvasIconPaint;
+  readonly stroke: CanvasIconPaint;
+  readonly strokeWidth: number;
+  readonly linecap: CanvasLineCap;
+  readonly linejoin: CanvasIconLineJoin;
+}
+/// Installed once before images, commands and the first view. Native copies
+/// names and complete vector data into stable drawing storage. An app may
+/// declare 64 icons, each with 48 shapes and 512 complete path elements.
+export interface CanvasIconDefinition {
+  readonly name: Uint8Array;
+  readonly viewBox: CanvasRect;
+  readonly elements: readonly CanvasPathElement[];
+  readonly shapes: readonly CanvasIconShape[];
+}
+/// Canonical decimal u64 IDs; zero is anonymous. Nonzero IDs must be
+/// unique across both layers. Native aggregate resource limits still apply.
+export type CanvasChromeCommand =
+  | { readonly kind: "rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly fill: CanvasFill }
+  | { readonly kind: "rounded_rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly radius: number; readonly fill: CanvasFill }
+  | { readonly kind: "stroke_rect"; readonly id: Uint8Array; readonly rect: CanvasRect; readonly radius: CanvasRadius; readonly stroke: CanvasStroke }
+  | { readonly kind: "line"; readonly id: Uint8Array; readonly from: CanvasPoint; readonly to: CanvasPoint; readonly stroke: CanvasStroke }
+  | { readonly kind: "fill_path"; readonly id: Uint8Array; readonly elements: readonly CanvasPathElement[]; readonly fill: CanvasFill }
+  | { readonly kind: "stroke_path"; readonly id: Uint8Array; readonly elements: readonly CanvasPathElement[]; readonly stroke: CanvasStroke; readonly cap: CanvasLineCap };
+/// Native supplies viewport dimensions and the resolved stock colors. The
+/// core derives each layer with at most 256 commands; native copies results
+/// before the helper arena is reused. Gradients allow 16 stops and paths
+/// allow 64 elements. canvasChromeSuffix uses the same context and records.
+export interface CanvasChromeContext {
+  readonly width: number;
+  readonly height: number;
+  readonly background: CanvasColor;
+  readonly surface: CanvasColor;
+  readonly border: CanvasColor;
+  readonly text: CanvasColor;
+}
+export interface CanvasTransform {
+  readonly a: number; readonly b: number; readonly c: number;
+  readonly d: number; readonly tx: number; readonly ty: number;
+}
+export type CanvasAnimationPart = "fill" | "text";
+export type CanvasAnimationLoop = "none" | "wrap" | "ping_pong";
+/// Target a widget by exact accessibility label and occurrence. Native
+/// resolves its retained identity and stamps the exact presentation clock.
+export interface CanvasAnimation {
+  readonly label: Uint8Array;
+  readonly index: number;
+  readonly part: CanvasAnimationPart;
+  readonly durationMs: number;
+  readonly easing: LayoutTweenEasing;
+  readonly loop: CanvasAnimationLoop;
+  readonly fromOpacity: number;
+  readonly toOpacity: number;
+  readonly fromTransform: CanvasTransform;
+  readonly toTransform: CanvasTransform;
+}
+
+/// A model-declared split layout tween. An optional label narrows the
+/// split selector; index selects its zero-based occurrence in tree order.
+/// Native retains widget identities and animation storage.
+export type LayoutTweenEasing = "linear" | "standard" | "emphasized" | "spring";
+export interface LayoutTween {
+  readonly label: Uint8Array | null;
+  readonly index: number;
+  readonly to: number;
+  readonly durationMs: number;
+  readonly easing: LayoutTweenEasing;
 }
 
 /// The key-fallback channel's record (`keyMsg(key)`): the key NAME arrives
@@ -394,6 +585,27 @@ export interface AudioEvent {
   readonly bands: Uint8Array;
 }
 
+/** Complete native audio report with exact canonical unsigned decimal bytes
+ * for the caller's key and both millisecond counters. */
+export interface ExactAudioEvent {
+  readonly key: Uint8Array;
+  readonly state: AudioState;
+  readonly positionMs: Uint8Array;
+  readonly durationMs: Uint8Array;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly bands: Uint8Array;
+}
+
+/** Commands for the single native player. Seek positions are canonical
+ * unsigned decimal bytes; volume is remembered while the player is idle. */
+export type AudioTransport =
+  | { readonly kind: "pause" }
+  | { readonly kind: "play" }
+  | { readonly kind: "stop" }
+  | { readonly kind: "seek"; readonly positionMs: Uint8Array }
+  | { readonly kind: "volume"; readonly value: number };
+
 /// Native audio-capture vocabulary and fixed event record. PCM chunks are
 /// interleaved signed 16-bit little-endian in the requested format.
 export type AudioCaptureSource = "microphone" | "system";
@@ -410,4 +622,30 @@ export interface AudioCaptureEvent {
   readonly pcm: Uint8Array;
   readonly droppedPending: number;
   readonly droppedTotal: number;
+}
+
+/// The `Sub.globalShortcut` arm record. "registered" means the OS accepted the
+/// binding; "conflict", "unsupported", and "rejected" mean another app or the OS
+/// owns it, the platform has no global shortcuts, or the binding is invalid.
+export type GlobalShortcutState = "registered" | "pressed" | "released" | "conflict" | "unsupported" | "rejected";
+
+export interface GlobalShortcutEvent {
+  readonly id: Uint8Array;
+  readonly state: GlobalShortcutState;
+}
+
+/** Retained viewport facts supplied to a windowed-list row query. */
+export interface VirtualListRange {
+  readonly start_index: number;
+  readonly end_index: number;
+  readonly first_visible_index: number;
+  readonly last_visible_index: number;
+  readonly item_extent: number;
+  readonly item_gap: number;
+  readonly scroll_offset: number;
+  readonly layout_offset: number;
+  readonly content_extent: number;
+  readonly before_extent: number;
+  readonly after_extent: number;
+  readonly anchor_extent: number;
 }

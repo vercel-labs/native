@@ -1,3 +1,5 @@
+const gpu_policy = @import("gpu_planning_policy.zig");
+const render_cache = @import("render_cache_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
@@ -88,6 +90,9 @@ pub const CanvasFrameProfile = frame_metrics.CanvasFrameProfile;
 pub const canvasFrameProfile = frame_metrics.canvasFrameProfile;
 
 pub const CanvasRenderPass = struct {
+    /// Static compiled owner for GPU programs and portable vector coverage;
+    /// payload pointers remain borrowed from this frame.
+    gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -173,7 +178,13 @@ pub const CanvasRenderPass = struct {
         return self.layer_actions.len;
     }
 
+    pub fn encoderCounts(self: CanvasRenderPass) gpu_policy.EncoderCounts {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner);
+        return .{ .commands = self.encoderCommandCount(), .caches = self.encoderCacheActionCount(), .binds = self.encoderBindPipelineCount(), .draws = self.encoderDrawBatchCount() };
+    }
+
     pub fn encoderCommandCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).commands;
         if (!self.requiresRender()) return 0;
         var count: usize = 2 + self.encoderCacheActionCount() + self.encoderBindPipelineCount() + self.encoderDrawBatchCount();
         if (self.scissorBounds() != null) count += 1;
@@ -181,6 +192,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderCacheActionCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).caches;
         if (!self.requiresRender()) return 0;
         return self.pipeline_actions.len +
             self.path_geometry_actions.len +
@@ -193,6 +205,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderBindPipelineCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).binds;
         if (!self.requiresRender()) return 0;
         var count: usize = 0;
         var bound_pipeline: ?RenderPipelineKind = null;
@@ -206,6 +219,7 @@ pub const CanvasRenderPass = struct {
     }
 
     pub fn encoderDrawBatchCount(self: CanvasRenderPass) usize {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.encoderCounts(self, owner).draws;
         return if (self.requiresRender()) self.batches.len else 0;
     }
 
@@ -253,15 +267,18 @@ pub const CanvasRenderPass = struct {
 
     pub fn encoderPlan(self: CanvasRenderPass, output: []RenderEncoderCommand) Error!RenderEncoderPlan {
         var planner = RenderEncoderPlanner.init(output);
+        if (self.gpu_plan_policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
     pub fn gpuPacket(self: CanvasRenderPass, output: []CanvasGpuCommand) Error!CanvasGpuPacket {
         var planner = CanvasGpuPacketPlanner.init(output);
+        if (self.gpu_plan_policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
     pub fn gpuPacketSummary(self: CanvasRenderPass) CanvasGpuPacketSummary {
+        if (self.gpu_plan_policy) |owner| return gpu_policy.summary(self, owner);
         if (!self.requiresRender()) return .{};
         var summary = CanvasGpuPacketSummary{
             .load_action = self.loadAction(),
@@ -282,6 +299,9 @@ pub const CanvasRenderPass = struct {
 };
 
 pub const CanvasFrame = struct {
+    /// Static compiled owner for GPU programs and portable vector coverage;
+    /// payload pointers remain borrowed from this frame.
+    gpu_plan_policy: ?gpu_policy.Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -342,14 +362,23 @@ pub const CanvasFrame = struct {
     fn diagnosticsWithoutBudgetStatus(self: CanvasFrame) CanvasFrameDiagnostics {
         const render_pass = self.renderPass();
         const gpu_packet_summary = render_pass.gpuPacketSummary();
+        const encoder_counts = render_pass.encoderCounts();
+        return self.diagnosticsFromPlanningSummaries(gpu_packet_summary, encoder_counts);
+    }
+
+    pub fn budgetStatusFromPlanningSummaries(self: CanvasFrame, gpu_packet_summary: CanvasGpuPacketSummary, encoder_counts: gpu_policy.EncoderCounts) CanvasFrameBudgetStatus {
+        return self.budget.status(self.diagnosticsFromPlanningSummaries(gpu_packet_summary, encoder_counts));
+    }
+
+    fn diagnosticsFromPlanningSummaries(self: CanvasFrame, gpu_packet_summary: CanvasGpuPacketSummary, encoder_counts: gpu_policy.EncoderCounts) CanvasFrameDiagnostics {
         return .{
             .frame_index = self.frame_index,
             .command_count = self.render_plan.commandCount(),
             .batch_count = self.batch_plan.batchCount(),
-            .encoder_command_count = render_pass.encoderCommandCount(),
-            .encoder_cache_action_count = render_pass.encoderCacheActionCount(),
-            .encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount(),
-            .encoder_draw_batch_count = render_pass.encoderDrawBatchCount(),
+            .encoder_command_count = encoder_counts.commands,
+            .encoder_cache_action_count = encoder_counts.caches,
+            .encoder_bind_pipeline_count = encoder_counts.binds,
+            .encoder_draw_batch_count = encoder_counts.draws,
             .pipeline_count = self.pipeline_cache_plan.entryCount(),
             .pipeline_upload_count = self.pipeline_cache_plan.uploadCount(),
             .pipeline_retain_count = self.pipeline_cache_plan.retainCount(),
@@ -417,6 +446,7 @@ pub const CanvasFrame = struct {
 
     pub fn renderPass(self: CanvasFrame) CanvasRenderPass {
         return .{
+            .gpu_plan_policy = self.gpu_plan_policy,
             .frame_index = self.frame_index,
             .timestamp_ns = self.timestamp_ns,
             .surface_size = self.surface_size,
@@ -453,6 +483,11 @@ pub const CanvasFrame = struct {
 };
 
 pub const CanvasFrameOptions = struct {
+    text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     surface_size: geometry.SizeF = .{},
@@ -512,14 +547,26 @@ pub const CanvasFrameStorage = struct {
 };
 
 pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: CanvasFrameOptions, storage: CanvasFrameStorage) Error!CanvasFrame {
-    var render_plan = try next.renderPlan(storage.render_commands);
-    const render_override_dirty_bounds = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
-    render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
-    const batch_plan = try render_plan.batchPlan(storage.render_batches);
+    var cache_workspace = render_cache.Workspace.forFrame(options.render_cache_policy, storage, options, next.commands.len);
+    defer if (cache_workspace) |*workspace| workspace.deinit();
+    const planning_workspace: ?*render_cache.Workspace = if (cache_workspace) |*workspace| workspace else null;
+    const cache_owner: ?*render_cache.Workspace = if (options.render_cache_policy != null) planning_workspace else null;
+    var render_plan = try next.renderPlanWithWorkspace(storage.render_commands, options.render_plan_policy, planning_workspace);
+    const render_override_dirty_bounds = if (options.render_override_policy) |owner| blk: {
+        const result = @import("render_override_policy.zig").applyAndDamage(storage.render_commands[0..render_plan.commandCount()], options.previous_render_overrides, options.render_overrides, &[_]@import("render_override_policy.zig").DamageEntry{}, owner, planning_workspace.?);
+        render_plan.bounds = result.bounds;
+        break :blk result.dirty;
+    } else blk: {
+        const dirty = renderOverrideDirtyBounds(render_plan.commands, options.previous_render_overrides, options.render_overrides);
+        render_plan.bounds = applyRenderOverrides(storage.render_commands[0..render_plan.commandCount()], options.render_overrides);
+        break :blk dirty;
+    };
+    const batch_plan = try render_plan.batchPlanWithWorkspace(storage.render_batches, options.render_plan_policy, planning_workspace);
     const pipeline_cache_plan = if (storage.pipeline_cache_entries.len == 0 and storage.pipeline_cache_actions.len == 0)
         RenderPipelineCachePlan{}
     else
-        try batch_plan.cachePlan(
+        try batch_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_pipeline_cache,
             options.frame_index,
             storage.pipeline_cache_entries,
@@ -528,11 +575,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const path_geometry_plan = if (storage.path_geometries.len == 0)
         RenderPathGeometryPlan{}
     else
-        try render_plan.pathGeometryPlan(storage.path_geometries);
+        try render_plan.pathGeometryPlanWithPolicy(storage.path_geometries, options.render_cache_policy);
     const path_geometry_cache_plan = if (storage.path_geometry_cache_entries.len == 0 and storage.path_geometry_cache_actions.len == 0)
         RenderPathGeometryCachePlan{}
     else
-        try path_geometry_plan.cachePlan(
+        try path_geometry_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_path_geometry_cache,
             options.frame_index,
             storage.path_geometry_cache_entries,
@@ -541,11 +589,12 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const image_plan = if (storage.images.len == 0)
         RenderImagePlan{}
     else
-        try render_plan.imagePlanWithResources(options.image_resources, storage.images);
+        try render_plan.imagePlanWithResourcesAndPolicy(options.image_resources, storage.images, options.render_cache_policy);
     const image_cache_plan = if (storage.image_cache_entries.len == 0 and storage.image_cache_actions.len == 0)
         RenderImageCachePlan{}
     else
-        try image_plan.cachePlan(
+        try image_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_image_cache,
             options.frame_index,
             storage.image_cache_entries,
@@ -554,18 +603,20 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const layer_plan = if (storage.layers.len == 0)
         RenderLayerPlan{}
     else
-        try render_plan.layerPlan(storage.layers);
+        try render_plan.layerPlanWithPolicy(storage.layers, options.render_cache_policy);
     const layer_cache_plan = if (storage.layer_cache_entries.len == 0 and storage.layer_cache_actions.len == 0)
         RenderLayerCachePlan{}
     else
-        try layer_plan.cachePlan(
+        try layer_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_layer_cache,
             options.frame_index,
             storage.layer_cache_entries,
             storage.layer_cache_actions,
         );
-    const resource_plan = try next.resourcePlan(storage.resources);
-    const resource_cache_plan = try resource_plan.cachePlan(
+    const resource_plan = try next.resourcePlanWithPolicy(storage.resources, options.render_cache_policy);
+    const resource_cache_plan = try resource_plan.cachePlanWithWorkspace(
+        cache_owner,
         options.previous_resource_cache,
         options.frame_index,
         storage.resource_cache_entries,
@@ -574,18 +625,20 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const visual_effect_plan = if (storage.visual_effects.len == 0)
         VisualEffectPlan{}
     else
-        try next.visualEffectPlan(storage.visual_effects);
+        try next.visualEffectPlanWithPolicy(storage.visual_effects, options.render_cache_policy);
     const visual_effect_cache_plan = if (storage.visual_effect_cache_entries.len == 0 and storage.visual_effect_cache_actions.len == 0)
         VisualEffectCachePlan{}
     else
-        try visual_effect_plan.cachePlan(
+        try visual_effect_plan.cachePlanWithWorkspace(
+            cache_owner,
             options.previous_visual_effect_cache,
             options.frame_index,
             storage.visual_effect_cache_entries,
             storage.visual_effect_cache_actions,
         );
-    const glyph_atlas_plan = try next.glyphAtlasPlan(storage.glyph_atlas_entries);
-    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithRetention(
+    const glyph_atlas_plan = try next.glyphAtlasPlanWithPolicy(storage.glyph_atlas_entries, options.text_cache_policy);
+    const glyph_atlas_cache_plan = try glyph_atlas_plan.cachePlanWithPolicy(
+        options.text_cache_policy,
         options.previous_glyph_atlas_cache,
         options.frame_index,
         options.glyph_atlas_cache_retention_frames,
@@ -596,7 +649,8 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     const text_layout_cache_plan = if (storage.text_layout_cache_entries.len == 0 and storage.text_layout_cache_actions.len == 0)
         TextLayoutCachePlan{}
     else
-        try text_layout_plan.cachePlanWithRetention(
+        try text_layout_plan.cachePlanWithPolicy(
+            options.text_cache_policy,
             options.previous_text_layout_cache,
             options.frame_index,
             options.text_layout_cache_retention_frames,
@@ -608,7 +662,21 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     var changes: []const DiffChange = storage.changes[0..0];
     var dirty_bounds: ?geometry.RectF = null;
 
-    if (full_repaint) {
+    if (options.render_damage_policy) |owner| {
+        if (!full_repaint) changes = try DisplayList.diff(previous.?, next, storage.changes);
+        var rects: [max_canvas_frame_dirty_rects]geometry.RectF = undefined;
+        const result = @import("render_damage_policy.zig").finalize(.{
+            .full_repaint = full_repaint,
+            .surface_size = options.surface_size,
+            .scale = options.scale,
+            .render_bounds = render_plan.bounds,
+            .override_bounds = render_override_dirty_bounds,
+            .sample_extent_multiplier = options.backdrop_blur_sample_extent_multiplier,
+        }, changes, render_plan.commands, &rects, owner, planning_workspace.?);
+        full_repaint = result.full_repaint;
+        dirty_bounds = result.bounds;
+        if (full_repaint) changes = storage.changes[0..0];
+    } else if (full_repaint) {
         dirty_bounds = fullRepaintBounds(options.surface_size, render_plan.bounds);
     } else {
         changes = try DisplayList.diff(previous.?, next, storage.changes);
@@ -639,6 +707,7 @@ pub fn buildCanvasFrame(previous: ?DisplayList, next: DisplayList, options: Canv
     }
 
     return .{
+        .gpu_plan_policy = options.render_cache_policy,
         .frame_index = options.frame_index,
         .timestamp_ns = options.timestamp_ns,
         .surface_size = options.surface_size,

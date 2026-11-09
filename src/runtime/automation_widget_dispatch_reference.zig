@@ -1,0 +1,900 @@
+const std = @import("std");
+const geometry = @import("geometry");
+const canvas = @import("canvas");
+const platform = @import("../platform/root.zig");
+const validation = @import("validation.zig");
+const runtime_api = @import("api.zig");
+const automation_commands = @import("automation_commands.zig");
+const runtime_clock = @import("clock.zig");
+const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
+const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
+const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
+const runtime_canvas_widget_context_menu = @import("canvas_widget_context_menu.zig");
+
+const AutomationWidgetAction = automation_commands.AutomationWidgetAction;
+const AutomationWidgetTarget = automation_commands.AutomationWidgetTarget;
+const AutomationProvenanceTarget = automation_commands.AutomationProvenanceTarget;
+const AutomationWidgetWheel = automation_commands.AutomationWidgetWheel;
+const AutomationWidgetKey = automation_commands.AutomationWidgetKey;
+const AutomationWidgetPointerDrag = automation_commands.AutomationWidgetPointerDrag;
+const parseAutomationTextSelection = @import("automation_command_policy.zig").parseAutomationTextSelection;
+const parseAutomationDragDelta = @import("automation_command_policy.zig").parseAutomationDragDelta;
+const parseAutomationDropPaths = @import("automation_command_policy.zig").parseAutomationDropPaths;
+const automationInputTimestampNs = runtime_clock.automationInputTimestampNs;
+const canvasWidgetInteractionTargetExists = canvas_widget_runtime.canvasWidgetInteractionTargetExists;
+const canvasWidgetSelectableTargetExists = canvas_widget_runtime.canvasWidgetSelectableTargetExists;
+
+pub fn RuntimeAutomationWidgetDispatch(comptime Runtime: type) type {
+    return struct {
+        /// The automation `widget_action` command surface delegates to
+        /// the accessibility dispatch rather than switching over the
+        /// verbs itself: one choke point performs the verb AND stages
+        /// the outer-wins `widget_accessibility_action` journal record,
+        /// so a recorded session replays the verb — focus included —
+        /// instead of replaying its untargeted synthesized children
+        /// against whatever focus the session happened to hold.
+        pub fn dispatchAutomationWidgetAction(self: *Runtime, app: runtime_api.App(Runtime), action: AutomationWidgetAction) anyerror!void {
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, action.view_label);
+            _ = try self.dispatchCanvasWidgetAccessibilityAction(app, self.views[view_index].window_id, self.views[view_index].label, .{
+                .id = action.id,
+                .action = canvasWidgetActionKindFromAutomation(action.action),
+                .text = action.value,
+                .selection = if (action.action == .set_selection) try parseAutomationTextSelection(self.automation_command_policy, action.value) else null,
+            });
+        }
+
+        fn canvasWidgetActionKindFromAutomation(kind: automation_commands.AutomationWidgetActionKind) runtime_api.CanvasWidgetAccessibilityActionKind {
+            return switch (kind) {
+                .focus => .focus,
+                .press => .press,
+                .toggle => .toggle,
+                .increment => .increment,
+                .decrement => .decrement,
+                .set_text => .set_text,
+                .set_selection => .set_selection,
+                .set_composition => .set_composition,
+                .commit_composition => .commit_composition,
+                .cancel_composition => .cancel_composition,
+                .select => .select,
+                .drag => .drag,
+                .drop_files => .drop_files,
+                .dismiss => .dismiss,
+            };
+        }
+
+        pub fn dispatchAutomationWidgetClick(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, target);
+            const point = try automationWidgetAimPoint(self, view_index, target.id);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const timestamp_ns = automationInputTimestampNs();
+
+            // One synthetic click is one atomic gesture: the down and up
+            // land in the same automation dispatch with no present in
+            // between, so an outer refresh batch (the per-input batches
+            // nest inside it) coalesces the whole click — press state,
+            // release state, and the Msg-driven rebuild — into a single
+            // display-list emission with the same final content.
+            CanvasWidgetDisplayMethods().beginCanvasWidgetDisplayListRefreshBatch(self);
+            var click_batch_active = true;
+            errdefer if (click_batch_active) {
+                // Flush, not drop: half a click may already have changed
+                // widget state that must reach the retained display list.
+                CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self) catch {
+                    CanvasWidgetDisplayMethods().cancelCanvasWidgetDisplayListRefreshBatch(self);
+                };
+            };
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_down,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 0,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_up,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 0,
+            } });
+            try CanvasWidgetDisplayMethods().endCanvasWidgetDisplayListRefreshBatch(self);
+            click_batch_active = false;
+        }
+
+        /// Drive a press-and-hold gesture through the real pointer+timer
+        /// path: pointer-down at the control's aim point (the routed
+        /// pointer event arms the app's hold timer exactly as a live
+        /// press does), the reserved hold timer fired as the platform
+        /// would fire it at ~350 ms, then the release — which the fired
+        /// hold suppresses, one gesture one Msg. Automation is
+        /// time-warped, never path-warped: every step is the event a
+        /// live run dispatches. On a target without a hold handler
+        /// nothing arms, the fire no-ops, and the release presses — the
+        /// same click a real user's long-press-and-release produces.
+        pub fn dispatchAutomationWidgetHold(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, target);
+            const point = try automationWidgetAimPoint(self, view_index, target.id);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const timestamp_ns = automationInputTimestampNs();
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_down,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 0,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .timer = .{
+                .id = platform.press_hold_timer_id,
+                .timestamp_ns = timestamp_ns,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_up,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 0,
+            } });
+            // A fired hold's release deliberately does not cancel the
+            // platform timer the down armed (the app never cancels a
+            // timer that already fired); the wall-clock fire would be a
+            // harmless no-op, but cancel it so a live run leaves no
+            // pending one-shot behind.
+            self.cancelTimer(platform.press_hold_timer_id) catch {};
+        }
+
+        /// Drive a secondary click (right/ctrl-click) as the full
+        /// button-1 stream a real one produces: the runtime resolves a
+        /// context menu on the down (app-declared items, editable-text
+        /// and selected-text defaults) and otherwise dispatches the
+        /// context-press event — the desktop press-and-hold alternative
+        /// whose press target's `on_hold` Msg dispatches immediately.
+        pub fn dispatchAutomationWidgetContextPress(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationWidgetTarget) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, target);
+            const point = try automationWidgetAimPoint(self, view_index, target.id);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const timestamp_ns = automationInputTimestampNs();
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_down,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 1,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_up,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .button = 1,
+            } });
+        }
+
+        /// Invoke one of the target widget's DECLARED context-menu items
+        /// (`widget-context-menu <view> <id> <item-index>`). The OS
+        /// menu's tracking loop cannot be driven programmatically, so
+        /// the verb skips presentation and dispatches the SELECTION on
+        /// the same path a real pick takes: it arms the pending request
+        /// exactly as presenting would, then delivers a
+        /// `context_menu_action` platform event. The journal owns the
+        /// complete invocation so replay also reconstructs its pending
+        /// request before resolving through `dispatchContextMenuAction`
+        /// into the widget's `.context_menu` handler. Named errors say
+        /// why an invocation cannot happen: no declared menu, an index
+        /// past the declared items, a separator slot, a disabled item —
+        /// the same items the snapshot lists per widget — or a dismissal
+        /// handler that presented a superseding menu, or closed the
+        /// target's view, mid-verb.
+        pub fn dispatchAutomationWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: automation_commands.AutomationWidgetContextMenuItem) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, item.target);
+            const invocation: platform.WidgetContextMenuActionEvent = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .id = item.target.id,
+                .item_index = std.math.cast(u32, item.item_index) orelse return error.ContextMenuItemOutOfRange,
+            };
+            // Driver misuse must fail before staging a journal event.
+            // The platform handler also validates replayed invocations.
+            _ = try widgetContextMenuTargetViewIndex(self, invocation);
+            try self.dispatchPlatformEvent(app, .{ .widget_context_menu_action = invocation });
+        }
+
+        fn widgetContextMenuTargetViewIndex(self: *Runtime, item: platform.WidgetContextMenuActionEvent) anyerror!usize {
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, item.label);
+            const window_index = runtimeFindWindowIndexById(self, item.window_id) orelse return error.WindowNotFound;
+            if (!self.windows[window_index].info.open) return error.WindowNotFound;
+            const view_index = find: {
+                for (self.views[0..self.view_count], 0..) |*view, index| {
+                    if (view.open and view.kind == .gpu_surface and view.window_id == item.window_id and std.mem.eql(u8, view.label, item.label)) break :find index;
+                }
+                return error.ViewNotFound;
+            };
+            const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.id) orelse return error.InvalidCommand;
+            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+            if (widget.context_menu.len == 0) return error.ContextMenuUndeclared;
+            if (item.item_index >= widget.context_menu.len) return error.ContextMenuItemOutOfRange;
+            const declared = widget.context_menu[item.item_index];
+            if (declared.separator) return error.ContextMenuItemSeparator;
+            if (!declared.enabled) return error.ContextMenuItemDisabled;
+            return view_index;
+        }
+
+        pub fn dispatchWidgetContextMenuItem(self: *Runtime, app: runtime_api.App(Runtime), item: platform.WidgetContextMenuActionEvent) anyerror!void {
+            const view_index = try widgetContextMenuTargetViewIndex(self, item);
+            const node_index = self.views[view_index].canvasWidgetNodeIndexById(item.id) orelse return error.InvalidCommand;
+            const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
+
+            // This direct dispatch supersedes any pending presentation:
+            // the replacement request commits first (bookkeeping must
+            // match the state the events describe), then the superseded
+            // app menu's snapshot/pin release through the fallible
+            // dismissed notice.
+            const superseded = self.canvas_widget_context_menu_pending;
+            const token = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).nextContextMenuToken(self);
+            var pending: runtime_canvas_widget_context_menu.PendingCanvasWidgetContextMenu = .{
+                .window_id = self.views[view_index].window_id,
+                .token = token,
+                .target_id = widget.id,
+                .kind = .app,
+            };
+            pending.setViewLabel(self.views[view_index].label);
+            self.canvas_widget_context_menu_pending = pending;
+            // The notice keeps its place in the event order (the old
+            // menu's dismissal before the successor's outcome, like
+            // every superseding path), but its error must not skip the
+            // synthetic selection below: unlike a presented menu, whose
+            // outcome the platform delivers later regardless, this
+            // dispatch is the armed request's ONLY outcome. No error
+            // path may leave a pending token with no presented menu and
+            // no delivered outcome — so capture the notice's error,
+            // dispatch the selection, and re-raise after (the dispatch
+            // ring already recorded it, matching `.propagate` semantics
+            // elsewhere: bookkeeping settles first, the error still
+            // surfaces).
+            const notice = runtime_canvas_widget_context_menu.RuntimeCanvasWidgetContextMenu(Runtime).notifySupersededPending(self, app, superseded);
+            // The notice ran arbitrary app code that may itself have
+            // PRESENTED a menu, superseding this verb's freshly armed
+            // request: the synthetic action below would fail the token
+            // gate and the command would report success without ever
+            // dispatching its item. Refuse by name instead — the
+            // handler's successor menu is on the glass with its own
+            // pending request, so nothing is orphaned.
+            const still_armed = if (self.canvas_widget_context_menu_pending) |current| current.token == token else false;
+            if (!still_armed) {
+                try notice;
+                return error.ContextMenuSuperseded;
+            }
+            // The notice may instead have CLOSED the verb's target view:
+            // the armed request can never resolve (the action dispatch
+            // would clear the token, fail its view lookup, and silently
+            // drop the selection). Disarm it and refuse by name — never
+            // a silent success, never an orphaned token.
+            const view_open = view_check: {
+                for (self.views[0..self.view_count]) |*view| {
+                    if (view.open and view.window_id == pending.window_id and std.mem.eql(u8, view.label, pending.viewLabel())) break :view_check true;
+                }
+                break :view_check false;
+            };
+            if (!view_open) {
+                self.canvas_widget_context_menu_pending = null;
+                try notice;
+                return error.ContextMenuViewClosed;
+            }
+            // The synthetic event names its view from the request's own
+            // bounded copy, never `self.views[view_index]` re-read here:
+            // the notice above ran arbitrary app code that may have
+            // closed views and compacted their indices — a stale index
+            // would dispatch this target against another view, or strand
+            // the pending token behind the action gate's window check.
+            try self.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+                .window_id = pending.window_id,
+                .view_label = pending.viewLabel(),
+                .token = token,
+                .item_id = @intCast(item.item_index + 1),
+            } });
+            try notice;
+        }
+
+        /// Where a pointer verb lands on a widget: the control's aim
+        /// point, not the geometric center — a stretched selection
+        /// control (switch as a bare column child) draws its glyph at
+        /// the left edge of a wide frame, and the frame's center can sit
+        /// under an overlapping later-painted sibling. A real user
+        /// clicks the knob.
+        fn automationWidgetAimPoint(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!geometry.PointF {
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (!canvasWidgetInteractionTargetExists(layout, id)) return error.InvalidCommand;
+            const node = layout.findById(id) orelse return error.InvalidCommand;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.InvalidCommand;
+            var aim_widget = node.widget;
+            aim_widget.frame = node.frame;
+            return canvas.widgetControlAimPoint(aim_widget, self.views[view_index].widget_tokens);
+        }
+
+        pub fn dispatchAutomationWidgetWheel(self: *Runtime, app: runtime_api.App(Runtime), wheel: AutomationWidgetWheel) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, wheel.target);
+            const layout = self.views[view_index].widgetLayoutTree();
+            // Named reasons, not a blanket InvalidCommand: the snapshot's
+            // degraded error line carries the error NAME (plus the command
+            // arguments as detail), so a failed wheel says WHY. The common
+            // trap is aiming at a plain layout node — wheel the scrollable
+            // widget (scroll/list/grid id from the snapshot) instead.
+            const node = layout.findById(wheel.target.id) orelse return error.WheelTargetUnknown;
+            if (!canvasWidgetInteractionTargetExists(layout, wheel.target.id)) return error.WheelTargetNotInteractive;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.WheelTargetHasEmptyBounds;
+            const point = bounds.center();
+            const timestamp_ns = automationInputTimestampNs();
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .scroll,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .delta_x = wheel.delta_x,
+                .delta_y = wheel.delta_y,
+            } });
+        }
+
+        pub fn dispatchAutomationWidgetKeyInput(self: *Runtime, app: runtime_api.App(Runtime), key: AutomationWidgetKey) anyerror!void {
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, key.view_label);
+            try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .key_down,
+                .timestamp_ns = automationInputTimestampNs(),
+                .key = key.key,
+                .text = key.text,
+                .modifiers = .{
+                    .shift = key.modifiers.shift,
+                    .control = key.modifiers.control,
+                    .option = key.modifiers.option,
+                    .command = key.modifiers.command,
+                    .primary = key.modifiers.primary,
+                },
+            } });
+        }
+
+        /// Drive a trackpad pinch through the real platform-event path:
+        /// `pinch_begin`, one `pinch_change` carrying `scale - 1` (so
+        /// the cumulative product of `1 + delta` lands exactly on the
+        /// commanded scale — the gesture's FINAL multiplicative zoom),
+        /// and `pinch_end`, all at the same anchor point. A scale so
+        /// small its f32 delta rounds to -1 (factor 0 on the wire) is
+        /// refused as `PinchScaleBelowWireMinimum` — see the guard
+        /// below for the named minimum.
+        /// Plain input synthesis, the `widget-key` discipline: every
+        /// event journals as itself and replays through the same
+        /// dispatch — no accessibility-action record, because pinch is
+        /// not a widget verb (it never routes into the widget tree; the
+        /// app hears it through the pinch channel).
+        pub fn dispatchAutomationWidgetPinch(self: *Runtime, app: runtime_api.App(Runtime), pinch: automation_commands.AutomationWidgetPinch) anyerror!void {
+            const view_index = try automationGpuSurfaceViewIndexByLabel(self, pinch.view_label);
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const point = pinch.point orelse geometry.PointF.init(
+                self.views[view_index].gpu_size.width / 2,
+                self.views[view_index].gpu_size.height / 2,
+            );
+            // The wire delta is `scale - 1` in f32, and f32 rounding can
+            // betray the parser's `scale > 0` guard: any scale at or
+            // below 2^-25 rounds the difference to exactly -1
+            // (ties-to-even at the halfway point), which would put the
+            // factor `1 + delta = 0` on the wire — a zoom through zero
+            // scale, which no gesture can perform and no downstream
+            // product can recover from. The invariant is the WIRE's
+            // (every emitted factor stays > 0), so validate the computed
+            // delta, not the input; the minimum accepted scale is the
+            // smallest f32 above 2^-25 (~2.9802326e-8), whose delta
+            // rounds to -1 + 2^-24 — the smallest positive factor the
+            // wire can carry. Refused before anything dispatches, so no
+            // partial gesture reaches the journal.
+            const delta = pinch.scale - 1;
+            if (1 + delta <= 0) return error.PinchScaleBelowWireMinimum;
+            const timestamp_ns = automationInputTimestampNs();
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pinch_begin,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pinch_change,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+                .scale = delta,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pinch_end,
+                .timestamp_ns = timestamp_ns,
+                .x = point.x,
+                .y = point.y,
+            } });
+        }
+
+        pub fn dispatchAutomationWidgetPointerDrag(self: *Runtime, app: runtime_api.App(Runtime), drag: AutomationWidgetPointerDrag) anyerror!void {
+            const view_index = try automationWidgetTargetViewIndex(self, drag.target);
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (!canvasWidgetInteractionTargetExists(layout, drag.target.id)) return error.InvalidCommand;
+            const node = layout.findById(drag.target.id) orelse return error.InvalidCommand;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.InvalidCommand;
+            const start = geometry.PointF.init(
+                bounds.x + bounds.width * drag.start_x_ratio,
+                bounds.y + bounds.height * drag.start_y_ratio,
+            );
+            const end = geometry.PointF.init(
+                bounds.x + bounds.width * drag.end_x_ratio,
+                bounds.y + bounds.height * drag.end_y_ratio,
+            );
+            const timestamp_ns = automationInputTimestampNs();
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .pointer_down,
+                .timestamp_ns = timestamp_ns,
+                .x = start.x,
+                .y = start.y,
+                .button = 0,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .pointer_drag,
+                .timestamp_ns = timestamp_ns,
+                .x = end.x,
+                .y = end.y,
+                .delta_x = end.x - start.x,
+                .delta_y = end.y - start.y,
+                .button = 0,
+            } });
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .pointer_up,
+                .timestamp_ns = timestamp_ns,
+                .x = end.x,
+                .y = end.y,
+                .button = 0,
+            } });
+        }
+
+        pub fn canvasWidgetActionsForId(self: *const Runtime, view_index: usize, id: canvas.ObjectId) ?canvas.WidgetActions {
+            if (view_index >= self.view_count or id == 0) return null;
+            for (self.views[view_index].widgetSemantics()) |node| {
+                if (node.id == id) return node.actions;
+            }
+            return null;
+        }
+
+        pub fn dismissAutomationCanvasWidget(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId) anyerror!void {
+            if (view_index >= self.view_count) return error.ViewNotFound;
+            self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
+            const dismissal = try self.views[view_index].dismissCanvasWidgetSurfaceForTarget(id) orelse return error.InvalidCommand;
+            try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dismissal.dirty);
+            try CanvasWidgetEventMethods().dispatchCanvasWidgetDismissEvent(self, app, view_index, dismissal.id);
+        }
+
+        pub fn focusAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
+            if (view_index >= self.view_count) return error.ViewNotFound;
+            // Programmatic focus names logical targets before applying the
+            // pointer path's geometry clip. The shared keyboard/autofocus
+            // reveal seam scrolls every runtime-owned ancestor. Preflight
+            // the reveal before platform focus, then focus the view before
+            // committing any retained scroll mutation: a rejected platform
+            // focus leaves the canvas byte-for-byte where it was.
+            if (!CanvasWidgetEventMethods().canRevealCanvasWidgetFocusTarget(self, view_index, id)) return error.InvalidCommand;
+            try self.focusView(self.views[view_index].window_id, self.views[view_index].label);
+            const reveal = try CanvasWidgetEventMethods().revealCanvasWidgetFocusTarget(self, view_index, id) orelse return error.InvalidCommand;
+            const target = reveal.target;
+            // Programmatic focus (autofocus, automation `focus`) follows
+            // the pointer contract, not the keyboard one: buttons and
+            // rows take focus QUIETLY (no ring), editable text kinds show
+            // their affordances however focus arrived. A later Tab still
+            // moves focus with the visible ring. Without this gate, a
+            // window-level default focus landing on a button dressed an
+            // idle control in the focus ring.
+            const focus_visible_id: canvas.ObjectId = if (canvas_widget_runtime.canvasWidgetShowsPointerFocusRing(target.kind)) target.id else 0;
+            const previous_state = self.views[view_index].canvasWidgetRenderState();
+            const focus_changed = self.views[view_index].canvas_widget_focused_id != target.id or self.views[view_index].canvas_widget_focus_visible_id != focus_visible_id;
+            if (focus_changed) {
+                self.views[view_index].canvas_widget_focused_id = target.id;
+                self.views[view_index].canvas_widget_focus_visible_id = focus_visible_id;
+                // Pointer-contract provenance: a programmatic ring
+                // (editables only) never carries the keyboard's
+                // standing reveal intent into a layout adoption.
+                self.views[view_index].canvas_widget_focus_visible_keyboard = false;
+                // The pointer contract extends to tooltips: this move
+                // hides a focus-owned tooltip and reveals nothing (see
+                // updateCanvasTooltipIntentForProgrammaticFocusMove).
+                // Inside the changed-guard on purpose — re-focusing the
+                // widget whose focus-shown tooltip is up with the ring
+                // intact is not a move, and leaves it alone.
+                try CanvasWidgetEventMethods().updateCanvasTooltipIntentForProgrammaticFocusMove(self, view_index);
+            }
+
+            // The established programmatic-selection contract is a collapsed
+            // caret at text.len when no source/retained selection exists.
+            // Preserve an existing selection, then reveal its focus endpoint
+            // inside the editor after the outer ancestor reveal has made the
+            // editability/visibility gate truthful.
+            const caret_initialized = try self.views[view_index].ensureCanvasWidgetFocusedTextCaret();
+            var inner_scroll_changed = false;
+            if (self.views[view_index].canEditCanvasWidgetText(target.id)) {
+                if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
+                    const before = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    self.views[view_index].scrollCanvasTextInputCaretIntoView(node_index);
+                    const after = self.views[view_index].widget_layout_nodes[node_index].widget;
+                    inner_scroll_changed = before.value != after.value or before.value_x != after.value_x;
+                }
+            }
+            if (inner_scroll_changed) {
+                try self.views[view_index].refreshCanvasWidgetSemantics();
+                if (!caret_initialized) self.views[view_index].widget_revision += 1;
+            }
+
+            if (focus_changed or caret_initialized or inner_scroll_changed or reveal.scroll_dirty != null) {
+                // A focus/reveal change repaints; record the automation input
+                // so the completing frame publishes (same contract as select
+                // and text edits). Callers that dispatch a follow-up input
+                // event simply overwrite this with their own timestamp.
+                self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
+            }
+            if (focus_changed) {
+                try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+            } else if (caret_initialized or inner_scroll_changed) {
+                if (self.views[view_index].canvasWidgetNodeIndexById(target.id)) |node_index| {
+                    if (self.views[view_index].canvasWidgetDirtyBounds(node_index, self.views[view_index].widget_layout_nodes[node_index].frame)) |dirty| {
+                        try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
+                    }
+                }
+            }
+            if (reveal.scroll_dirty != null) {
+                _ = try CanvasWidgetDisplayMethods().refreshCanvasWidgetDisplayListIfOwned(self, view_index);
+            }
+        }
+
+        pub fn dispatchAutomationWidgetKey(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, key: []const u8) anyerror!void {
+            try focusAutomationCanvasWidget(self, view_index, id);
+            // An automation KEY action emulates the KEYBOARD contract on
+            // its target. Plain list rows are transparent to keys under
+            // QUIET focus (the quiet-list-row rule in the keyboard
+            // routing), so the synthesized activation must reach the row
+            // the way a Tab-then-key would: escalate exactly this target
+            // kind to the ring register before dispatching. Every other
+            // kind keeps the quiet programmatic focus it always had.
+            // The escalation deliberately skips the tooltip machine —
+            // it is still programmatic focus (no reveal), and the focus
+            // MOVE above already hid any focus-owned tooltip.
+            if (self.canvasWidgetKeyboardFocusParticipation(view_index, id, 1)) {
+                const previous_state = self.views[view_index].canvasWidgetRenderState();
+                self.views[view_index].canvas_widget_focus_visible_id = id;
+                // Still programmatic (no reveal — see the comment
+                // above), so no keyboard provenance either.
+                self.views[view_index].canvas_widget_focus_visible_keyboard = false;
+                try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+            }
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = .key_down,
+                .timestamp_ns = automationInputTimestampNs(),
+                .key = key,
+            } });
+        }
+
+        pub fn selectAutomationCanvasWidget(self: *Runtime, view_index: usize, id: canvas.ObjectId) anyerror!void {
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (!canvasWidgetSelectableTargetExists(layout, id)) return error.InvalidCommand;
+            if (layout.focusTargetById(id) != null) {
+                try focusAutomationCanvasWidget(self, view_index, id);
+            }
+            const dirty = try self.views[view_index].setCanvasWidgetSelected(id, true) orelse return;
+            // Record the automation input so the frame this repaint
+            // presents resolves it into an input latency and republishes
+            // observable state (dispatchGpuSurfaceFrame invalidates on a
+            // recorded latency; steady-state completions stay quiet).
+            // Without this, the snapshot's gpu_frame only advanced when a
+            // PREVIOUS interaction happened to leave a dangling pending
+            // input for this frame to resolve — a timing accident that a
+            // loaded CI runner loses ("menu item automation select did
+            // not request a GPU frame").
+            self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
+            try CanvasWidgetEventMethods().invalidateForCanvasWidgetDirty(self, view_index, dirty);
+        }
+
+        /// Replace an editable widget's text through the SAME input-event
+        /// path real typing uses: focus, a select-all key, then the
+        /// replacement text as a text-input event. Each step routes
+        /// through `dispatchGpuSurfaceInput`, so the app receives the
+        /// matching `.canvas_widget_keyboard` events and an elm-style
+        /// model's `on_input` mirror stays consistent with the runtime
+        /// editor — writing the editor state directly produced on-screen
+        /// state no real user could reach.
+        pub fn setAutomationCanvasWidgetText(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, text: []const u8) anyerror!void {
+            try focusAutomationCanvasWidget(self, view_index, id);
+            if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const timestamp_ns = automationInputTimestampNs();
+
+            // Select all (the platform primary shortcut), exactly like a
+            // user pressing cmd/ctrl+a in the focused field.
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .key_down,
+                .timestamp_ns = timestamp_ns,
+                .key = "a",
+                .modifiers = .{ .primary = true },
+            } });
+            if (text.len == 0) {
+                // Empty replacement: delete the selection.
+                try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                    .window_id = window_id,
+                    .label = label,
+                    .kind = .key_down,
+                    .timestamp_ns = timestamp_ns,
+                    .key = "backspace",
+                } });
+                return;
+            }
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .text_input,
+                .timestamp_ns = timestamp_ns,
+                .text = text,
+            } });
+        }
+
+        /// Composition edits ride the SAME ime input events a real IME
+        /// session produces (`setAutomationCanvasWidgetText`'s
+        /// philosophy): the dispatch applies the edit to the retained
+        /// editor, stamps it onto the routed keyboard event so the app's
+        /// `on_input` mirror hears it, and journals the input so a
+        /// recorded session replays the composition byte-identically.
+        /// Writing the editor directly (the previous shape) kept the
+        /// model out of the loop — the same divergence the keyboard
+        /// choke point closes for Escape's clear.
+        pub fn composeAutomationCanvasWidgetText(
+            self: *Runtime,
+            app: runtime_api.App(Runtime),
+            view_index: usize,
+            id: canvas.ObjectId,
+            kind: platform.GpuSurfaceInputKind,
+            text: []const u8,
+        ) anyerror!void {
+            try focusAutomationCanvasWidget(self, view_index, id);
+            if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = self.views[view_index].window_id,
+                .label = self.views[view_index].label,
+                .kind = kind,
+                .timestamp_ns = automationInputTimestampNs(),
+                .text = text,
+            } });
+        }
+
+        /// Selection edits have no platform input kind to ride, so the
+        /// verb synthesizes the routed keyboard event the clipboard and
+        /// context-menu edits use: the keyboard choke point applies the
+        /// stamped edit to the retained editor and the app dispatch
+        /// keeps the model's selection mirror honest. (The journal sees
+        /// this verb as the outer `widget_accessibility_action` record
+        /// its dispatch stages; replaying that record re-runs the verb.)
+        pub fn editAutomationCanvasWidgetText(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!void {
+            try focusAutomationCanvasWidget(self, view_index, id);
+            if (!self.views[view_index].canEditCanvasWidgetText(id)) return error.InvalidCommand;
+            const target = self.views[view_index].widgetLayoutTree().focusTargetById(id) orelse return error.InvalidCommand;
+            var keyboard_event: runtime_api.CanvasWidgetKeyboardEvent = .{
+                .window_id = self.views[view_index].window_id,
+                .view_label = self.views[view_index].label,
+                .keyboard = .{ .phase = .key_down, .focused_id = id, .edit = edit },
+                .target = target,
+                // No gpu-surface input cycle wraps this selection edit:
+                // the ui-app hover drain runs at its own tail.
+                .standalone = true,
+            };
+            // Same observability contract as selectAutomationCanvasWidget:
+            // the repaint this edit triggers must publish its completing
+            // frame, so record the automation input it resolves.
+            self.views[view_index].recordGpuSurfaceInputTimestamp(automationInputTimestampNs());
+            try CanvasWidgetEventMethods().updateCanvasWidgetTextFromKeyboard(self, &keyboard_event);
+            try self.dispatchEvent(app, .{ .canvas_widget_keyboard = keyboard_event });
+        }
+
+        pub fn dispatchAutomationCanvasWidgetDrag(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
+            if (view_index >= self.view_count) return error.ViewNotFound;
+            const delta = try parseAutomationDragDelta(self.automation_command_policy, value);
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (!canvasWidgetInteractionTargetExists(layout, id)) return error.InvalidCommand;
+            const node = layout.findById(id) orelse return error.InvalidCommand;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.InvalidCommand;
+
+            const window_id = self.views[view_index].window_id;
+            const label = self.views[view_index].label;
+            const origin = bounds.center();
+            const previous_pressed_id = self.views[view_index].canvas_widget_pressed_id;
+            const previous_state = self.views[view_index].canvasWidgetRenderState();
+            self.views[view_index].canvas_widget_pressed_id = id;
+            // Accessibility owns the outer action record and therefore seeds
+            // the press directly instead of journaling a synthetic down. Give
+            // the shared physical drag path the same origin a down would have
+            // recorded; platform pointer-drag deltas are not cumulative (and
+            // are zero on several hosts), so reconstruction from the event's
+            // delta cannot recover this point.
+            self.views[view_index].canvas_widget_drag_start_point = origin;
+            self.views[view_index].canvas_widget_drag_pointer_id = 0;
+            if (previous_pressed_id != id) try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
+            errdefer {
+                if (view_index < self.view_count and self.views[view_index].canvas_widget_pressed_id == id) {
+                    self.views[view_index].canvas_widget_pressed_id = previous_pressed_id;
+                }
+            }
+
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_drag,
+                .x = origin.x + delta.dx,
+                .y = origin.y + delta.dy,
+                .delta_x = delta.dx,
+                .delta_y = delta.dy,
+            } });
+
+            // Complete the gesture through the same release path as a
+            // physical pointer so markup `on-drag` handlers receive their
+            // release position instead of automation stopping mid-drag.
+            try self.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = window_id,
+                .label = label,
+                .kind = .pointer_up,
+                .x = origin.x + delta.dx,
+                .y = origin.y + delta.dy,
+            } });
+
+            if (runtimeFindViewIndex(self, window_id, label)) |current_index| {
+                if (self.views[current_index].canvas_widget_pressed_id == id) {
+                    const release_previous_state = self.views[current_index].canvasWidgetRenderState();
+                    self.views[current_index].canvas_widget_pressed_id = 0;
+                    try CanvasWidgetEventMethods().invalidateForCanvasWidgetRenderStateChange(self, current_index, release_previous_state, self.views[current_index].canvasWidgetRenderState());
+                }
+            }
+        }
+
+        pub fn dispatchAutomationCanvasWidgetFileDrop(self: *Runtime, app: runtime_api.App(Runtime), view_index: usize, id: canvas.ObjectId, value: []const u8) anyerror!void {
+            if (view_index >= self.view_count) return error.ViewNotFound;
+            const layout = self.views[view_index].widgetLayoutTree();
+            if (!canvasWidgetInteractionTargetExists(layout, id)) return error.InvalidCommand;
+            var paths_buffer: [platform.max_drop_paths][]const u8 = undefined;
+            const paths = try parseAutomationDropPaths(self.automation_command_policy, value, paths_buffer[0..]);
+            const node = layout.findById(id) orelse return error.InvalidCommand;
+            const bounds = node.frame.normalized();
+            if (bounds.isEmpty()) return error.InvalidCommand;
+
+            try self.dispatchPlatformEvent(app, .{ .files_dropped = .{
+                .window_id = self.views[view_index].window_id,
+                .view_label = self.views[view_index].label,
+                .point = bounds.center(),
+                .paths = paths,
+            } });
+        }
+
+        fn automationWidgetTargetViewIndex(self: *Runtime, target: AutomationWidgetTarget) anyerror!usize {
+            return automationGpuSurfaceViewIndexByLabel(self, target.view_label);
+        }
+
+        /// The `provenance` verb: resolve the view (and, for point
+        /// queries, hit-test the widget id), then ask the app that
+        /// authored the view to answer from its retained provenance
+        /// table. Every path writes `provenance.txt` — the CLI polls the
+        /// artifact, so silence would be a hang, and errors teach.
+        pub fn dispatchAutomationProvenance(self: *Runtime, app: runtime_api.App(Runtime), target: AutomationProvenanceTarget) anyerror!void {
+            const server = self.options.automation orelse return;
+            self.command_count += 1;
+            const view_index = automationGpuSurfaceViewIndexByLabel(self, target.view_label) catch {
+                try publishAutomationProvenanceError(server, target.view_label, target.id, "no open gpu_surface view with this label - `native automate list` names the open views");
+                return error.ViewNotFound;
+            };
+            const layout = self.views[view_index].widgetLayoutTree();
+            var id = target.id;
+            if (target.point) |point| {
+                const hit = layout.hitTest(point) orelse {
+                    try publishAutomationProvenanceError(server, target.view_label, 0, "no widget at the given point (view-local points; the snapshot's bounds= fields name each widget's rectangle)");
+                    return error.InvalidCommand;
+                };
+                id = hit.id;
+            } else if (layout.findById(id) == null) {
+                try publishAutomationProvenanceError(server, target.view_label, id, "no widget with this id in the view - ids go stale across rebuilds, re-read the snapshot");
+                return error.InvalidCommand;
+            }
+            self.automation_provenance_published = false;
+            try app.event(self, .{ .automation_provenance = .{
+                .window_id = self.views[view_index].window_id,
+                .view_label = self.views[view_index].label,
+                .widget_id = id,
+            } });
+            if (!self.automation_provenance_published) {
+                try publishAutomationProvenanceError(server, target.view_label, id, "the app exposes no widget provenance - it needs the markup interpreter (UiAppFeatures.runtime_markup) running under automation; compiled-only (release) views report none");
+            }
+        }
+
+        /// Resolve a widget verb's gpu_surface view by label across ALL
+        /// open windows — snapshots enumerate every window's views, so
+        /// the verbs must reach them too (a model-declared settings
+        /// window's canvas is as drivable as the main one). Labels are
+        /// the verb's whole address; `UiApp` keeps canvas labels unique
+        /// per window, and for hand-rolled duplicates the first open
+        /// match in window order wins, deterministically.
+        pub fn automationGpuSurfaceViewIndexByLabel(self: *Runtime, view_label: []const u8) anyerror!usize {
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, view_label);
+            for (self.views[0..self.view_count], 0..) |*view, index| {
+                if (!view.open or view.kind != .gpu_surface) continue;
+                if (!std.mem.eql(u8, view.label, view_label)) continue;
+                const window_index = runtimeFindWindowIndexById(self, view.window_id) orelse continue;
+                if (!self.windows[window_index].info.open) continue;
+                return index;
+            }
+            return error.ViewNotFound;
+        }
+
+        fn CanvasWidgetDisplayMethods() type {
+            return runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime);
+        }
+
+        fn CanvasWidgetEventMethods() type {
+            return runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+        }
+    };
+}
+
+fn publishAutomationProvenanceError(server: anytype, view_label: []const u8, id: u64, message: []const u8) !void {
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writer.print("provenance error view={s} id={d} message=\"{s}\"\n", .{ view_label, id, message });
+    try server.publishProvenanceResponse(writer.buffered());
+}
+
+fn runtimeFindWindowIndexById(self: anytype, id: platform.WindowId) ?usize {
+    for (self.windows[0..self.window_count], 0..) |window, index| {
+        if (window.info.id == id) return index;
+    }
+    return null;
+}
+
+fn runtimeFindViewIndex(self: anytype, window_id: platform.WindowId, label: []const u8) ?usize {
+    for (self.views[0..self.view_count], 0..) |*view, index| {
+        if (view.open and view.window_id == window_id and std.mem.eql(u8, view.label, label)) return index;
+    }
+    return null;
+}

@@ -19,7 +19,6 @@ import { checkFile, formatDiagnostic, type FrontendOptions } from "./frontend.ts
 import type { ServicePackage } from "./service_contract.ts";
 import fs from "node:fs";
 import path from "node:path";
-import ts from "@typescript/old";
 
 function main(argv: string[]): number {
   const args = argv.slice(2);
@@ -199,16 +198,8 @@ function main(argv: string[]): number {
     const sourcePrefix = path.relative(path.resolve(editorDir), path.dirname(path.resolve(entry))).split(path.sep).join("/");
     const editorSource = result.servicesClient.replaceAll('from "./', `from "${sourcePrefix}/`);
     fs.writeFileSync(servicesEditorClientOut, editorSource);
-    const declaration = ts.transpileDeclaration(editorSource, {
-      fileName: "index.ts",
-      compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
-      reportDiagnostics: true,
-    });
-    if (declaration.diagnostics?.some((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)) {
-      console.error("internal: the generated editor service client could not emit declarations");
-      return 1;
-    }
-    fs.writeFileSync(`${editorDir}/index.d.ts`, declaration.outputText);
+    const declarations = result.servicesClientDeclarations!.replaceAll('from "./', `from "${sourcePrefix}/`);
+    fs.writeFileSync(`${editorDir}/index.d.ts`, declarations);
     fs.writeFileSync(`${editorDir}/package.json`, `${JSON.stringify({
       name: "@native-sdk/services",
       private: true,

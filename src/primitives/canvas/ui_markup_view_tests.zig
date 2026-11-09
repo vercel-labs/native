@@ -216,6 +216,24 @@ test "markup view builds the same tree as the hand-written view" {
     );
 }
 
+test "digit-only text attributes stay text while numeric attributes stay numeric" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var view = try InboxMarkup.init(
+        arena,
+        "<column padding=\"8\">\n  <text-field placeholder=\"123\" label=\"456\" />\n</column>",
+    );
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &Model{}));
+    const field = findByKind(tree.root, .text_field).?;
+
+    try testing.expectEqualStrings("123", field.placeholder);
+    try testing.expectEqualStrings("456", field.semantics.label);
+    try testing.expectEqual(@as(f32, 8), tree.root.layout.padding.top);
+}
+
 test "markup keyed rows keep ids across model changes and filters dispatch" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -419,6 +437,85 @@ test "style token references resolve against tokens at finalize time" {
 
     // Ids are independent of token resolution.
     try testing.expectEqual(light_badge.id, dark_badge.id);
+}
+
+test "markup radius none resolves to square button corners" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<button radius=\"none\" on-press=\"add\">Square</button>");
+    var ui = InboxUi.init(arena);
+    const custom_tokens = canvas.DesignTokens{ .radius = .{ .none = 8 } };
+    const tree = try ui.finalizeWithTokens(try view.build(&ui, &model), custom_tokens);
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    var button = tree.root;
+    button.frame = geometry.RectF.init(0, 0, 120, 36);
+    button.state.focused = true;
+    var commands: [4]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, button, .{});
+    switch (builder.displayList().commands[0]) {
+        .fill_rounded_rect => |fill| try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (builder.displayList().commands[2]) {
+        .stroke_rect => |ring| try testing.expectEqualDeep(canvas.Radius.all(2), ring.radius),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "markup radius none keeps a surface content clip square" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const model = Model{};
+
+    var view = try InboxMarkup.init(arena, "<panel radius=\"none\"><row background=\"accent\" /></panel>");
+    var ui = InboxUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    try testing.expectEqual(@as(f32, 0), tree.root.style.radius.?);
+
+    // Give the child the entire panel frame: this is the full-bleed case
+    // where the content clip, rather than layout padding, owns the corners.
+    var panel = tree.root;
+    panel.frame = geometry.RectF.init(0, 0, 120, 72);
+    panel.layout.clip_content = true;
+    var children = [_]canvas.Widget{panel.children[0]};
+    children[0].frame = panel.frame;
+    panel.children = &children;
+
+    var commands: [8]canvas.CanvasCommand = undefined;
+    var builder = canvas.Builder.init(&commands);
+    try canvas.emitWidgetTree(&builder, panel, .{});
+
+    var saw_panel_chrome = false;
+    var saw_content_clip = false;
+    var saw_full_bleed_child = false;
+    for (builder.displayList().commands) |command| {
+        switch (command) {
+            .fill_rounded_rect => |fill| {
+                if (fill.id == canvas.widgetPartId(panel.id, 2)) {
+                    try testing.expectEqualDeep(canvas.Radius.all(0), fill.radius);
+                    saw_panel_chrome = true;
+                }
+                if (fill.id == canvas.widgetPartId(children[0].id, 1)) {
+                    try testing.expectEqualDeep(panel.frame, fill.rect);
+                    saw_full_bleed_child = true;
+                }
+            },
+            .push_clip => |clip| if (clip.id == canvas.widgetPartId(panel.id, 9)) {
+                try testing.expectEqualDeep(canvas.Radius.all(0), clip.radius);
+                saw_content_clip = true;
+            },
+            else => {},
+        }
+    }
+    try testing.expect(saw_panel_chrome);
+    try testing.expect(saw_content_clip);
+    try testing.expect(saw_full_bleed_child);
 }
 
 test "explicit style values win over token references" {
@@ -1354,6 +1451,7 @@ test "the registry's attr value classes match the ElementOptions field types" {
             .optional => |optional| switch (@typeInfo(optional.child)) {
                 .bool => .truthy,
                 .float => .number,
+                .@"enum" => .option,
                 else => unreachable,
             },
             .@"enum" => .option,
@@ -1518,20 +1616,13 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
     }
 }
 
-/// Widget kinds deliberately NOT expressible in markup v1 — each needs
-/// something the closed grammar cannot carry, so these are written as Zig
-/// view functions instead of forcing a bad markup shape:
-/// - image, icon_button: reference image assets by runtime ImageId,
-///   which markup's literal/binding attribute values cannot express.
-///   (icon IS expressible: the built-in vector set is a closed literal
-///   vocabulary, comptime-validated.)
+/// Widget kinds deliberately NOT expressible as direct markup leaves —
+/// each is either a composite form or awaits a separate admission:
 /// - data_grid: a virtualized data grid needs per-column cell templates
 ///   (arbitrary render callbacks).
 /// - popover, menu_surface: floating surfaces anchored to runtime geometry
 ///   the static tree cannot express (dropdown-menu covers the declarative
 ///   menu case).
-/// - segmented_control: engine kind for shell chrome segments; tabs and
-///   toggle-group cover the component catalog's use cases.
 /// - chart: expressible as the `<chart>` COMPOSITE (series children whose
 ///   values bind model f32 iterables, lowered through `Ui.chart`), so no
 ///   plain element maps to the kind here — like the other composites, the
@@ -1544,8 +1635,23 @@ test "the registry's takes-children predicate matches the interpreter's takes-ch
 ///   lowered through `Ui.inputGroup`), so no plain element maps to the
 ///   kind here — like chart, the bespoke builder is the channel.
 const markup_excluded_widget_kinds = [_]canvas.WidgetKind{
-    .icon_button, .data_grid, .popover, .menu_surface, .segmented_control, .chart, .split_divider, .input_group,
+    .icon_button, .chart, .split_divider, .input_group,
 };
+
+pub const SegmentedModel = struct {
+    mode: u8 = 1,
+};
+pub const SegmentedMsg = union(enum) { choose };
+pub const SegmentedUi = canvas.Ui(SegmentedMsg);
+const SegmentedMarkup = markup_view.MarkupView(SegmentedModel, SegmentedMsg);
+
+pub const segmented_markup_source =
+    \\<column gap="8">
+    \\  <segmented-control selected="{mode == 0}" on-press="choose">List</segmented-control>
+    \\  <segmented-control selected="{mode == 1}" icon="settings" on-press="choose">Grid</segmented-control>
+    \\  <button size="icon" icon="settings" label="Preview" on-press="choose" />
+    \\</column>
+;
 
 fn kindExpressible(kind: canvas.WidgetKind) bool {
     for (canvas.ui_markup.known_element_names) |name| {
@@ -1561,6 +1667,32 @@ test "known_element_names covers every markup-expressible widget kind" {
         const excluded = std.mem.indexOfScalar(canvas.WidgetKind, &markup_excluded_widget_kinds, kind) != null;
         try testing.expectEqual(!excluded, kindExpressible(kind));
     }
+}
+
+test "segmented-control and vector icon button build and dispatch" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var parser = canvas.ui_markup.Parser.init(arena, segmented_markup_source);
+    try testing.expectEqual(@as(?canvas.ui_markup.MarkupErrorInfo, null), canvas.ui_markup.validate(try parser.parse()));
+
+    const model = SegmentedModel{};
+    var view = try SegmentedMarkup.init(arena, segmented_markup_source);
+    var ui = SegmentedUi.init(arena);
+    const tree = try ui.finalize(try view.build(&ui, &model));
+    const list = tree.root.children[0];
+    const grid = tree.root.children[1];
+    const preview = tree.root.children[2];
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, list.kind);
+    try testing.expectEqual(canvas.WidgetKind.segmented_control, grid.kind);
+    try testing.expect(!list.state.selected);
+    try testing.expect(grid.state.selected);
+    try testing.expectEqualStrings("settings", grid.icon);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(list.id, .up).?);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(grid.id, .up).?);
+    try testing.expectEqual(canvas.WidgetKind.button, preview.kind);
+    try testing.expectEqualStrings("settings", preview.icon);
+    try testing.expectEqual(SegmentedMsg.choose, tree.msgForPointer(preview.id, .up).?);
 }
 
 test "every built-in component is expressible in markup" {
