@@ -1,0 +1,24 @@
+.{
+    .id = "dev.native_sdk.swift_toolchain_proof",
+    .name = "swift-toolchain-proof",
+    .display_name = "Swift Toolchain Proof",
+    .version = "0.1.0",
+    .platforms = .{"macos"},
+    .permissions = .{},
+    .capabilities = .{"native_views"},
+    .shell = .{
+        .windows = .{
+            .{
+                .label = "main",
+                .title = "Swift Toolchain Proof",
+                .width = 480,
+                .height = 280,
+                .restore_policy = "center_on_primary",
+                .views = .{
+                    .{ .label = "content", .kind = "stack", .fill = true },
+                },
+            },
+        },
+    },
+    .web_engine = "system",
+}
