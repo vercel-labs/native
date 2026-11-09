@@ -12,7 +12,7 @@
   },
   "devDependencies": {
     "@types/node": "^24",
-    "typescript": "^5"
+    "typescript": "^7.0.2"
   },
   "dependencies": {
     "@vercel/sandbox": "^2.3.0"

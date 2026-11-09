@@ -6,7 +6,7 @@ const tooling = @import("tooling");
 const automation_protocol = @import("automation_protocol");
 const cli_build_info = @import("cli_build_info");
 
-const version = "0.10.1";
+const version = "0.11.1";
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
@@ -572,6 +572,7 @@ fn failVerb(err: anyerror) anyerror!void {
         error.BrokenToolchainInstall,
         error.ToolchainVersionMismatch,
         error.CoreCheckFailed,
+        error.ViewCheckFailed,
         error.DevHostFailed,
         error.HostCompileFailed,
         error.SimulatorUnavailable,
@@ -672,12 +673,14 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     const sqlite_enabled = for (metadata.capabilities) |capability| {
         if (std.mem.eql(u8, capability, "sqlite")) break true;
     } else false;
+    var ts_framework_root: ?[]const u8 = null;
+    defer if (ts_framework_root) |root| allocator.free(root);
     if (core_tree == .ts) {
         const framework_root = try tooling.buildgraph.resolveFrameworkRoot(allocator, io, env_map) orelse {
             std.debug.print("cannot locate the Native SDK framework; set NATIVE_SDK_PATH to your framework checkout\n", .{});
             return error.MissingFramework;
         };
-        defer allocator.free(framework_root);
+        ts_framework_root = framework_root;
         // Self-heal the editor surface first: node_modules/@native-sdk/core
         // (the pre-publish copy stock tsc resolves) refreshes whenever it is
         // missing or version-skewed vs the SDK — one info line, never a
@@ -735,8 +738,17 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     if (markup_files.items.len > 0) {
         outcome = try markup_cli.checkFiles(allocator, io, markup_files.items, .{
             .import_root_for_file = markup_cli.importRootForFile,
+            .typescript_views_checked = core_tree == .ts,
         });
         if (outcome.failures > 0) return error.MarkupCheckFailed;
+    }
+    // A TypeScript core's views compile beside it: check them with the
+    // build's own view compiler against the contract checkCore just wrote,
+    // once every file is structurally sound.
+    if (ts_framework_root) |framework_root| {
+        const views = try tooling.ts_core.checkViews(allocator, io, env_map, framework_root);
+        if (views.errors > 0) return error.MarkupCheckFailed;
+        outcome.warnings += views.warnings;
     }
 
     // The build-graph web-layer inference, surfaced where authors look:
@@ -751,7 +763,7 @@ fn runCheck(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Envi
     }
     const checked_markup = markup_files.items.len;
     const contract_note: []const u8 = if (outcome.contract_checked) " against the model contract" else "";
-    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean)" else "";
+    const core_note: []const u8 = if (core_tree == .ts) " and src/core.ts (subset checker clean, views typed against the core)" else "";
     std.debug.print("checked {d} markup file{s}{s}, {s}{s}\n", .{ checked_markup, if (checked_markup == 1) "" else "s", contract_note, manifest_path, core_note });
     if (strict and outcome.warnings > 0) {
         std.debug.print("{d} warning{s} promoted to errors (--strict)\n", .{ outcome.warnings, if (outcome.warnings == 1) "" else "s" });

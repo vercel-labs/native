@@ -32,7 +32,7 @@ jobs:
       matrix:
         include:
           - platform: macosarm64
-            runner: macos-14
+            runner: macos-15
           - platform: macosx64
             runner: macos-15
           - platform: linux64

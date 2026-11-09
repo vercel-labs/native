@@ -1,0 +1,16 @@
+<column gap="20" padding="28">
+  <column gap="6">
+    <text size="heading">Workspace Panels</text>
+    <text foreground="text_muted">Keep notes, activity and an overview beside your work.</text>
+  </column>
+  <row gap="16">
+    <panel grow="1" padding="20"><column gap="8"><text foreground="text_muted">SHARED COUNT</text><text size="heading">{count}</text></column></panel>
+    <panel grow="1" padding="20"><column gap="8"><text foreground="text_muted">PANEL CLOSES</text><text size="heading">{closes}</text></column></panel>
+  </row>
+  <row gap="12"><button on-press="open">Open workspace</button><button variant="secondary" on-press="close">Close panels</button><button variant="secondary" on-press="bump">Add one</button></row>
+  <panel padding="20"><column gap="12">
+    <text size="heading">Arrange your workspace</text>
+    <row gap="12"><button variant="secondary" on-press="compact">Switch panel set</button><button variant="secondary" on-press="reverse">Reverse order</button><button variant="secondary" on-press="route">Switch close action</button></row>
+    <text foreground="text_muted">{lastClose}</text>
+  </column></panel>
+</column>

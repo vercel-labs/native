@@ -65,6 +65,9 @@ pub const CheckOptions = struct {
     /// secondary-window markup rooted at `src/windows` while the main view
     /// and ordinary components remain rooted at `src`.
     import_root_for_file: ?*const fn (file_path: []const u8) []const u8 = null,
+    /// The caller checks a TypeScript core's views itself (`native check`),
+    /// so the structural pass need not point there.
+    typescript_views_checked: bool = false,
 };
 
 /// Match the generated TypeScript app resolvers: the main view uses the
@@ -98,10 +101,12 @@ pub fn importRootForFile(file_path: []const u8) []const u8 {
 
 /// The `check` body shared by `native markup check` and `native check`:
 /// structural validation of every file, plus — when the working directory
-/// is an app with a FRESH model-contract artifact — the model-aware
+/// is a Zig-core app with a FRESH model-contract artifact — the model-aware
 /// contract pass and the dead-state lint. A missing, stale, or unreadable
 /// artifact degrades to structural checking with a note, never a false
-/// pass.
+/// pass. A TypeScript core (src/core.ts) never reads the artifact: its
+/// views compile beside the core, and `native check` verifies them with
+/// that compiler.
 pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []const u8, options: CheckOptions) !CheckOutcome {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -117,6 +122,10 @@ pub fn checkFiles(allocator: std.mem.Allocator, io: std.Io, files: []const []con
     const refresh_hint: []const u8 = if (fileExists(io, "build.zig")) "run `native test` (or `zig build model-contract`)" else "run `native test`";
     switch (discoverContract(arena, io)) {
         .no_app => {},
+        .typescript_core => if (!options.typescript_views_checked) std.debug.print(
+            "model contract: TypeScript core - bindings and messages are checked against src/core.ts by `native check`\n",
+            .{},
+        ),
         .missing => std.debug.print(
             "model contract: not yet built - bindings and app: icon names checked structurally only; {s} to enable typed checks\n",
             .{refresh_hint},
@@ -264,6 +273,22 @@ test "resolver paths normalize filesystem separators" {
     );
 }
 
+test "a TypeScript core never reads a model-contract artifact, even a leftover one" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try tmp.dir.createDirPath(io, "src");
+    try tmp.dir.createDirPath(io, "zig-out");
+    try tmp.dir.writeFile(io, .{ .sub_path = "app.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "zig-out/model-contract.zon", .data = "not a contract" });
+    try std.testing.expect(discoverContractAt(arena, io, tmp.dir) == .unreadable);
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/core.ts", .data = "// core" });
+    try std.testing.expect(discoverContractAt(arena, io, tmp.dir) == .typescript_core);
+}
+
 test "app-wide checking applies the secondary-window boundary per file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -367,6 +392,9 @@ fn collectEmbeddedBasenames(arena: std.mem.Allocator, io: std.Io) ![]const []con
 
 const ContractState = union(enum) {
     no_app,
+    /// src/core.ts: the views compile beside the TypeScript core, so a
+    /// Zig model-contract artifact (even a leftover one) is never read.
+    typescript_core,
     missing,
     unreadable,
     stale,
@@ -377,17 +405,26 @@ const ContractState = union(enum) {
 /// app.zon and prove it fresh (the artifact carries a hash over the app's
 /// Zig sources; any drift degrades to structural checking).
 fn discoverContract(arena: std.mem.Allocator, io: std.Io) ContractState {
-    if (!fileExists(io, "app.json") and !fileExists(io, "app.zon")) return .no_app;
-    const source = readFile(arena, io, ui_markup.contract.default_artifact_path) catch return .missing;
+    return discoverContractAt(arena, io, std.Io.Dir.cwd());
+}
+
+fn discoverContractAt(arena: std.mem.Allocator, io: std.Io, app_dir: std.Io.Dir) ContractState {
+    if (!fileExistsAt(io, app_dir, "app.json") and !fileExistsAt(io, app_dir, "app.zon")) return .no_app;
+    if (fileExistsAt(io, app_dir, "src/core.ts")) return .typescript_core;
+    const source = readFileAt(arena, io, app_dir, ui_markup.contract.default_artifact_path) catch return .missing;
     const parsed = ui_markup.contract.parseArtifact(arena, source) catch return .unreadable;
     if (parsed.format != ui_markup.contract.format_version) return .unreadable;
-    const current = ui_markup.contract.hashSourceDir(arena, io, parsed.source_root) catch return .stale;
+    const current = ui_markup.contract.hashSourceDirAt(arena, io, app_dir, parsed.source_root) catch return .stale;
     if (current != parsed.source_hash) return .stale;
     return .{ .ok = parsed };
 }
 
 fn fileExists(io: std.Io, path: []const u8) bool {
-    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return false;
+    return fileExistsAt(io, std.Io.Dir.cwd(), path);
+}
+
+fn fileExistsAt(io: std.Io, dir: std.Io.Dir, path: []const u8) bool {
+    var file = dir.openFile(io, path, .{}) catch return false;
     file.close(io);
     return true;
 }
@@ -783,7 +820,11 @@ fn codepointAt(source: []const u8, line: usize, column: usize) ?FoundCodepoint {
 }
 
 fn readFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) ![]u8 {
-    var file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
+    return readFileAt(allocator, io, std.Io.Dir.cwd(), file_path);
+}
+
+fn readFileAt(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, file_path: []const u8) ![]u8 {
+    var file = try dir.openFile(io, file_path, .{});
     defer file.close(io);
     var read_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &read_buffer);
@@ -807,9 +848,10 @@ fn usage() void {
         \\without labels, and role misuse are errors - a screen reader user is blocked;
         \\unnamed images and redundant labels are warnings).
         \\
-        \\Inside an app directory with a fresh zig-out/model-contract.zon
-        \\(refresh it with `native test`), the check also verifies
-        \\bindings, iterables, message tags, and expression types against
+        \\Inside a Zig-core app directory with a fresh
+        \\zig-out/model-contract.zon (refresh it with `native test`), the
+        \\check also verifies bindings, iterables, message tags, and
+        \\expression types against
         \\the app's actual Model/Msg, verifies app: icon references
         \\against the registered icon table (pub const app_icons on the
         \\app root), and reports model state and Msg tags
@@ -817,7 +859,10 @@ fn usage() void {
         \\opt update-only names out with pub const view_unbound on Model or
         \\Msg). A missing or stale artifact degrades to structural checking
         \\with a note - never a false pass; binding paths are then validated
-        \\against your Model/Msg when the app builds.
+        \\against your Model/Msg when the app builds. In a TypeScript-core
+        \\app (src/core.ts), `native check` compiles the views against the
+        \\core instead and reports unused model state the same way (opt out
+        \\with export const viewUnbound in src/core.ts).
         \\
         \\dump: resolves and validates a view, encodes the canonical NSUI
         \\binary (schema-versioned, registry codes, byte-range spans), and

@@ -28,6 +28,7 @@
 #include <unistd.h>
 
 #include "../ios/apple_image_fit.h"
+#include "spectrum_bins.h"
 
 @class NativeSdkAppKitHost;
 @class NativeSdkAudioCaptureTarget;
@@ -485,7 +486,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @end
 
 @interface NativeSdkWidgetAccessibilityElement : NSAccessibilityElement
-@property(nonatomic, assign) NativeSdkMetalSurfaceView *surfaceView;
+- (void)publishAccessibilityFocused:(BOOL)focused;
+@property(nonatomic, weak) NativeSdkMetalSurfaceView *surfaceView;
 @property(nonatomic, assign) uint64_t widgetId;
 @property(nonatomic, assign) uint32_t actionFlags;
 @property(nonatomic, assign) BOOL canUndo;
@@ -588,6 +590,9 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, assign) uint32_t pendingPointerMotionModifiers;
 @property(nonatomic, assign) uint64_t pendingPointerMotionTimestampNs;
 @property(nonatomic, assign) uint64_t pointerMotionInputLastEmitNs;
+@property(nonatomic, assign) BOOL pointerDragInputActive;
+@property(nonatomic, assign) NSPoint pointerDragInputPoint;
+@property(nonatomic, assign) NSInteger pointerDragInputButton;
 @property(nonatomic, assign) BOOL scrollInputPending;
 @property(nonatomic, assign) NSPoint pendingScrollPoint;
 @property(nonatomic, assign) double pendingScrollDeltaX;
@@ -708,6 +713,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * that hit-block scroll regions beneath them. */
 @property(nonatomic, strong) NSArray *scrollOccluderRects;
 @property(nonatomic, assign) BOOL applyingScrollDriverOffset;
+@property(nonatomic, assign) BOOL reconcilingScrollDrivers;
 @property(nonatomic, assign) BOOL scrollDriverEventPending;
 @property(nonatomic, assign) uint64_t pendingScrollDriverId;
 @property(nonatomic, assign) double pendingScrollDriverOffsetX;
@@ -1010,6 +1016,8 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
  * menu items (Reload, Toggle Web Inspector, Undo/Redo) so canvas-only
  * apps never ship menu items nothing answers. */
 @property(nonatomic, assign) BOOL hasWebContent;
+/* Set before any WebView or default menu is created. */
+@property(nonatomic, assign) BOOL webViewInspection;
 /* The decoded manifest icon (nil until the async decode lands, or when
  * the file is missing). The About panel needs it passed explicitly:
  * unbundled dev binaries have no bundle icon for the standard panel to
@@ -1055,7 +1063,7 @@ static int NativeSdkCredentialStatus(OSStatus status, int missingCode) {
 @property(nonatomic, strong) NSArray<NSString *> *allowedNavigationOrigins;
 @property(nonatomic, strong) NSArray<NSString *> *allowedExternalURLs;
 @property(nonatomic, assign) NSInteger externalLinkAction;
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent webViewInspection:(BOOL)webViewInspection dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags;
 - (BOOL)createWindowWithId:(uint64_t)windowId title:(NSString *)title label:(NSString *)label x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags makeMain:(BOOL)makeMain;
 - (void)orderWindowForImplicitShow:(uint64_t)windowId;
 - (void)showDeferredWindowIfPending:(uint64_t)windowId reason:(const char *)reason;
@@ -1501,6 +1509,10 @@ static NSPoint NativeSdkViewLocalYDownPoint(NSView *view, NSPoint point) {
 
 @end
 
+static BOOL NativeSdkAccessibilityValuesEqual(id left, id right) {
+    return left == right || [left isEqual:right];
+}
+
 @implementation NativeSdkWidgetAccessibilityElement
 
 /* The action-flag gate for advertising AXPress: press, toggle, and
@@ -1515,7 +1527,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
     NATIVE_SDK_APPKIT_WIDGET_ACTION_SELECT;
 
 - (NSArray *)accessibilityActionNames {
-    if (!self.accessibilityEnabled) return @[];
+    if (!self.surfaceView || !self.accessibilityEnabled) return @[];
     NSMutableArray *actions = [NSMutableArray arrayWithCapacity:3];
     if ((self.actionFlags & NativeSdkWidgetPressActionFlags) != 0) {
         [actions addObject:NSAccessibilityPressAction];
@@ -1544,22 +1556,22 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
  * list instead of no-op'ing on invocation. */
 - (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
     if (selector == @selector(accessibilityPerformPress)) {
-        return self.accessibilityEnabled && (self.actionFlags & NativeSdkWidgetPressActionFlags) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NativeSdkWidgetPressActionFlags) != 0;
     }
     if (selector == @selector(accessibilityPerformIncrement)) {
-        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) != 0;
     }
     if (selector == @selector(accessibilityPerformDecrement)) {
-        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) != 0;
     }
     if (selector == @selector(accessibilityPerformCancel)) {
-        return self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) != 0;
+        return self.surfaceView && self.accessibilityEnabled && (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) != 0;
     }
     return [super isAccessibilitySelectorAllowed:selector];
 }
 
 - (BOOL)accessibilityPerformPress {
-    if (!self.accessibilityEnabled) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled) return NO;
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_TOGGLE) != 0) {
         return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_TOGGLE];
     }
@@ -1573,17 +1585,17 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)accessibilityPerformIncrement {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_INCREMENT) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_INCREMENT];
 }
 
 - (BOOL)accessibilityPerformDecrement {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DECREMENT) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DECREMENT];
 }
 
 - (BOOL)accessibilityPerformCancel {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_DISMISS) == 0) return NO;
     return [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_DISMISS];
 }
 
@@ -1596,16 +1608,23 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
  * reports the app's actual focus back. */
 - (void)setAccessibilityFocused:(BOOL)focused {
     [super setAccessibilityFocused:focused];
-    if (!focused || !self.accessibilityEnabled) return;
+    if (!self.surfaceView || !focused || !self.accessibilityEnabled) return;
     if ((self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_FOCUS) == 0) return;
     [self.surfaceView emitWidgetAccessibilityActionWithId:self.widgetId action:NATIVE_SDK_APPKIT_WIDGET_ACCESSIBILITY_ACTION_FOCUS];
 }
 
+/* Publishing runtime state must not look like an assistive client writing
+ * AXFocused. That feedback resets keyboard focus to programmatic focus and
+ * makes plain list rows lose their Tab-established navigation contract. */
+- (void)publishAccessibilityFocused:(BOOL)focused {
+    [super setAccessibilityFocused:focused];
+}
+
 - (BOOL)accessibilityIsAttributeSettable:(NSAccessibilityAttributeName)attribute {
-    if (self.accessibilityEnabled && [attribute isEqualToString:NSAccessibilityValueAttribute]) {
+    if (self.surfaceView && self.accessibilityEnabled && [attribute isEqualToString:NSAccessibilityValueAttribute]) {
         return (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_TEXT) != 0;
     }
-    if (self.accessibilityEnabled &&
+    if (self.surfaceView && self.accessibilityEnabled &&
         ([attribute isEqualToString:NSAccessibilitySelectedTextRangeAttribute] ||
          [attribute isEqualToString:NSAccessibilitySelectedTextRangesAttribute])) {
         return (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) != 0;
@@ -1627,7 +1646,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)emitSetTextAccessibilityValue:(id)value {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_TEXT) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_TEXT) == 0) return NO;
     NSString *text = @"";
     if ([value isKindOfClass:[NSString class]]) {
         text = (NSString *)value;
@@ -1642,7 +1661,7 @@ static const uint32_t NativeSdkWidgetPressActionFlags =
 }
 
 - (BOOL)emitSetSelectionAccessibilityValue:(id)value {
-    if (!self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) == 0) return NO;
+    if (!self.surfaceView || !self.accessibilityEnabled || (self.actionFlags & NATIVE_SDK_APPKIT_WIDGET_ACTION_SET_SELECTION) == 0) return NO;
     NSRange selectedRange = NSMakeRange(NSNotFound, 0);
     if ([value isKindOfClass:[NSValue class]]) {
         selectedRange = [(NSValue *)value rangeValue];
@@ -5812,13 +5831,46 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
 }
 
 - (void)updateWidgetAccessibilityWithNodes:(const native_sdk_appkit_widget_accessibility_node_t *)nodes count:(NSUInteger)count {
+    NSArray<NativeSdkWidgetAccessibilityElement *> *previous = (id)(self.widgetAccessibilityElements ?: @[]);
     if (!nodes || count == 0) {
+        for (NativeSdkWidgetAccessibilityElement *element in previous) {
+            element.surfaceView = nil;
+            element.actionFlags = 0;
+            element.canUndo = NO;
+            element.canRedo = NO;
+            [element publishAccessibilityFocused:NO];
+            element.accessibilityEnabled = NO;
+            element.accessibilityParent = nil;
+            element.accessibilityChildren = @[];
+        }
         self.widgetAccessibilityElements = @[];
         self.widgetAccessibilityRootElements = @[];
-        NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+        if (previous.count > 0) NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
         return;
     }
 
+    // Reuse each unique, nonzero widget identity within this surface. Duplicate
+    // and anonymous ids remain independent elements, preserving their ordering.
+    NSMutableDictionary<NSNumber *, NativeSdkWidgetAccessibilityElement *> *previousById = [NSMutableDictionary dictionaryWithCapacity:previous.count];
+    NSMutableSet<NSNumber *> *ambiguousIds = [NSMutableSet set];
+    for (NativeSdkWidgetAccessibilityElement *element in previous) {
+        NSNumber *key = @(element.widgetId);
+        if (previousById[key]) [ambiguousIds addObject:key];
+        previousById[key] = element;
+    }
+    NSMutableSet<NSNumber *> *incomingIds = [NSMutableSet set];
+    for (NSUInteger i = 0; i < count; i++) {
+        NSNumber *key = @(nodes[i].id);
+        if ([incomingIds containsObject:key]) [ambiguousIds addObject:key];
+        [incomingIds addObject:key];
+    }
+    NativeSdkWidgetAccessibilityElement *defaults = [[NativeSdkWidgetAccessibilityElement alloc] init];
+    BOOL layoutChanged = previous.count != count;
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *valueChangedElements = [NSMutableArray array];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *titleChangedElements = [NSMutableArray array];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *focusedElements = [NSMutableArray array];
+    NSMutableArray<NativeSdkWidgetAccessibilityElement *> *selectionChangedElements = [NSMutableArray array];
+    BOOL focusChanged = NO;
     NSMutableArray<NativeSdkWidgetAccessibilityElement *> *elements = [NSMutableArray arrayWithCapacity:count];
     NSMutableArray<NSNumber *> *parentIds = [NSMutableArray arrayWithCapacity:count];
     NSMutableDictionary<NSNumber *, NativeSdkWidgetAccessibilityElement *> *elementsById = [NSMutableDictionary dictionaryWithCapacity:count];
@@ -5828,7 +5880,52 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         NSString *textValue = NativeSdkStringFromBytes(node.text_value, node.text_value_len) ?: @"";
         NSString *placeholder = NativeSdkStringFromBytes(node.placeholder, node.placeholder_len) ?: @"";
         NSString *name = label.length > 0 ? label : textValue;
-        NativeSdkWidgetAccessibilityElement *element = [[NativeSdkWidgetAccessibilityElement alloc] init];
+        NSNumber *key = @(node.id);
+        NativeSdkWidgetAccessibilityElement *element = node.id != 0 && ![ambiguousIds containsObject:key] ? previousById[key] : nil;
+        BOOL reused = element != nil;
+        if (!element) element = [[NativeSdkWidgetAccessibilityElement alloc] init];
+        id previousValue = element.accessibilityValue;
+        NSString *previousLabel = element.accessibilityLabel;
+        NSString *previousPlaceholder = element.accessibilityPlaceholderValue;
+        NSString *previousDescription = element.accessibilityValueDescription;
+        id previousMin = element.accessibilityMinValue, previousMax = element.accessibilityMaxValue;
+        BOOL previousExpanded = element.accessibilityExpanded;
+        BOOL previousRequired = element.accessibilityRequired;
+        BOOL previousUndo = element.canUndo, previousRedo = element.canRedo;
+        NSInteger previousCharacters = element.accessibilityNumberOfCharacters;
+        NSRange previousVisible = element.accessibilityVisibleCharacterRange;
+        NSString *previousSelectedText = element.accessibilitySelectedText;
+        NSInteger previousRows = element.accessibilityRowCount, previousColumns = element.accessibilityColumnCount, previousIndex = element.accessibilityIndex;
+        NSRange previousRowRange = element.accessibilityRowIndexRange, previousColumnRange = element.accessibilityColumnIndexRange;
+        NSString *previousRole = element.accessibilityRole;
+        NSRange previousSelection = element.accessibilitySelectedTextRange;
+        BOOL previousFocused = element.accessibilityFocused;
+        BOOL previousSelected = element.accessibilitySelected;
+        BOOL previousEnabled = element.accessibilityEnabled;
+        uint32_t previousActions = element.actionFlags;
+        NSRect previousFrame = element.surfaceFrame;
+        if (!reused || index >= previous.count || previous[index] != element) layoutChanged = YES;
+        // Optional fields must return to exactly the fresh-element defaults.
+        // Reusing an editor as a label must not retain selection or scroll data.
+        element.accessibilityValue = defaults.accessibilityValue;
+        element.accessibilityValueDescription = defaults.accessibilityValueDescription;
+        element.accessibilityMinValue = defaults.accessibilityMinValue;
+        element.accessibilityMaxValue = defaults.accessibilityMaxValue;
+        element.accessibilityRowCount = defaults.accessibilityRowCount;
+        element.accessibilityColumnCount = defaults.accessibilityColumnCount;
+        element.accessibilityRowIndexRange = defaults.accessibilityRowIndexRange;
+        element.accessibilityColumnIndexRange = defaults.accessibilityColumnIndexRange;
+        element.accessibilityIndex = defaults.accessibilityIndex;
+        element.accessibilityNumberOfCharacters = defaults.accessibilityNumberOfCharacters;
+        element.accessibilityVisibleCharacterRange = defaults.accessibilityVisibleCharacterRange;
+        element.accessibilitySelectedTextRange = defaults.accessibilitySelectedTextRange;
+        element.accessibilitySelectedTextRanges = defaults.accessibilitySelectedTextRanges;
+        element.accessibilitySelectedText = defaults.accessibilitySelectedText;
+        element.accessibilityInsertionPointLineNumber = defaults.accessibilityInsertionPointLineNumber;
+        element.accessibilityExpanded = defaults.accessibilityExpanded;
+        if ([element respondsToSelector:@selector(setAccessibilityPlaceholderValue:)]) {
+            element.accessibilityPlaceholderValue = defaults.accessibilityPlaceholderValue;
+        }
         element.surfaceView = self;
         element.widgetId = node.id;
         element.actionFlags = node.action_flags;
@@ -5885,7 +5982,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             }
         }
         element.accessibilityEnabled = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_ENABLED) != 0;
-        element.accessibilityFocused = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_FOCUSED) != 0;
+        [element publishAccessibilityFocused:(node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_FOCUSED) != 0];
         element.accessibilitySelected = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_SELECTED) != 0;
         element.canUndo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_UNDO) != 0;
         element.canRedo = (node.state_flags & NATIVE_SDK_APPKIT_WIDGET_STATE_CAN_REDO) != 0;
@@ -5910,6 +6007,14 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         CGFloat nativeY = self.bounds.size.height - node.y - node.height;
         element.surfaceFrame = NSMakeRect(node.x, nativeY, node.width, node.height);
         element.accessibilityFrameInParentSpace = element.surfaceFrame;
+        if (reused) {
+            if (![previousRole isEqual:element.accessibilityRole] || previousEnabled != element.accessibilityEnabled || previousActions != element.actionFlags || !NSEqualRects(previousFrame, element.surfaceFrame) || previousRows != element.accessibilityRowCount || previousColumns != element.accessibilityColumnCount || previousIndex != element.accessibilityIndex || !NSEqualRanges(previousRowRange, element.accessibilityRowIndexRange) || !NSEqualRanges(previousColumnRange, element.accessibilityColumnIndexRange)) layoutChanged = YES;
+            if (!NativeSdkAccessibilityValuesEqual(previousLabel, element.accessibilityLabel) || !NativeSdkAccessibilityValuesEqual(previousPlaceholder, element.accessibilityPlaceholderValue)) [titleChangedElements addObject:element];
+            if (!NativeSdkAccessibilityValuesEqual(previousValue, element.accessibilityValue) || !NativeSdkAccessibilityValuesEqual(previousDescription, element.accessibilityValueDescription) || !NativeSdkAccessibilityValuesEqual(previousMin, element.accessibilityMinValue) || !NativeSdkAccessibilityValuesEqual(previousMax, element.accessibilityMaxValue) || previousSelected != element.accessibilitySelected || previousExpanded != element.accessibilityExpanded || previousRequired != element.accessibilityRequired || previousUndo != element.canUndo || previousRedo != element.canRedo || previousCharacters != element.accessibilityNumberOfCharacters || !NSEqualRanges(previousVisible, element.accessibilityVisibleCharacterRange)) [valueChangedElements addObject:element];
+            if (!NSEqualRanges(previousSelection, element.accessibilitySelectedTextRange) || !NativeSdkAccessibilityValuesEqual(previousSelectedText, element.accessibilitySelectedText)) [selectionChangedElements addObject:element];
+        }
+        if (previousFocused != element.accessibilityFocused) focusChanged = YES;
+        if (!previousFocused && element.accessibilityFocused) [focusedElements addObject:element];
         [elements addObject:element];
         [parentIds addObject:@(node.parent_id)];
         [elementsById setObject:element forKey:@(node.id)];
@@ -5922,6 +6027,7 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         NSNumber *parentId = parentIds[index];
         NativeSdkWidgetAccessibilityElement *parent = parentId.unsignedLongLongValue == 0 ? nil : [elementsById objectForKey:parentId];
         if (parent && parent != element) {
+            if (element.accessibilityParent != parent) layoutChanged = YES;
             element.accessibilityParent = parent;
             NSRect parentFrame = parent.surfaceFrame;
             NSRect childFrame = element.surfaceFrame;
@@ -5938,17 +6044,35 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
             }
             [children addObject:element];
         } else {
+            if (element.accessibilityParent != self) layoutChanged = YES;
             element.accessibilityParent = self;
             [rootElements addObject:element];
         }
     }
-    for (NSNumber *parentId in childrenByParentId) {
-        NativeSdkWidgetAccessibilityElement *parent = [elementsById objectForKey:parentId];
-        parent.accessibilityChildren = [childrenByParentId objectForKey:parentId];
+    for (NativeSdkWidgetAccessibilityElement *element in elements) {
+        element.accessibilityChildren = elementsById[@(element.widgetId)] == element ? (childrenByParentId[@(element.widgetId)] ?: defaults.accessibilityChildren) : defaults.accessibilityChildren;
+    }
+    for (NativeSdkWidgetAccessibilityElement *element in previous) {
+        if ([elements indexOfObjectIdenticalTo:element] != NSNotFound) continue;
+        element.surfaceView = nil;
+        element.actionFlags = 0;
+        element.canUndo = NO;
+        element.canRedo = NO;
+        [element publishAccessibilityFocused:NO];
+        element.accessibilityEnabled = NO;
+        element.accessibilityParent = nil;
+        element.accessibilityChildren = @[];
     }
     self.widgetAccessibilityElements = elements;
     self.widgetAccessibilityRootElements = rootElements;
-    NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+    // Content updates keep the graph stable and announce only changed content.
+    // Assistive clients can retain a control while playback updates its value.
+    if (layoutChanged) NSAccessibilityPostNotification(self, NSAccessibilityLayoutChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in titleChangedElements) NSAccessibilityPostNotification(element, NSAccessibilityTitleChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in valueChangedElements) NSAccessibilityPostNotification(element, NSAccessibilityValueChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in selectionChangedElements) NSAccessibilityPostNotification(element, NSAccessibilitySelectedTextChangedNotification);
+    for (NativeSdkWidgetAccessibilityElement *element in focusedElements) NSAccessibilityPostNotification(element, NSAccessibilityFocusedUIElementChangedNotification);
+    if (focusChanged && focusedElements.count == 0) NSAccessibilityPostNotification(self, NSAccessibilityFocusedUIElementChangedNotification);
 }
 
 - (void)stopDisplayTimer {
@@ -6664,7 +6788,11 @@ static BOOL NativeSdkCompositeBlurWriteRegion(NSDictionary *command, CGFloat sca
         // focused terminal needs the modifiers even more: its emulator
         // translates the natural macOS gestures to shell bindings, and
         // negotiated key protocols must see every other combined chord.
-        if (NativeSdkTextNavigationNeedsRawKeyEvent(event)) {
+        // Enter's modifiers choose newline versus submission. Cocoa's
+        // insertNewline: selector discards them; preserve the physical
+        // gesture unless an IME owns Return to commit marked text.
+        BOOL rawEnter = ![self hasMarkedText] && [NativeSdkShortcutKeyForEvent(event) isEqualToString:@"enter"];
+        if (rawEnter || NativeSdkTextNavigationNeedsRawKeyEvent(event)) {
             [self emitInputEventWithKind:NATIVE_SDK_APPKIT_GPU_INPUT_KEY_DOWN event:event button:0 deltaX:0 deltaY:0];
             return;
         }
@@ -6912,6 +7040,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
 // GPU_SURFACE_SCROLL_DRIVER events.
 
 - (void)setScrollDrivers:(const native_sdk_appkit_scroll_driver_t *)drivers count:(NSUInteger)count occluders:(const native_sdk_appkit_scroll_occluder_t *)occluders occluderCount:(NSUInteger)occluderCount {
+    self.reconcilingScrollDrivers = YES;
     if (!self.scrollDrivers) self.scrollDrivers = [[NSMutableArray alloc] init];
     // Occluder rects arrive in canvas coordinates (top-left origin,
     // y-down); store them flipped into this view's space, like the
@@ -7009,6 +7138,7 @@ static double NativeSdkClampedPinchMagnification(double magnification) {
         [ordered addObject:driver];
     }
     self.scrollDrivers = ordered;
+    self.reconcilingScrollDrivers = NO;
 }
 
 // Per-axis programmatic offset write: an axis the runtime did not move
@@ -7138,6 +7268,22 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
     NSClipView *clipView = note.object;
     for (NativeSdkScrollDriverView *driver in self.scrollDrivers) {
         if (driver.contentView != clipView) continue;
+        // Resizing several documents can flush another driver's pending
+        // report. That callback rebuilds the app and re-enters this sync,
+        // overwriting reports and retained geometry from the outer push.
+        // Report resize constraints after the full push settles, reading
+        // the live origin so an intervening source write stays authoritative.
+        if (self.reconcilingScrollDrivers) {
+            __weak NativeSdkMetalSurfaceView *weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NativeSdkMetalSurfaceView *strongSelf = weakSelf;
+                if (!strongSelf || driver.superview != strongSelf) return;
+                [strongSelf queueScrollDriverEventWithId:driver.driverId
+                                                offsetX:driver.contentView.bounds.origin.x
+                                                offsetY:driver.contentView.bounds.origin.y];
+            });
+            return;
+        }
         [self queueScrollDriverEventWithId:driver.driverId offsetX:clipView.bounds.origin.x offsetY:clipView.bounds.origin.y];
         return;
     }
@@ -7192,6 +7338,21 @@ static BOOL NativeSdkScrollDriverCanConsumeHorizontally(NativeSdkScrollDriverVie
 - (void)emitInputEventWithKind:(NSInteger)kind point:(NSPoint)point timestampNs:(uint64_t)timestampNs modifiers:(uint32_t)modifiers keyText:(NSString *)keyText inputText:(NSString *)inputText button:(NSInteger)button deltaX:(double)deltaX deltaY:(double)deltaY {
     if (!self.host || self.surfaceLabel.length == 0) return;
     const NSPoint yDownPoint = NativeSdkViewLocalYDownPoint(self, point);
+    // Coalesced motion retains its latest absolute point. Derive drag deltas
+    // from the last emitted point so a batch preserves every pixel of travel.
+    if (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_DOWN) {
+        self.pointerDragInputActive = YES;
+        self.pointerDragInputPoint = yDownPoint;
+        self.pointerDragInputButton = button;
+    } else if (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_DRAG &&
+               self.pointerDragInputActive && self.pointerDragInputButton == button) {
+        deltaX = yDownPoint.x - self.pointerDragInputPoint.x;
+        deltaY = yDownPoint.y - self.pointerDragInputPoint.y;
+        self.pointerDragInputPoint = yDownPoint;
+    } else if (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_CANCEL ||
+               (kind == NATIVE_SDK_APPKIT_GPU_INPUT_POINTER_UP && self.pointerDragInputButton == button)) {
+        self.pointerDragInputActive = NO;
+    }
     const char *labelBytes = self.surfaceLabel.UTF8String ?: "";
     NSString *safeKeyText = keyText ?: @"";
     NSString *safeInputText = inputText ?: @"";
@@ -7927,7 +8088,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
 
 @implementation NativeSdkAppKitHost
 
-- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
+- (instancetype)initWithAppName:(NSString *)appName displayName:(NSString *)displayName version:(NSString *)version aboutDescription:(NSString *)aboutDescription hasWebContent:(BOOL)hasWebContent webViewInspection:(BOOL)webViewInspection dockVisible:(BOOL)dockVisible windowTitle:(NSString *)windowTitle bundleIdentifier:(NSString *)bundleIdentifier iconPath:(NSString *)iconPath windowLabel:(NSString *)windowLabel x:(double)x y:(double)y width:(double)width height:(double)height restoreFrame:(BOOL)restoreFrame initialPlacement:(int)initialPlacement restorePolicy:(int)restorePolicy resizable:(BOOL)resizable titlebarStyle:(int)titlebarStyle showPolicy:(int)showPolicy windowFlags:(uint32_t)windowFlags {
     self = [super init];
     if (!self) {
         return nil;
@@ -7945,6 +8106,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     self.appVersion = version ?: @"";
     self.aboutDescription = aboutDescription ?: @"";
     self.hasWebContent = hasWebContent;
+    self.webViewInspection = webViewInspection;
     NSString *configuredBundleIdentifier = bundleIdentifier.length > 0 ? bundleIdentifier : @"dev.native_sdk.app";
     self.bundleIdentifier = NativeSdkPackagedBundleIdentifier() ?: configuredBundleIdentifier;
     self.iconPath = iconPath ?: @"";
@@ -8484,7 +8646,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     [userContentController addUserScript:bridgeScript];
     configuration.userContentController = userContentController;
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
-        [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+        [configuration.preferences setValue:@(self.webViewInspection) forKey:@"developerExtrasEnabled"];
     }
     WKWebView *webView = [[NativeSdkWebView alloc] initWithFrame:container.bounds configuration:configuration];
     ((NativeSdkWebView *)webView).host = self;
@@ -8496,7 +8658,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
     webView.layer.backgroundColor = NSColor.clearColor.CGColor;
     [webView setValue:@NO forKey:@"drawsBackground"];
     if ([webView respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
-        [webView setValue:@YES forKey:@"inspectable"];
+        [webView setValue:@(self.webViewInspection) forKey:@"inspectable"];
     }
     webView.navigationDelegate = self;
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
@@ -9167,7 +9329,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         configuration.userContentController = controller;
     }
     if ([configuration.preferences respondsToSelector:NSSelectorFromString(@"setDeveloperExtrasEnabled:")]) {
-        [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];
+        [configuration.preferences setValue:@(self.webViewInspection) forKey:@"developerExtrasEnabled"];
     }
 
     WKWebView *webview = [[NativeSdkWebView alloc] initWithFrame:[self webViewFrameForWindow:window x:x y:y width:width height:height] configuration:configuration];
@@ -9182,7 +9344,7 @@ static float NativeSdkCaptureReadRemixedSample(const AudioBufferList *buffers, c
         [webview setValue:@NO forKey:@"drawsBackground"];
     }
     if ([webview respondsToSelector:NSSelectorFromString(@"setInspectable:")]) {
-        [webview setValue:@YES forKey:@"inspectable"];
+        [webview setValue:@(self.webViewInspection) forKey:@"inspectable"];
     }
     webview.navigationDelegate = self;
     webview.autoresizingMask = NSViewNotSizable;
@@ -9885,7 +10047,9 @@ static void NativeSdkApplyProcessDisplayName(NSString *displayName) {
     [viewMenuItem setSubmenu:viewMenu];
     if (self.hasWebContent) {
         [viewMenu addItem:[self menuItem:@"Reload" action:@selector(reload:) key:@"r" modifiers:NSEventModifierFlagCommand]];
-        [viewMenu addItem:[self menuItem:@"Toggle Web Inspector" action:@selector(toggleWebInspector:) key:@"i" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
+        if (self.webViewInspection) {
+            [viewMenu addItem:[self menuItem:@"Toggle Web Inspector" action:@selector(toggleWebInspector:) key:@"i" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagOption)]];
+        }
         [viewMenu addItem:[NSMenuItem separatorItem]];
     }
     [viewMenu addItem:[self menuItem:@"Enter Full Screen" action:@selector(toggleFullScreen:) key:@"f" modifiers:(NSEventModifierFlagCommand | NSEventModifierFlagControl)]];
@@ -11031,17 +11195,16 @@ static int NativeSdkSpectrumComputeBands(native_sdk_spectrum_tap_state_t *state,
      * bin, matching how a bar analyzer reads (an average would smear
      * narrow tones into invisibility). Bin 0 (DC) never contributes. */
     const double ratio = NATIVE_SDK_SPECTRUM_HIGH_HZ / NATIVE_SDK_SPECTRUM_LOW_HZ;
-    const double hz_per_bin = sample_rate / (double)NATIVE_SDK_SPECTRUM_FFT_SIZE;
     for (int band = 0; band < NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS; band += 1) {
         const double low_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)band / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
         const double high_hz = NATIVE_SDK_SPECTRUM_LOW_HZ * pow(ratio, (double)(band + 1) / NATIVE_SDK_APPKIT_AUDIO_SPECTRUM_BANDS);
-        int low_bin = (int)(low_hz / hz_per_bin);
-        int high_bin = (int)ceil(high_hz / hz_per_bin);
-        if (low_bin < 1) low_bin = 1;
-        if (high_bin > NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1) high_bin = NATIVE_SDK_SPECTRUM_FFT_SIZE / 2 - 1;
-        if (high_bin < low_bin) high_bin = low_bin;
+        native_sdk_spectrum_bin_range_t bins;
+        if (!native_sdk_spectrum_bin_range(low_hz, high_hz, sample_rate, NATIVE_SDK_SPECTRUM_FFT_SIZE, &bins)) {
+            bands[band] = 0;
+            continue;
+        }
         float peak = 0.0f;
-        for (int bin = low_bin; bin <= high_bin; bin += 1) {
+        for (int bin = bins.first; bin <= bins.last; bin += 1) {
             if (power[bin] > peak) peak = power[bin];
         }
         const float amplitude = 2.0f * sqrtf(peak) / (float)NATIVE_SDK_SPECTRUM_FFT_SIZE;
@@ -12694,6 +12857,7 @@ static void NativeSdkVideoFittedSize(double naturalWidth, double naturalHeight, 
 
 - (void)toggleWebInspector:(id)sender {
     (void)sender;
+    if (!self.webViewInspection) return;
     WKWebView *webView = [self mainWebViewForWindow:NSApp.keyWindow];
     if (!webView) return;
     SEL selector = NSSelectorFromString(@"_showInspector");
@@ -12956,7 +13120,7 @@ static BOOL NativeSdkPolicyListMatches(NSArray<NSString *> *values, NSURL *url) 
     return NO;
 }
 
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int webview_inspection, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags) {
     @autoreleasepool {
         NSString *appNameString = [[NSString alloc] initWithBytes:app_name length:app_name_len encoding:NSUTF8StringEncoding] ?: @"native-sdk";
         NSString *displayNameString = [[NSString alloc] initWithBytes:display_name length:display_name_len encoding:NSUTF8StringEncoding] ?: @"";
@@ -12966,7 +13130,7 @@ native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t 
         NSString *bundleIdString = [[NSString alloc] initWithBytes:bundle_id length:bundle_id_len encoding:NSUTF8StringEncoding] ?: @"dev.native_sdk.app";
         NSString *iconPathString = [[NSString alloc] initWithBytes:icon_path length:icon_path_len encoding:NSUTF8StringEncoding] ?: @"";
         NSString *windowLabelString = [[NSString alloc] initWithBytes:window_label length:window_label_len encoding:NSUTF8StringEncoding] ?: @"main";
-        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) dockVisible:(dock_visible != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
+        NativeSdkAppKitHost *host = [[NativeSdkAppKitHost alloc] initWithAppName:appNameString displayName:displayNameString version:versionString aboutDescription:aboutDescriptionString hasWebContent:(has_web_content != 0) webViewInspection:(webview_inspection != 0) dockVisible:(dock_visible != 0) windowTitle:windowTitleString bundleIdentifier:bundleIdString iconPath:iconPathString windowLabel:windowLabelString x:x y:y width:width height:height restoreFrame:(restore_frame != 0) initialPlacement:initial_placement restorePolicy:restore_policy resizable:(resizable != 0) titlebarStyle:titlebar_style showPolicy:show_policy windowFlags:window_flags];
         return (__bridge_retained native_sdk_appkit_host_t *)host;
     }
 }
@@ -13328,6 +13492,22 @@ int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t wind
     NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
     if (!object.windows[@(window_id)]) return 0;
     [object focusWindowWithId:window_id];
+    return 1;
+}
+
+int native_sdk_appkit_set_window_color_scheme(native_sdk_appkit_host_t *host, uint64_t window_id, int color_scheme) {
+    NativeSdkAppKitHost *object = (__bridge NativeSdkAppKitHost *)host;
+    NSWindow *window = object.windows[@(window_id)];
+    if (!window || color_scheme < 0 || color_scheme > 2) return 0;
+    NSAppearance *appearance = color_scheme == 0 ? nil : [NSAppearance appearanceNamed:
+        color_scheme == 2 ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+    if (window.appearance == appearance || [window.appearance isEqual:appearance]) return 1;
+    // Keep NSApp's effective appearance untouched: the runtime must still
+    // observe real OS changes while the app forces a window's scheme.
+    window.appearance = appearance;
+    // The canvas present owns backgroundColor (including transparent clear
+    // colors). Changing appearance must not overwrite that retained color.
+    [window.contentView setNeedsDisplay:YES];
     return 1;
 }
 

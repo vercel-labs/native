@@ -1,8 +1,13 @@
+const authorization = @import("authorization_policy.zig");
 const std = @import("std");
 const credentials_store = @import("credentials_store.zig");
 const json = @import("json");
 const validation = @import("validation.zig");
+const admission = @import("system_admission_policy.zig");
+const command_policy = @import("command_policy.zig");
+const status_validation = @import("status_validation.zig");
 const bridge_payload = @import("bridge_payload.zig");
+const bridge_descriptors = @import("bridge_descriptor_policy.zig");
 const bridge_responses = @import("bridge_responses.zig");
 const bridge = @import("../bridge/root.zig");
 const platform = @import("../platform/root.zig");
@@ -10,20 +15,12 @@ const security = @import("../security/root.zig");
 
 const jsonStringField = bridge_payload.jsonStringField;
 const jsonBoolField = bridge_payload.jsonBoolField;
-const platformFeatureFromString = bridge_payload.platformFeatureFromString;
+const platformFeatureFromString = bridge_descriptors.platformFeatureFromString;
 const writeBoolJson = bridge_responses.writeBoolJson;
 const writeTrueJson = bridge_responses.writeTrueJson;
 
-const validateClipboardData = validation.validateClipboardData;
-const validateClipboardMimeType = validation.validateClipboardMimeType;
 const validateCredential = validation.validateCredential;
 const validateCredentialKey = validation.validateCredentialKey;
-const validateMessageDialogOptions = validation.validateMessageDialogOptions;
-const validateNotificationOptions = validation.validateNotificationOptions;
-const validateOpenDialogOptions = validation.validateOpenDialogOptions;
-const validateRecentDocumentPath = validation.validateRecentDocumentPath;
-const validateRevealPath = validation.validateRevealPath;
-const validateSaveDialogOptions = validation.validateSaveDialogOptions;
 const validateTrayMenuItems = validation.validateTrayMenuItems;
 const validateTrayOptions = validation.validateTrayOptions;
 const validateTrayShell = validation.validateTrayShell;
@@ -45,12 +42,12 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn readClipboardData(self: *Runtime, mime_type: []const u8, buffer: []u8) anyerror![]const u8 {
-            try validateClipboardMimeType(mime_type);
+            try admission.mime(self.system_admission_policy, mime_type);
             return self.options.platform.services.readClipboardData(mime_type, buffer);
         }
 
         pub fn writeClipboardData(self: *Runtime, data: platform.ClipboardData) anyerror!void {
-            try validateClipboardData(data);
+            try admission.clipboard(self.system_admission_policy, data);
             try self.options.platform.services.writeClipboardData(data);
         }
 
@@ -60,12 +57,12 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn revealPath(self: *Runtime, path: []const u8) anyerror!void {
-            try validateRevealPath(path);
+            try admission.reveal(self.system_admission_policy, path);
             try self.options.platform.services.revealPath(path);
         }
 
         pub fn addRecentDocument(self: *Runtime, path: []const u8) anyerror!void {
-            try validateRecentDocumentPath(path);
+            try admission.recent(self.system_admission_policy, path);
             try self.options.platform.services.addRecentDocument(path);
         }
 
@@ -74,22 +71,22 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn showOpenDialog(self: *Runtime, options: platform.OpenDialogOptions, buffer: []u8) anyerror!platform.OpenDialogResult {
-            try validateOpenDialogOptions(options, buffer);
+            try admission.open(self.system_admission_policy, options, buffer);
             return self.options.platform.services.showOpenDialog(options, buffer);
         }
 
         pub fn showSaveDialog(self: *Runtime, options: platform.SaveDialogOptions, buffer: []u8) anyerror!?[]const u8 {
-            try validateSaveDialogOptions(options, buffer);
+            try admission.save(self.system_admission_policy, options, buffer);
             return self.options.platform.services.showSaveDialog(options, buffer);
         }
 
         pub fn showMessageDialog(self: *Runtime, options: platform.MessageDialogOptions) anyerror!platform.MessageDialogResult {
-            try validateMessageDialogOptions(options);
+            try admission.message(self.system_admission_policy, options);
             return self.options.platform.services.showMessageDialog(options);
         }
 
         pub fn showNotification(self: *Runtime, options: platform.NotificationOptions) anyerror!void {
-            try validateNotificationOptions(options);
+            try admission.notification(self.system_admission_policy, options);
             try self.options.platform.services.showNotification(options);
         }
 
@@ -142,9 +139,28 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             return self.options.platform.services.formatLocalTime(timestamp_ms, style, buffer);
         }
 
+        /// Post a key chord to the focused app; requires the `keyboard_input` manifest permission.
+        pub fn sendKeyChord(self: *Runtime, chord: platform.KeyChord) anyerror!void {
+            try requireKeyboardInput(self);
+            try self.options.platform.services.sendKeyChord(chord);
+        }
+
+        /// Report the OS grant for synthesized input; `prompt` asks the OS to show its grant prompt.
+        pub fn keyboardInputAccess(self: *Runtime, prompt: bool) anyerror!platform.KeyboardInputAccess {
+            try requireKeyboardInput(self);
+            return self.options.platform.services.keyboardInputAccess(prompt);
+        }
+
+        fn requireKeyboardInput(self: *Runtime) error{ UnsupportedService, PermissionDenied }!void {
+            if (self.options.platform.services.send_key_chord_fn == null) return error.UnsupportedService;
+            if (!authorization.hasPermission(self.authorization_policy, self.options.security.permissions, security.permission_keyboard_input)) {
+                return error.PermissionDenied;
+            }
+        }
+
         pub fn createStatusItem(self: *Runtime, status_item_id: platform.StatusItemId, options: platform.TrayOptions) anyerror!void {
-            try validation.validateStatusItemId(status_item_id);
-            try validateTrayOptions(options);
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.options(policy, options) else try validateTrayOptions(options);
             const status_item = try statusItemSlot(self, status_item_id);
             const was_active = status_item.active;
             try self.options.platform.services.createStatusItem(status_item_id, options);
@@ -162,16 +178,16 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn updateStatusItemShell(self: *Runtime, status_item_id: platform.StatusItemId, shell: platform.TrayShell) anyerror!void {
-            try validation.validateStatusItemId(status_item_id);
-            try validateTrayShell(shell);
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.shell(policy, shell) else try validateTrayShell(shell);
             const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
             try self.options.platform.services.updateStatusItemShell(status_item_id, shell);
             status_item.visible = shell.visible;
         }
 
         pub fn updateStatusItemMenu(self: *Runtime, status_item_id: platform.StatusItemId, items: []const platform.TrayMenuItem) anyerror!void {
-            try validation.validateStatusItemId(status_item_id);
-            try validateTrayMenuItems(items);
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.menu(policy, items) else try validateTrayMenuItems(items);
             const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
             try self.options.platform.services.updateStatusItemMenu(status_item_id, items);
             try storeTrayItems(status_item, items);
@@ -186,8 +202,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         /// bar rides this seam). Platforms without the
         /// title seam report `UnsupportedService`; the menu keeps working.
         pub fn updateStatusItemTitle(self: *Runtime, status_item_id: platform.StatusItemId, title: []const u8) anyerror!void {
-            try validation.validateStatusItemId(status_item_id);
-            try validateTrayTitle(title);
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.title(policy, title) else try validateTrayTitle(title);
             const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
             try self.options.platform.services.updateStatusItemTitle(status_item_id, title);
             status_item.title = try copyInto(&status_item.title_storage, title);
@@ -198,8 +214,8 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn updateStatusItemPresentation(self: *Runtime, status_item_id: platform.StatusItemId, presentation: platform.TrayPresentation) anyerror!void {
-            try validation.validateStatusItemId(status_item_id);
-            try validation.validateTrayPresentation(presentation);
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.presentation(policy, presentation) else try validation.validateTrayPresentation(presentation);
             const status_item = findStatusItem(self, status_item_id) orelse return error.InvalidTrayOptions;
             try self.options.platform.services.updateStatusItemPresentation(status_item_id, presentation);
             status_item.title = try copyInto(&status_item.title_storage, presentation.title);
@@ -210,7 +226,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         }
 
         pub fn removeStatusItem(self: *Runtime, status_item_id: platform.StatusItemId) anyerror!void {
-            try validation.validateStatusItemId(status_item_id);
+            if (self.command_policy) |policy| try status_validation.identity(policy, status_item_id) else try validation.validateStatusItemId(status_item_id);
             const status_item = findStatusItem(self, status_item_id) orelse return;
             try self.options.platform.services.removeStatusItem(status_item_id);
             status_item.* = .{};
@@ -227,6 +243,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
 
         pub fn statusItemMenuItemExists(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
             const status_item = findStatusItemConst(self, status_item_id) orelse return false;
+            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id).exists;
             for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id) return true;
                 if (item.segmented) |segmented| {
@@ -241,6 +258,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
         /// platform action, so the automation seam must reject them too.
         pub fn statusItemMenuItemActionable(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) bool {
             const status_item = findStatusItemConst(self, status_item_id) orelse return false;
+            if (self.command_policy) |policy| return command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id).actionable;
             for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id) return !item.separator and item.enabled and (item.role == .command or item.role == .agent);
                 if (item.segmented) |segmented| {
@@ -258,6 +276,11 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
 
         pub fn statusItemCommandNameForItem(self: *const Runtime, status_item_id: platform.StatusItemId, item_id: platform.TrayItemId) []const u8 {
             const status_item = findStatusItemConst(self, status_item_id) orelse return "tray.action";
+            if (self.command_policy) |policy| {
+                const selection = command_policy.menu(policy, status_item.items[0..status_item.item_count], item_id);
+                const row = selection.row orelse return "tray.action";
+                return if (selection.option) |option| status_item.items[row].segmented.?.options[option].command else status_item.items[row].command;
+            }
             for (status_item.items[0..status_item.item_count]) |item| {
                 if (item.id == item_id and item.command.len > 0) return item.command;
                 if (item.segmented) |segmented| {
@@ -277,7 +300,7 @@ pub fn RuntimeSystemServices(comptime Runtime: type) type {
             var scratch: [64]u8 = undefined;
             var storage = json.StringStorage.init(&scratch);
             const feature_name = jsonStringField(payload, "feature", &storage) orelse jsonStringField(payload, "name", &storage) orelse return error.InvalidPlatformFeature;
-            const feature = platformFeatureFromString(feature_name) orelse return error.InvalidPlatformFeature;
+            const feature = platformFeatureFromString(self.bridge_descriptor_policy, feature_name) orelse return error.InvalidPlatformFeature;
             return writeBoolJson(self.supports(feature), output);
         }
 
@@ -547,6 +570,10 @@ fn storeTrayItems(status_item: anytype, items: []const platform.TrayMenuItem) !v
 }
 
 fn findStatusItem(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf(&self.status_items[0]) {
+    if (self.command_policy) |policy| {
+        const selection = command_policy.slot(policy, &self.status_items, status_item_id, false, self.status_item_count);
+        return if (selection.index) |index| &self.status_items[index] else null;
+    }
     for (&self.status_items) |*status_item| {
         if (status_item.active and status_item.id == status_item_id) return status_item;
     }
@@ -554,6 +581,10 @@ fn findStatusItem(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf
 }
 
 fn findStatusItemConst(self: anytype, status_item_id: platform.StatusItemId) ?@TypeOf(&self.status_items[0]) {
+    if (self.command_policy) |policy| {
+        const selection = command_policy.slot(policy, &self.status_items, status_item_id, false, self.status_item_count);
+        return if (selection.index) |index| &self.status_items[index] else null;
+    }
     for (&self.status_items) |*status_item| {
         if (status_item.active and status_item.id == status_item_id) return status_item;
     }
@@ -561,6 +592,10 @@ fn findStatusItemConst(self: anytype, status_item_id: platform.StatusItemId) ?@T
 }
 
 fn statusItemSlot(self: anytype, status_item_id: platform.StatusItemId) !@TypeOf(&self.status_items[0]) {
+    if (self.command_policy) |policy| {
+        const selection = command_policy.slot(policy, &self.status_items, status_item_id, true, self.status_item_count);
+        return if (selection.index) |index| &self.status_items[index] else error.InvalidTrayOptions;
+    }
     if (findStatusItem(self, status_item_id)) |status_item| return status_item;
     if (self.status_item_count >= self.status_items.len) return error.InvalidTrayOptions;
     for (&self.status_items) |*status_item| {
@@ -570,13 +605,7 @@ fn statusItemSlot(self: anytype, status_item_id: platform.StatusItemId) !@TypeOf
 }
 
 fn validateExternalUrl(self: anytype, url: []const u8) !void {
-    if (url.len == 0) return error.InvalidExternalUrl;
-    if (url.len > platform.max_external_url_bytes) return error.ExternalUrlTooLarge;
-    if (!std.mem.startsWith(u8, url, "https://") and !std.mem.startsWith(u8, url, "http://")) return error.InvalidExternalUrl;
-    for (url) |ch| {
-        if (ch <= 0x20 or ch == 0x7f) return error.InvalidExternalUrl;
-    }
-    if (!security.allowsExternalUrl(self.options.security.navigation.external_links, url)) return error.NavigationDenied;
+    return authorization.validateExternalUrl(self.authorization_policy, self.options.security.navigation.external_links, url);
 }
 
 fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {

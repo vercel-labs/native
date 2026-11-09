@@ -1,0 +1,107 @@
+---
+title: "Code"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `code` to display source text with theme-aware syntax highlighting. It has no background, border, radius, shadow, or padding; add a container to style the surface. Code is selectable and read-only by default. Set `editable` and `on-input` to enable the multiline editor. Code wraps by default; use `wrap="false"` for horizontal scrolling and `line-numbers` to show logical line numbers.
+
+HTML-family highlighting supports HTML, XML, SVG, JSX, and TSX tags, attributes, strings, comments, numbers, and JavaScript or TypeScript expressions.
+
+<ComponentPreview name="code" alt="A bare JSX code sample with syntax highlighting and line numbers" caption="Bare highlighted content with JSX tags, attributes, strings, expressions, and an unwrapped horizontal viewport" />
+
+## Markup
+
+```html
+<code
+  source="{component_source}"
+  language="tsx"
+  line-numbers
+  wrap="false"
+  width="480"
+  label="Accordion example"
+/>
+```
+
+`source` is required and must be one `{binding}` producing text. `language` is a literal lexer name; unknown names are validation errors. Line numbers are off by default and remain decorative, so selecting and copying a numbered block returns only the source text. Numbered presentation is limited to 128 logical lines; longer sources keep all code and omit the gutter.
+
+## Added and removed lines
+
+Diff presentation follows Geist Code Block in the default and Geist theme packs, across light and dark appearances. `added-lines` and `removed-lines` apply full-width green/red washes and renderer-owned `+`/`-` markers while the underlying source, syntax highlighting, selection, and copied text stay unchanged.
+
+<ComponentPreview name="code-diff" alt="A JavaScript configuration diff with green added and red removed lines" caption="Geist-style added and removed lines over ordinary JavaScript highlighting" />
+
+```html
+<code
+  source="{migration_source}"
+  language="javascript"
+  line-numbers
+  added-lines="5"
+  removed-lines="2-4"
+  wrap="false"
+  width="480"
+  label="Configuration migration"
+/>
+```
+
+Line specs are one-based comma lists and inclusive ranges: `added-lines="5, 9-11"`. They annotate clean source—the `+` and `-` are decoration, not bytes callers must splice into the model. This keeps the selected/copied result usable and lets `language` continue highlighting the real grammar. A line cannot be both added and removed. Diff metadata is bounded to lines 1–128; read-only sources longer than 128 lines keep every source byte and omit the diff treatment.
+
+For editable code, apply each `TextInputEvent` to the same model-owned buffer that supplies `source`:
+
+```html
+<code
+  source="{document}"
+  language="tsx"
+  editable
+  on-input="edit_document"
+  line-numbers
+  wrap="false"
+  grow="1"
+  label="Document editor"
+/>
+```
+
+The editor path includes multiline selection, caret navigation, IME, clipboard, and undo/redo behavior. It does not add textarea background, border, focus ring, or padding.
+
+Surface styling belongs to a wrapper:
+
+```html
+<panel padding="12">
+  <code source="{component_source}" language="tsx" />
+</panel>
+```
+
+## Programmatic construction (Zig)
+
+```zig
+ui.code(.{
+    .language = .javascript,
+    .line_numbers = true,
+    .added_lines = &.{5},
+    .removed_lines = &.{ 2, 3, 4 },
+    .wrap = false,
+    .width = 480,
+    .semantics = .{ .label = "Configuration migration" },
+}, model.migration_source)
+```
+
+The editable path uses the same `added_lines` and `removed_lines` options when an editor needs annotations; keep those line numbers synchronized as edits change the document.
+
+The Zig builder composes the same way when chrome is wanted:
+
+```zig
+ui.panel(.{ .padding = 12 }, .{
+    ui.code(.{ .language = .html }, model.component_source),
+})
+```
+
+The public lexer model is `native_sdk.canvas.code`. `languageFromName` resolves markup spellings, `languageFromFence` reads a Markdown info string, and `highlight` produces the same bounded, theme-colored span runs both renderers use.
+
+## Languages
+
+Zig; JavaScript and TypeScript; JSX and TSX; JSON; YAML; shell; Python; Rust; C, C++, C#, Java, Kotlin, and Swift; Go; HTML, XML, and SVG; CSS, SCSS, and Less; SQL; and Markdown. An omitted language renders plain monospace.
+
+## Attributes
+
+<AttrTable element="code" attrs={["source", "language", "editable", "on-input", "line-numbers", "added-lines", "removed-lines", "wrap", "width", "height", "min-width", "grow", "key", "global-key", "label"]} />

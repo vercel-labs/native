@@ -23,8 +23,8 @@
 //!   payload-descriptor kind, a number class) is refused whole-file:
 //!   half-understanding a message arm is how wrong dispatch ships.
 //!
-//! std-only: the generator is a build-time tool and the validation tests
-//! run in the plain unit-test suite.
+//! Native owns JSON syntax and exact integer decoding. Schema admission is compiled from
+//! TypeScript and tested with the same host archive the generator uses.
 
 const std = @import("std");
 
@@ -34,7 +34,7 @@ pub const supported_format: i64 = 1;
 /// The command-wire vocabulary generation the SDK's bridge speaks
 /// (rt.zig `cmd_format_version`). A sidecar declaring a different
 /// generation is refused at generate time.
-pub const supported_wire_version: i64 = 7;
+pub const supported_wire_version: i64 = 10;
 
 /// The C-ABI generation of the core entry points this generator binds
 /// (core_abi.zig `abi_version`).
@@ -59,6 +59,32 @@ pub const TypeRef = union(enum) {
     value: []const u8,
     enum_ref: []const u8,
     union_ref: []const u8,
+
+    pub fn jsonStringify(self: TypeRef, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("kind");
+        try json.write(switch (self) {
+            .enum_ref => "enum",
+            .union_ref => "union",
+            else => @tagName(self),
+        });
+        switch (self) {
+            .optional => |inner| {
+                try json.objectField("inner");
+                try json.write(inner.*);
+            },
+            .slice => |elem| {
+                try json.objectField("elem");
+                try json.write(elem.*);
+            },
+            .node, .value, .enum_ref, .union_ref => |name| {
+                try json.objectField("name");
+                try json.write(name);
+            },
+            else => {},
+        }
+        try json.endObject();
+    }
 };
 
 pub const Field = struct {
@@ -125,6 +151,36 @@ pub const Payload = union(enum) {
     union_ref: []const u8,
     enum_ref: []const u8,
     scalar: TypeRef,
+
+    pub fn jsonStringify(self: Payload, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("kind");
+        try json.write(@tagName(self));
+        switch (self) {
+            .number => |class| {
+                try json.objectField("class");
+                try json.write(@tagName(class));
+            },
+            .number_bytes => |desc| {
+                try json.objectField("number_field");
+                try json.write(desc.number_field);
+                try json.objectField("number_class");
+                try json.write(@tagName(desc.number_class));
+                try json.objectField("bytes_field");
+                try json.write(desc.bytes_field);
+            },
+            .record, .union_ref, .enum_ref => |name| {
+                try json.objectField("name");
+                try json.write(name);
+            },
+            .scalar => |ref| {
+                try json.objectField("type");
+                try json.write(ref);
+            },
+            else => {},
+        }
+        try json.endObject();
+    }
 };
 
 pub const MsgArm = struct {
@@ -155,6 +211,7 @@ pub const EnvMsg = struct {
 
 pub const Channels = struct {
     command_msg: bool,
+    command_bytes: bool = false,
     frame_msg: bool,
     key_msg: bool,
     pinch_msg: bool,
@@ -224,7 +281,7 @@ pub const Sidecar = struct {
 /// init, collect, result reset), then the program's entry-point map
 /// (core_abi.zig binds the matching extern signatures). The five
 /// conditional channel-entry suffixes follow, present exactly when the
-/// matching channel is wired.
+/// matching channel is wired, then the optional compiled view extensions.
 pub const unconditional_exports = [_][]const u8{
     "abi_version",
     "build_id",
@@ -253,9 +310,38 @@ pub const unconditional_exports = [_][]const u8{
 pub const conditional_exports = [_][]const u8{
     "command_msg",
     "frame_msg",
+    "frame_msg_ns",
     "key_msg",
     "pinch_msg",
     "drop_msg",
+    // Native SDK's opt-in compiled-view extension, after function channels.
+    "native_view",
+    "native_window_view",
+    "native_media_view",
+    "native_media_window_view",
+    "native_radio_policy",
+    "native_tabs_policy",
+    "native_tree_policy",
+    "native_list_policy",
+    "native_menu_policy",
+    "native_toggle_policy",
+    "native_accordion_policy",
+    "native_slider_policy",
+    "native_split_policy",
+    "native_scroll_policy",
+    "native_resizable_policy",
+    "native_text_policy",
+    "native_timer_policy",
+    "native_db_policy",
+    "native_effect_policy",
+    "native_stream_policy",
+    "native_window_policy",
+    "native_theme_policy",
+    "native_status_policy",
+    "native_virtual_requests",
+    "native_virtual_view",
+    "native_dev_view_prepare",
+    "native_dev_view_reset",
 };
 
 // ------------------------------------------------------------ reading
@@ -325,666 +411,52 @@ pub const Diagnostics = struct {
 /// diagnostics carry every teaching; the caller prints them and stops.
 /// All returned memory lives in the caller's arena.
 pub fn read(arena: std.mem.Allocator, source: []const u8, diags: *Diagnostics) error{ Refused, OutOfMemory }!Sidecar {
-    const root = std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{}) catch |err| switch (err) {
+    _ = std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{}) catch |err| switch (err) {
         // Memory pressure is not malformed input; keep the contract's
         // error meanings honest.
         error.OutOfMemory => return error.OutOfMemory,
         else => return diags.fail("", "the sidecar is not valid JSON — it should be the core.contract.json a core-mode compile writes beside the compiled object", .{}),
     };
-    var mapper = Mapper{ .arena = arena, .diags = diags };
-    const sidecar = try mapper.mapRoot(root);
+    const result = try @import("contract_intake.zig").evaluate(arena, source, "core");
+    for (result.diagnostics) |diagnostic| switch (diagnostic.severity) {
+        .@"error" => diags.flag(diagnostic.path, "{s}", .{diagnostic.message}),
+        .warning => diags.warn(diagnostic.path, "{s}", .{diagnostic.message}),
+    };
+    if (diags.hasErrors()) return error.Refused;
+    var normalized = std.json.parseFromSliceLeaky(std.json.Value, arena, result.normalized, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => @panic("corewire: malformed normalized core contract"),
+    };
+    // Hashes cross the compiled boundary as validated hexadecimal strings.
+    // Decode them exactly into native u64, never through a floating number.
+    for ([_][]const u8{ "source_hash", "build_id", "model_fingerprint" }) |name| {
+        const value = normalized.object.getPtr(name).?;
+        const hash = std.fmt.parseInt(u64, value.string, 16) catch @panic("corewire: invalid normalized hash");
+        value.* = .{ .number_string = std.fmt.allocPrint(arena, "{d}", .{hash}) catch return error.OutOfMemory };
+    }
+    const sidecar = std.json.parseFromValueLeaky(Sidecar, arena, normalized, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => @panic("corewire: malformed normalized core shape"),
+    };
     try validate(arena, sidecar, diags);
     if (diags.hasErrors()) return error.Refused;
     return sidecar;
 }
 
-// ------------------------------------------------- JSON -> schema map
-
-const Mapper = struct {
-    arena: std.mem.Allocator,
-    diags: *Diagnostics,
-
-    fn path(self: *Mapper, comptime fmt: []const u8, args: anytype) []const u8 {
-        return std.fmt.allocPrint(self.arena, fmt, args) catch "";
-    }
-
-    fn object(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!std.json.ObjectMap {
-        return switch (value) {
-            .object => |o| o,
-            else => self.diags.fail(at, "expected an object, found {s}", .{jsonKindName(value)}),
-        };
-    }
-
-    fn array(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!std.json.Array {
-        return switch (value) {
-            .array => |a| a,
-            else => self.diags.fail(at, "expected an array, found {s}", .{jsonKindName(value)}),
-        };
-    }
-
-    fn string(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }![]const u8 {
-        return switch (value) {
-            .string => |s| s,
-            else => self.diags.fail(at, "expected a string, found {s}", .{jsonKindName(value)}),
-        };
-    }
-
-    /// The ABI prefix rides straight into exported symbol spellings
-    /// (`@extern` names, linker entries), so it must be a symbol-safe
-    /// spelling: ASCII letters, digits, and underscores, not starting
-    /// with a digit. Anything else (an embedded NUL, unicode, spaces)
-    /// cannot be represented faithfully as an object-file symbol name.
-    fn symbolPrefix(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }![]const u8 {
-        const text = try self.nonEmptyString(value, at);
-        for (text, 0..) |byte, index| {
-            const ok = byte == '_' or std.ascii.isAlphabetic(byte) or (index > 0 and std.ascii.isDigit(byte));
-            if (!ok) {
-                return self.diags.fail(at, "byte 0x{x:0>2} at offset {d} cannot appear in a linker symbol name — the prefix is spelled verbatim into every exported symbol; use ASCII letters, digits, and underscores, not starting with a digit", .{ byte, index });
-            }
-        }
-        return text;
-    }
-
-    fn nonEmptyString(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }![]const u8 {
-        const text = try self.string(value, at);
-        if (text.len == 0) return self.diags.fail(at, "expected a non-empty string", .{});
-        return text;
-    }
-
-    fn boolean(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!bool {
-        return switch (value) {
-            .bool => |flag| flag,
-            else => self.diags.fail(at, "expected true or false, found {s}", .{jsonKindName(value)}),
-        };
-    }
-
-    fn integer(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!i64 {
-        return switch (value) {
-            .integer => |int| int,
-            else => self.diags.fail(at, "expected an integer, found {s}", .{jsonKindName(value)}),
-        };
-    }
-
-    /// 64-bit hashes ride as strings of exactly 16 lowercase hex digits
-    /// (JSON interchange cannot carry a u64 exactly) — V2.
-    fn hash64(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!u64 {
-        const text = switch (value) {
-            .string => |s| s,
-            .integer, .float => return self.diags.fail(at, "64-bit hashes are encoded as strings of exactly 16 lowercase hex digits, never JSON numbers (JSON cannot carry a u64 exactly)", .{}),
-            else => return self.diags.fail(at, "expected a 16-lowercase-hex-digit string, found {s}", .{jsonKindName(value)}),
-        };
-        if (text.len != 16) {
-            return self.diags.fail(at, "expected exactly 16 lowercase hex digits, found {d} characters (\"{s}\")", .{ text.len, text });
-        }
-        for (text) |char| {
-            const ok = (char >= '0' and char <= '9') or (char >= 'a' and char <= 'f');
-            if (!ok) return self.diags.fail(at, "expected lowercase hex digits only, found '{c}' in \"{s}\"", .{ char, text });
-        }
-        return std.fmt.parseInt(u64, text, 16) catch unreachable;
-    }
-
-    /// An OPTIONAL nonempty-string member: null when absent (additive
-    /// facts older emitters do not write), refused when present but not
-    /// a nonempty string.
-    fn optionalString(self: *Mapper, map: std.json.ObjectMap, name: []const u8, at: []const u8) error{ Refused, OutOfMemory }!?[]const u8 {
-        const value = map.get(name) orelse return null;
-        return try self.nonEmptyString(value, self.path("{s}.{s}", .{ at, name }));
-    }
-
-    /// An additive boolean member with its compatibility default.
-    fn optionalBoolean(self: *Mapper, map: std.json.ObjectMap, name: []const u8, at: []const u8, default: bool) error{ Refused, OutOfMemory }!bool {
-        const value = map.get(name) orelse return default;
-        return try self.boolean(value, self.path("{s}.{s}", .{ at, name }));
-    }
-
-    fn stringList(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }![]const []const u8 {
-        const items = try self.array(value, at);
-        const out = try self.arena.alloc([]const u8, items.items.len);
-        for (items.items, 0..) |item, index| {
-            out[index] = try self.nonEmptyString(item, self.path("{s}[{d}]", .{ at, index }));
-        }
-        return out;
-    }
-
-    /// Fetch a required member; warn about (and skip) unknown members —
-    /// the additive forward-compat rule.
-    const Members = struct {
-        mapper: *Mapper,
-        map: std.json.ObjectMap,
-        at: []const u8,
-        known: []const []const u8,
-
-        fn get(self: *const Members, name: []const u8) error{ Refused, OutOfMemory }!std.json.Value {
-            return self.map.get(name) orelse self.mapper.diags.fail(
-                self.mapper.path("{s}{s}{s}", .{ self.at, if (self.at.len > 0) "." else "", name }),
-                "required field missing",
-                .{},
-            );
-        }
-
-        fn warnUnknown(self: *const Members) void {
-            var it = self.map.iterator();
-            outer: while (it.next()) |entry| {
-                for (self.known) |name| {
-                    if (std.mem.eql(u8, entry.key_ptr.*, name)) continue :outer;
-                }
-                self.mapper.diags.warn(
-                    self.mapper.path("{s}{s}{s}", .{ self.at, if (self.at.len > 0) "." else "", entry.key_ptr.* }),
-                    "unknown field ignored (an emitter newer than this reader may emit additive facts)",
-                    .{},
-                );
-            }
-        }
-    };
-
-    fn members(self: *Mapper, value: std.json.Value, at: []const u8, known: []const []const u8) error{ Refused, OutOfMemory }!Members {
-        return .{ .mapper = self, .map = try self.object(value, at), .at = at, .known = known };
-    }
-
-    fn mapRoot(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Sidecar {
-        const top = try self.members(value, "", &.{
-            "format",            "wire_version",        "abi_version",       "compiler_version", "entry",
-            "source_hash",       "build_id",            "model_fingerprint", "types",            "model",
-            "model_helpers",     "model_unbound",       "msg",               "init_returns_cmd", "update_returns_cmd",
-            "init_returns_bare", "update_returns_bare", "has_subscriptions", "has_migrate",      "channels",
-            "abi",               "integer_slots",       "deterministic",     "async_free",
-        });
-        top.warnUnknown();
-
-        // The format fence comes first: nothing else in an unknown
-        // generation may be half-read.
-        const format = try self.integer(try top.get("format"), "format");
-        if (format != supported_format) {
-            return self.diags.fail("format", "this reader implements sidecar format {d}, found {d} — upgrade the SDK tooling or pin the compiler release that matches it", .{ supported_format, format });
-        }
-
-        const abi = try self.mapAbi(try top.get("abi"));
-        const channels = try self.mapChannels(try top.get("channels"), abiHasExport(abi, "drop_msg"));
-        return .{
-            .format = format,
-            .wire_version = try self.integer(try top.get("wire_version"), "wire_version"),
-            .abi_version = try self.integer(try top.get("abi_version"), "abi_version"),
-            .compiler_version = try self.nonEmptyString(try top.get("compiler_version"), "compiler_version"),
-            .entry = try self.nonEmptyString(try top.get("entry"), "entry"),
-            .source_hash = try self.hash64(try top.get("source_hash"), "source_hash"),
-            .build_id = try self.hash64(try top.get("build_id"), "build_id"),
-            .model_fingerprint = try self.hash64(try top.get("model_fingerprint"), "model_fingerprint"),
-            .types = try self.mapTypes(try top.get("types")),
-            .model = try self.nonEmptyString(try top.get("model"), "model"),
-            .model_helpers = try self.mapHelpers(try top.get("model_helpers")),
-            .model_unbound = try self.stringList(try top.get("model_unbound"), "model_unbound"),
-            .msg = try self.mapMsg(try top.get("msg")),
-            .init_returns_cmd = try self.boolean(try top.get("init_returns_cmd"), "init_returns_cmd"),
-            .update_returns_cmd = try self.boolean(try top.get("update_returns_cmd"), "update_returns_cmd"),
-            .init_returns_bare = try self.optionalBoolean(top.map, "init_returns_bare", "", false),
-            .update_returns_bare = try self.optionalBoolean(top.map, "update_returns_bare", "", false),
-            .has_subscriptions = try self.boolean(try top.get("has_subscriptions"), "has_subscriptions"),
-            .has_migrate = try self.boolean(try top.get("has_migrate"), "has_migrate"),
-            .channels = channels,
-            .abi = abi,
-            .integer_slots = try self.mapIntegerSlots(try top.get("integer_slots")),
-            .deterministic = try self.boolean(try top.get("deterministic"), "deterministic"),
-            .async_free = try self.boolean(try top.get("async_free"), "async_free"),
-        };
-    }
-
-    fn mapTypes(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Types {
-        const table = try self.members(value, "types", &.{ "structs", "enums", "unions" });
-        table.warnUnknown();
-        return .{
-            .structs = try self.mapStructs(try table.get("structs")),
-            .enums = try self.mapEnums(try table.get("enums")),
-            .unions = try self.mapUnions(try table.get("unions")),
-        };
-    }
-
-    fn mapStructs(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }![]const Struct {
-        const items = try self.array(value, "types.structs");
-        const out = try self.arena.alloc(Struct, items.items.len);
-        for (items.items, 0..) |item, index| {
-            const at = self.path("types.structs[{d}]", .{index});
-            // "synthesized" is an additive marker some emitters place on
-            // records they named themselves. The current projection uses
-            // `origin` as the authoritative authored-vs-synthesized fact and
-            // retains the name-pattern fallback for old null-origin sidecars,
-            // so this older marker remains accepted and unused.
-            const entry = try self.members(item, at, &.{ "name", "origin", "exported", "synthesized", "fields" });
-            entry.warnUnknown();
-            const fields_value = try self.array(try entry.get("fields"), self.path("{s}.fields", .{at}));
-            const fields = try self.arena.alloc(Field, fields_value.items.len);
-            for (fields_value.items, 0..) |field_value, field_index| {
-                const field_at = self.path("{s}.fields[{d}]", .{ at, field_index });
-                const field = try self.members(field_value, field_at, &.{ "name", "type" });
-                field.warnUnknown();
-                fields[field_index] = .{
-                    .name = try self.nonEmptyString(try field.get("name"), self.path("{s}.name", .{field_at})),
-                    .type = try self.mapTypeRef(try field.get("type"), self.path("{s}.type", .{field_at})),
-                };
-            }
-            out[index] = .{
-                .name = try self.nonEmptyString(try entry.get("name"), self.path("{s}.name", .{at})),
-                .origin = try self.optionalString(entry.map, "origin", at),
-                .exported = try self.optionalBoolean(entry.map, "exported", at, true),
-                .fields = fields,
-            };
-        }
-        return out;
-    }
-
-    fn mapEnums(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }![]const Enum {
-        const items = try self.array(value, "types.enums");
-        const out = try self.arena.alloc(Enum, items.items.len);
-        for (items.items, 0..) |item, index| {
-            const at = self.path("types.enums[{d}]", .{index});
-            const entry = try self.members(item, at, &.{ "name", "origin", "exported", "members" });
-            entry.warnUnknown();
-            out[index] = .{
-                .name = try self.nonEmptyString(try entry.get("name"), self.path("{s}.name", .{at})),
-                .origin = try self.optionalString(entry.map, "origin", at),
-                .exported = try self.optionalBoolean(entry.map, "exported", at, true),
-                .members = try self.stringList(try entry.get("members"), self.path("{s}.members", .{at})),
-            };
-        }
-        return out;
-    }
-
-    fn mapUnions(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }![]const Union {
-        const items = try self.array(value, "types.unions");
-        const out = try self.arena.alloc(Union, items.items.len);
-        for (items.items, 0..) |item, index| {
-            const at = self.path("types.unions[{d}]", .{index});
-            const entry = try self.members(item, at, &.{ "name", "origin", "exported", "arms" });
-            entry.warnUnknown();
-            const arms_value = try self.array(try entry.get("arms"), self.path("{s}.arms", .{at}));
-            const arms = try self.arena.alloc(UnionArm, arms_value.items.len);
-            for (arms_value.items, 0..) |arm_value, arm_index| {
-                const arm_at = self.path("{s}.arms[{d}]", .{ at, arm_index });
-                const arm = try self.members(arm_value, arm_at, &.{ "name", "member", "payload" });
-                arm.warnUnknown();
-                arms[arm_index] = .{
-                    .name = try self.nonEmptyString(try arm.get("name"), self.path("{s}.name", .{arm_at})),
-                    .member = try self.optionalString(arm.map, "member", arm_at),
-                    .payload = try self.mapTypeRef(try arm.get("payload"), self.path("{s}.payload", .{arm_at})),
-                };
-            }
-            out[index] = .{
-                .name = try self.nonEmptyString(try entry.get("name"), self.path("{s}.name", .{at})),
-                .origin = try self.optionalString(entry.map, "origin", at),
-                .exported = try self.optionalBoolean(entry.map, "exported", at, true),
-                .arms = arms,
-            };
-        }
-        return out;
-    }
-
-    fn mapTypeRef(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!TypeRef {
-        return self.mapTypeRefDepth(value, at, 0);
-    }
-
-    /// Structural nesting rides the recursion, so it is bounded: no
-    /// real contract wraps a slot 256 levels deep, and past the bound a
-    /// document is refused instead of exhausting the stack.
-    const max_typeref_nesting = 256;
-
-    fn mapTypeRefDepth(self: *Mapper, value: std.json.Value, at: []const u8, depth: usize) error{ Refused, OutOfMemory }!TypeRef {
-        if (depth > max_typeref_nesting) {
-            return self.diags.fail(at, "TypeRef nesting exceeds {d} levels — no real contract wraps a slot this deep; flatten the state in the core source", .{max_typeref_nesting});
-        }
-        const map = try self.object(value, at);
-        const kind_value = map.get("kind") orelse return self.diags.fail(self.path("{s}.kind", .{at}), "required field missing (every TypeRef carries a kind discriminator)", .{});
-        const kind = try self.string(kind_value, self.path("{s}.kind", .{at}));
-
-        if (std.mem.eql(u8, kind, "bool")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .bool;
-        }
-        if (std.mem.eql(u8, kind, "f64")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .f64;
-        }
-        if (std.mem.eql(u8, kind, "i64")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .i64;
-        }
-        if (std.mem.eql(u8, kind, "bytes")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .bytes;
-        }
-        if (std.mem.eql(u8, kind, "void")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .void;
-        }
-        if (std.mem.eql(u8, kind, "optional")) {
-            const entry = try self.members(value, at, &.{ "kind", "inner" });
-            entry.warnUnknown();
-            const inner = try self.arena.create(TypeRef);
-            inner.* = try self.mapTypeRefDepth(try entry.get("inner"), self.path("{s}.inner", .{at}), depth + 1);
-            return .{ .optional = inner };
-        }
-        if (std.mem.eql(u8, kind, "slice")) {
-            const entry = try self.members(value, at, &.{ "kind", "elem" });
-            entry.warnUnknown();
-            const elem = try self.arena.create(TypeRef);
-            elem.* = try self.mapTypeRefDepth(try entry.get("elem"), self.path("{s}.elem", .{at}), depth + 1);
-            return .{ .slice = elem };
-        }
-        if (std.mem.eql(u8, kind, "node") or std.mem.eql(u8, kind, "value") or
-            std.mem.eql(u8, kind, "enum") or std.mem.eql(u8, kind, "union"))
-        {
-            const entry = try self.members(value, at, &.{ "kind", "name" });
-            entry.warnUnknown();
-            const name = try self.nonEmptyString(try entry.get("name"), self.path("{s}.name", .{at}));
-            if (std.mem.eql(u8, kind, "node")) return .{ .node = name };
-            if (std.mem.eql(u8, kind, "value")) return .{ .value = name };
-            if (std.mem.eql(u8, kind, "enum")) return .{ .enum_ref = name };
-            return .{ .union_ref = name };
-        }
-        return self.diags.fail(self.path("{s}.kind", .{at}), "unknown TypeRef kind \"{s}\" — this reader is too old for this sidecar; upgrade the SDK tooling or pin the compiler release it was built for", .{kind});
-    }
-
-    fn mapNumberClass(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!NumberClass {
-        const text = try self.string(value, at);
-        if (std.mem.eql(u8, text, "f64")) return .f64;
-        if (std.mem.eql(u8, text, "i64")) return .i64;
-        return self.diags.fail(at, "unknown number class \"{s}\" — the v1 classes are \"f64\" and \"i64\"; this reader is too old for anything else", .{text});
-    }
-
-    /// The integer_slots class vocabulary is its own closed set:
-    /// payload descriptors spell "f64"/"i64" (V7), attestations spell
-    /// "i64"/"u64" — the unsigned class exists only as a per-slot
-    /// verdict, never as a TypeRef or descriptor spelling.
-    fn mapIntegerClass(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!IntegerClass {
-        const text = try self.string(value, at);
-        if (std.mem.eql(u8, text, "i64")) return .i64;
-        if (std.mem.eql(u8, text, "u64")) return .u64;
-        if (std.mem.eql(u8, text, "f64")) {
-            return self.diags.fail(at, "integer_slots records the compiler's integer-class verdicts; class \"f64\" has no place here (f64 is the default class and is never attested)", .{});
-        }
-        return self.diags.fail(at, "unknown integer class \"{s}\" — the format-1 classes are \"i64\" and \"u64\"; this reader is too old for anything else", .{text});
-    }
-
-    fn mapHelpers(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }![]const Helper {
-        const items = try self.array(value, "model_helpers");
-        const out = try self.arena.alloc(Helper, items.items.len);
-        for (items.items, 0..) |item, index| {
-            const at = self.path("model_helpers[{d}]", .{index});
-            const entry = try self.members(item, at, &.{ "name", "params", "returns", "arena" });
-            entry.warnUnknown();
-            const params_value = try self.array(try entry.get("params"), self.path("{s}.params", .{at}));
-            const params = try self.arena.alloc(TypeRef, params_value.items.len);
-            for (params_value.items, 0..) |param, param_index| {
-                params[param_index] = try self.mapTypeRef(param, self.path("{s}.params[{d}]", .{ at, param_index }));
-            }
-            out[index] = .{
-                .name = try self.nonEmptyString(try entry.get("name"), self.path("{s}.name", .{at})),
-                .params = params,
-                .returns = try self.mapTypeRef(try entry.get("returns"), self.path("{s}.returns", .{at})),
-                .arena = try self.boolean(try entry.get("arena"), self.path("{s}.arena", .{at})),
-            };
-        }
-        return out;
-    }
-
-    fn mapMsg(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Msg {
-        const entry = try self.members(value, "msg", &.{ "name", "arms", "unbound" });
-        entry.warnUnknown();
-        const arms_value = try self.array(try entry.get("arms"), "msg.arms");
-        const arms = try self.arena.alloc(MsgArm, arms_value.items.len);
-        for (arms_value.items, 0..) |arm_value, index| {
-            const at = self.path("msg.arms[{d}]", .{index});
-            const arm = try self.members(arm_value, at, &.{ "name", "member", "payload" });
-            arm.warnUnknown();
-            arms[index] = .{
-                .name = try self.nonEmptyString(try arm.get("name"), self.path("{s}.name", .{at})),
-                .member = try self.optionalString(arm.map, "member", at),
-                .payload = try self.mapPayload(try arm.get("payload"), self.path("{s}.payload", .{at})),
-            };
-        }
-        return .{
-            .name = try self.nonEmptyString(try entry.get("name"), "msg.name"),
-            .arms = arms,
-            .unbound = try self.stringList(try entry.get("unbound"), "msg.unbound"),
-        };
-    }
-
-    fn mapPayload(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!Payload {
-        const map = try self.object(value, at);
-        const kind_value = map.get("kind") orelse return self.diags.fail(self.path("{s}.kind", .{at}), "required field missing (every payload descriptor carries a kind discriminator)", .{});
-        const kind = try self.string(kind_value, self.path("{s}.kind", .{at}));
-
-        if (std.mem.eql(u8, kind, "void")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .void;
-        }
-        if (std.mem.eql(u8, kind, "bytes")) {
-            (try self.members(value, at, &.{"kind"})).warnUnknown();
-            return .bytes;
-        }
-        if (std.mem.eql(u8, kind, "number")) {
-            const entry = try self.members(value, at, &.{ "kind", "class" });
-            entry.warnUnknown();
-            return .{ .number = try self.mapNumberClass(try entry.get("class"), self.path("{s}.class", .{at})) };
-        }
-        if (std.mem.eql(u8, kind, "number_bytes")) {
-            const entry = try self.members(value, at, &.{ "kind", "number_field", "number_class", "bytes_field" });
-            entry.warnUnknown();
-            return .{ .number_bytes = .{
-                .number_field = try self.nonEmptyString(try entry.get("number_field"), self.path("{s}.number_field", .{at})),
-                .number_class = try self.mapNumberClass(try entry.get("number_class"), self.path("{s}.number_class", .{at})),
-                .bytes_field = try self.nonEmptyString(try entry.get("bytes_field"), self.path("{s}.bytes_field", .{at})),
-            } };
-        }
-        if (std.mem.eql(u8, kind, "record") or std.mem.eql(u8, kind, "union") or std.mem.eql(u8, kind, "enum")) {
-            const entry = try self.members(value, at, &.{ "kind", "name" });
-            entry.warnUnknown();
-            const name = try self.nonEmptyString(try entry.get("name"), self.path("{s}.name", .{at}));
-            if (std.mem.eql(u8, kind, "record")) return .{ .record = name };
-            if (std.mem.eql(u8, kind, "union")) return .{ .union_ref = name };
-            return .{ .enum_ref = name };
-        }
-        if (std.mem.eql(u8, kind, "scalar")) {
-            const entry = try self.members(value, at, &.{ "kind", "type" });
-            entry.warnUnknown();
-            return .{ .scalar = try self.mapTypeRef(try entry.get("type"), self.path("{s}.type", .{at})) };
-        }
-        return self.diags.fail(self.path("{s}.kind", .{at}), "unknown payload descriptor kind \"{s}\" — this reader is too old for this sidecar; upgrade the SDK tooling or pin the compiler release it was built for (half-understanding a message arm is how wrong dispatch ships)", .{kind});
-    }
-
-    fn mapChannels(self: *Mapper, value: std.json.Value, drop_default: bool) error{ Refused, OutOfMemory }!Channels {
-        const entry = try self.members(value, "channels", &.{
-            "command_msg", "frame_msg", "key_msg", "pinch_msg", "drop_msg", "appearance_msg", "chrome_msg", "env_msgs",
-        });
-        entry.warnUnknown();
-        const env_value = try self.array(try entry.get("env_msgs"), "channels.env_msgs");
-        const env_msgs = try self.arena.alloc(EnvMsg, env_value.items.len);
-        for (env_value.items, 0..) |item, index| {
-            const at = self.path("channels.env_msgs[{d}]", .{index});
-            const env_entry = try self.members(item, at, &.{ "env", "msg" });
-            env_entry.warnUnknown();
-            env_msgs[index] = .{
-                .env = try self.nonEmptyString(try env_entry.get("env"), self.path("{s}.env", .{at})),
-                .msg = try self.nonEmptyString(try env_entry.get("msg"), self.path("{s}.msg", .{at})),
-            };
-        }
-        return .{
-            .command_msg = try self.boolean(try entry.get("command_msg"), "channels.command_msg"),
-            .frame_msg = try self.boolean(try entry.get("frame_msg"), "channels.frame_msg"),
-            .key_msg = try self.boolean(try entry.get("key_msg"), "channels.key_msg"),
-            .pinch_msg = try self.boolean(try entry.get("pinch_msg"), "channels.pinch_msg"),
-            // Additive over the pinned compiler's format-1 emitter: older
-            // compilers preserve the profile-declared ABI export but do not
-            // know this channel fact yet, so the export list is its honest
-            // compatibility default. New frontend sidecars state it directly.
-            .drop_msg = try self.optionalBoolean(entry.map, "drop_msg", "channels", drop_default),
-            .appearance_msg = try self.armNameOrNull(try entry.get("appearance_msg"), "channels.appearance_msg"),
-            .chrome_msg = try self.armNameOrNull(try entry.get("chrome_msg"), "channels.chrome_msg"),
-            .env_msgs = env_msgs,
-        };
-    }
-
-    fn armNameOrNull(self: *Mapper, value: std.json.Value, at: []const u8) error{ Refused, OutOfMemory }!?[]const u8 {
-        return switch (value) {
-            .null => null,
-            .string => try self.nonEmptyString(value, at),
-            else => self.diags.fail(at, "expected null or a message arm name string, found {s}", .{jsonKindName(value)}),
-        };
-    }
-
-    fn mapAbi(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }!Abi {
-        const entry = try self.members(value, "abi", &.{ "prefix", "exports", "snapshot_format" });
-        entry.warnUnknown();
-        return .{
-            .prefix = try self.symbolPrefix(try entry.get("prefix"), "abi.prefix"),
-            .exports = try self.stringList(try entry.get("exports"), "abi.exports"),
-            .snapshot_format = try self.integer(try entry.get("snapshot_format"), "abi.snapshot_format"),
-        };
-    }
-
-    fn mapIntegerSlots(self: *Mapper, value: std.json.Value) error{ Refused, OutOfMemory }![]const IntegerSlot {
-        const items = try self.array(value, "integer_slots");
-        const out = try self.arena.alloc(IntegerSlot, items.items.len);
-        for (items.items, 0..) |item, index| {
-            const at = self.path("integer_slots[{d}]", .{index});
-            const entry = try self.members(item, at, &.{ "slot", "class" });
-            entry.warnUnknown();
-            out[index] = .{
-                .slot = try self.nonEmptyString(try entry.get("slot"), self.path("{s}.slot", .{at})),
-                .class = try self.mapIntegerClass(try entry.get("class"), self.path("{s}.class", .{at})),
-            };
-        }
-        return out;
-    }
-};
-
-fn jsonKindName(value: std.json.Value) []const u8 {
-    return switch (value) {
-        .null => "null",
-        .bool => "a boolean",
-        .integer => "a number",
-        .float => "a number",
-        .number_string => "a number",
-        .string => "a string",
-        .array => "an array",
-        .object => "an object",
-    };
-}
-
 // --------------------------------------------------------- validation
 //
-// The schema's emitter self-check rules, enforced reader-side as far as
-// a reader can without the compiled object:
-//   V1  required fields + format fence   — the mapper (presence) and
-//                                          mapRoot (format).
-//   V2  hash encodings                   — the mapper's hash64.
-//   V3  name uniqueness                  — validateNames.
-//   V4  reference resolution + no
-//       unreachable table entries        — validateReferences.
-//   V5  acyclicity                       — validateAcyclic.
-//   V6  tag density and arm bound        — validateMsg (density is
-//       structural: tags are positions; the reader checks the bound).
-//       Source declaration order itself is only checkable against the
-//       source, i.e. by the emitter.
-//   V7  descriptor consistency           — the mapper (classes) and
-//                                          validateMsg (field names,
-//                                          scalar shape).
-//   V8  unbound lists resolve            — validateUnbound.
-//   V9  channel wiring                   — validateChannels.
-//   V10 integer-slot bijection           — validateIntegerSlots: the
-//       one-to-one check both ways, plus structural resolution of every
-//       leftover entry's path (unresolvable, wrong spelling, or the
-//       grammar's slice-element gap each carry their own teaching).
-//   V11 export attestation               — validateAbi checks the list
-//       against the profile's canonical vocabulary and order; the
-//       "exactly what the object exports" half needs the object and is
-//       enforced at link/boot time by the generated shim.
-//   V12 identity coherence               — a boot-time check: the
-//       generated shim compares the sidecar's build_id against the
-//       object's identity getter before the first dispatch.
-//   V13 deterministic emission           — an emitter-side property;
-//       the generator itself re-emits byte-identically from equal
-//       input (pinned by a test).
-//   V14 attestation honesty              — an emitter-side property a
-//       reader cannot re-derive (the proof lives in the compiler; the
-//       sidecar records verdicts).
+// Compiled intake enforces required fields, format, hashes, and the closed
+// TypeRef/payload vocabularies (V1, V2, structural V7). core_contract.ts owns
+// versions, names, reachability, cycles/depth, message bounds/descriptors,
+// void positions, unbound lists, channel wiring, integer-slot bijection and
+// canonical ABI export order (V3-V11). The owned result boundary preserves
+// diagnostic order and exact native i64 version spellings.
+// Identity and exported-symbol coherence are proved by the generated shim
+// at link/boot (V11-V12). Complete output conformance proves deterministic
+// emission (V13); compiler attestations retain their original ownership (V14).
 
 fn validate(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
-    validateVersions(sidecar, diags);
-    try validateNames(arena, sidecar, diags);
-    // Reference checks assume the namespace is coherent; a broken
-    // namespace already carries its own teachings.
-    if (diags.hasErrors()) return;
-    try validateReferences(arena, sidecar, diags);
-    if (diags.hasErrors()) return;
-    try validateAcyclic(arena, sidecar, diags);
-    validateMsg(sidecar, diags);
-    validateVoidPositions(sidecar, diags);
-    validateUnbound(sidecar, diags);
-    validateChannels(sidecar, diags);
-    validateAbi(sidecar, diags);
-    try validateIntegerSlots(arena, sidecar, diags);
-}
-
-fn validateVersions(sidecar: Sidecar, diags: *Diagnostics) void {
-    if (sidecar.wire_version != supported_wire_version) {
-        diags.flag("wire_version", "this SDK's command-wire vocabulary is generation {d}, the sidecar declares {d} — the compiled core's effect builders speak a different wire; upgrade the SDK or pin the compiler release that matches it", .{ supported_wire_version, sidecar.wire_version });
-    }
-    if (sidecar.abi_version != supported_abi_version) {
-        diags.flag("abi_version", "this generator binds core ABI version {d}, the sidecar declares {d} — upgrade the SDK or pin the compiler release that matches it", .{ supported_abi_version, sidecar.abi_version });
-    }
-    if (sidecar.abi.snapshot_format != supported_snapshot_format) {
-        diags.flag("abi.snapshot_format", "this generator decodes snapshot format {d}, the sidecar declares {d} — upgrade the SDK or pin the compiler release that matches it", .{ supported_snapshot_format, sidecar.abi.snapshot_format });
-    }
-}
-
-const NameSet = std.StringArrayHashMapUnmanaged(void);
-
-fn noteName(arena: std.mem.Allocator, set: *NameSet, name: []const u8, at: []const u8, what: []const u8, diags: *Diagnostics) error{OutOfMemory}!void {
-    const entry = try set.getOrPut(arena, name);
-    if (entry.found_existing) {
-        diags.flag(at, "duplicate {s} \"{s}\" — V3 requires unique names here", .{ what, name });
-    }
-}
-
-fn validateNames(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
-    // One namespace across structs + enums + unions.
-    var table_names: NameSet = .empty;
-    for (sidecar.types.structs, 0..) |entry, index| {
-        try noteName(arena, &table_names, entry.name, pathOf(arena, "types.structs[{d}].name", .{index}), "type-table name", diags);
-        var field_names: NameSet = .empty;
-        for (entry.fields, 0..) |field, field_index| {
-            try noteName(arena, &field_names, field.name, pathOf(arena, "types.structs[{d}].fields[{d}].name", .{ index, field_index }), "field name", diags);
-        }
-    }
-    for (sidecar.types.enums, 0..) |entry, index| {
-        try noteName(arena, &table_names, entry.name, pathOf(arena, "types.enums[{d}].name", .{index}), "type-table name", diags);
-        var member_names: NameSet = .empty;
-        for (entry.members, 0..) |member, member_index| {
-            try noteName(arena, &member_names, member, pathOf(arena, "types.enums[{d}].members[{d}]", .{ index, member_index }), "enum member", diags);
-        }
-    }
-    for (sidecar.types.unions, 0..) |entry, index| {
-        try noteName(arena, &table_names, entry.name, pathOf(arena, "types.unions[{d}].name", .{index}), "type-table name", diags);
-        var arm_names: NameSet = .empty;
-        for (entry.arms, 0..) |arm, arm_index| {
-            try noteName(arena, &arm_names, arm.name, pathOf(arena, "types.unions[{d}].arms[{d}].name", .{ index, arm_index }), "union arm", diags);
-        }
-    }
-    var msg_arm_names: NameSet = .empty;
-    for (sidecar.msg.arms, 0..) |arm, index| {
-        try noteName(arena, &msg_arm_names, arm.name, pathOf(arena, "msg.arms[{d}].name", .{index}), "message arm", diags);
-    }
-    var helper_names: NameSet = .empty;
-    for (sidecar.model_helpers, 0..) |helper, index| {
-        try noteName(arena, &helper_names, helper.name, pathOf(arena, "model_helpers[{d}].name", .{index}), "helper name", diags);
-    }
-    var env_names: NameSet = .empty;
-    for (sidecar.channels.env_msgs, 0..) |entry, index| {
-        try noteName(arena, &env_names, entry.env, pathOf(arena, "channels.env_msgs[{d}].env", .{index}), "environment variable name", diags);
-    }
-}
-
-fn pathOf(arena: std.mem.Allocator, comptime fmt: []const u8, args: anytype) []const u8 {
-    return std.fmt.allocPrint(arena, fmt, args) catch "";
+    _ = try @import("core_policy.zig").apply(arena, sidecar, "core", diags);
 }
 
 pub const TableKind = enum { @"struct", @"enum", @"union" };
@@ -1017,390 +489,6 @@ pub fn findUnion(types: Types, name: []const u8) ?*const Union {
     return null;
 }
 
-const Reach = struct {
-    arena: std.mem.Allocator,
-    types: Types,
-    diags: *Diagnostics,
-    seen: NameSet = .empty,
-    /// The active visit's worklist, when a walk is in progress; a
-    /// checkRef outside a walk visits directly.
-    pending: ?*std.ArrayListUnmanaged([]const u8) = null,
-
-    fn enqueue(self: *Reach, name: []const u8) error{OutOfMemory}!void {
-        if (self.pending) |worklist| {
-            try worklist.append(self.arena, name);
-            return;
-        }
-        try self.visit(name);
-    }
-
-    fn checkRef(self: *Reach, ref: TypeRef, at: []const u8) error{OutOfMemory}!void {
-        switch (ref) {
-            .bool, .f64, .i64, .bytes, .void => {},
-            .optional => |inner| try self.checkRef(inner.*, at),
-            .slice => |elem| try self.checkRef(elem.*, at),
-            .node, .value => |name| {
-                if (findStruct(self.types, name) == null) {
-                    self.wrongKind(name, .@"struct", at);
-                    return;
-                }
-                try self.enqueue(name);
-            },
-            .enum_ref => |name| {
-                if (findEnum(self.types, name) == null) {
-                    self.wrongKind(name, .@"enum", at);
-                    return;
-                }
-                try self.enqueue(name);
-            },
-            .union_ref => |name| {
-                if (findUnion(self.types, name) == null) {
-                    self.wrongKind(name, .@"union", at);
-                    return;
-                }
-                try self.enqueue(name);
-            },
-        }
-    }
-
-    fn wrongKind(self: *Reach, name: []const u8, wanted: TableKind, at: []const u8) void {
-        if (lookupKind(self.types, name)) |found| {
-            self.diags.flag(at, "\"{s}\" names {s} {s} in the type table, but this reference requires {s} {s} — V4", .{
-                name, articleOf(found), @tagName(found), articleOf(wanted), @tagName(wanted),
-            });
-        } else {
-            self.diags.flag(at, "\"{s}\" names no entry in the type table (no struct, enum, or union declares it) — V4", .{name});
-        }
-    }
-
-    /// Iterative: named-type chains can be as long as the document
-    /// allows, so the walk carries its own worklist instead of the
-    /// process stack (structural nesting within one reference stays
-    /// recursive under the reader's 256-level bound).
-    fn visit(self: *Reach, root: []const u8) error{OutOfMemory}!void {
-        var worklist: std.ArrayListUnmanaged([]const u8) = .empty;
-        try worklist.append(self.arena, root);
-        while (worklist.pop()) |name| {
-            const entry = try self.seen.getOrPut(self.arena, name);
-            if (entry.found_existing) continue;
-            self.pending = &worklist;
-            defer self.pending = null;
-            if (findStruct(self.types, name)) |record| {
-                for (record.fields, 0..) |field, index| {
-                    try self.checkRef(field.type, pathOf(self.arena, "types.structs.{s}.fields[{d}].type", .{ name, index }));
-                }
-                continue;
-            }
-            if (findUnion(self.types, name)) |tagged| {
-                for (tagged.arms, 0..) |arm, index| {
-                    try self.checkRef(arm.payload, pathOf(self.arena, "types.unions.{s}.arms[{d}].payload", .{ name, index }));
-                }
-                continue;
-            }
-            // Enums carry no references.
-        }
-    }
-};
-
-fn articleOf(kind: TableKind) []const u8 {
-    return switch (kind) {
-        .@"enum" => "an",
-        .@"struct", .@"union" => "a",
-    };
-}
-
-fn validateReferences(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
-    var reach = Reach{ .arena = arena, .types = sidecar.types, .diags = diags };
-
-    // The roots: model, msg arms, helper signatures, channels (channel
-    // arm names resolve against msg arms in validateChannels; they add
-    // no type references of their own).
-    if (findStruct(sidecar.types, sidecar.model) == null) {
-        if (lookupKind(sidecar.types, sidecar.model)) |found| {
-            diags.flag("model", "\"{s}\" names {s} {s} in the type table, but the model root must be a struct — V4", .{ sidecar.model, articleOf(found), @tagName(found) });
-        } else {
-            diags.flag("model", "\"{s}\" names no struct in the type table — V4", .{sidecar.model});
-        }
-    } else {
-        try reach.visit(sidecar.model);
-    }
-
-    for (sidecar.msg.arms, 0..) |arm, index| {
-        switch (arm.payload) {
-            .void, .bytes, .number, .number_bytes => {},
-            .record => |name| {
-                if (findStruct(sidecar.types, name) == null) {
-                    reach.wrongKind(name, .@"struct", pathOf(arena, "msg.arms[{d}].payload.name", .{index}));
-                } else try reach.visit(name);
-            },
-            .union_ref => |name| {
-                if (findUnion(sidecar.types, name) == null) {
-                    reach.wrongKind(name, .@"union", pathOf(arena, "msg.arms[{d}].payload.name", .{index}));
-                } else try reach.visit(name);
-            },
-            .enum_ref => |name| {
-                if (findEnum(sidecar.types, name) == null) {
-                    reach.wrongKind(name, .@"enum", pathOf(arena, "msg.arms[{d}].payload.name", .{index}));
-                } else try reach.visit(name);
-            },
-            .scalar => |ref| try reach.checkRef(ref, pathOf(arena, "msg.arms[{d}].payload.type", .{index})),
-        }
-    }
-
-    for (sidecar.model_helpers, 0..) |helper, index| {
-        try reach.checkRef(helper.returns, pathOf(arena, "model_helpers[{d}].returns", .{index}));
-        for (helper.params, 0..) |param, param_index| {
-            try reach.checkRef(param, pathOf(arena, "model_helpers[{d}].params[{d}]", .{ index, param_index }));
-        }
-    }
-
-    // The table lists exactly the reachable types — nothing else (V4's
-    // unreachable-entry half).
-    for (sidecar.types.structs, 0..) |entry, index| {
-        if (!reach.seen.contains(entry.name)) {
-            diags.flag(pathOf(arena, "types.structs[{d}]", .{index}), "\"{s}\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)", .{entry.name});
-        }
-    }
-    for (sidecar.types.enums, 0..) |entry, index| {
-        if (!reach.seen.contains(entry.name)) {
-            diags.flag(pathOf(arena, "types.enums[{d}]", .{index}), "\"{s}\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)", .{entry.name});
-        }
-    }
-    for (sidecar.types.unions, 0..) |entry, index| {
-        if (!reach.seen.contains(entry.name)) {
-            diags.flag(pathOf(arena, "types.unions[{d}]", .{index}), "\"{s}\" is unreachable from model, msg, model_helpers, and channels — the type table lists exactly the reachable types, nothing else (V4)", .{entry.name});
-        }
-    }
-}
-
-fn validateAcyclic(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
-    // Iterative colored depth-first walk with an explicit frame stack:
-    // any back edge is a cycle, and named-type chains deeper than the
-    // reader's bound refuse instead of exhausting every downstream
-    // consumer's call stack (recursive state types are refused at
-    // compile time by the emitter; a sidecar carrying one is malformed,
-    // and nothing real chains hundreds of record types).
-    const max_chain_depth = 256;
-    const State = enum { unvisited, on_stack, done };
-    var states: std.StringArrayHashMapUnmanaged(State) = .empty;
-    var depths: std.StringArrayHashMapUnmanaged(usize) = .empty;
-
-    const Frame = struct {
-        name: []const u8,
-        shape: EntryShape,
-        next_edge: usize,
-    };
-
-    var roots: std.ArrayListUnmanaged([]const u8) = .empty;
-    for (sidecar.types.structs) |entry| try roots.append(arena, entry.name);
-    for (sidecar.types.unions) |entry| try roots.append(arena, entry.name);
-
-    var depth_refused = false;
-    for (roots.items) |root| {
-        if ((states.get(root) orelse .unvisited) != .unvisited) continue;
-        var stack: std.ArrayListUnmanaged(Frame) = .empty;
-        try states.put(arena, root, .on_stack);
-        try stack.append(arena, .{ .name = root, .shape = try entryShape(arena, sidecar.types, root), .next_edge = 0 });
-        while (stack.items.len > 0) {
-            const top = &stack.items[stack.items.len - 1];
-            if (top.next_edge < top.shape.edges.len) {
-                const child = top.shape.edges[top.next_edge].name;
-                top.next_edge += 1;
-                switch (states.get(child) orelse .unvisited) {
-                    .on_stack => {
-                        var cycle: std.ArrayListUnmanaged(u8) = .empty;
-                        var started = false;
-                        for (stack.items) |frame| {
-                            if (!started and !std.mem.eql(u8, frame.name, child)) continue;
-                            started = true;
-                            try cycle.appendSlice(arena, frame.name);
-                            try cycle.appendSlice(arena, " -> ");
-                        }
-                        try cycle.appendSlice(arena, child);
-                        diags.flag("types", "the type reference graph has a cycle ({s}) — recursive state types are refused at compile time and can never be encoded (V5)", .{cycle.items});
-                        return;
-                    },
-                    .done => {},
-                    .unvisited => {
-                        try states.put(arena, child, .on_stack);
-                        try stack.append(arena, .{ .name = child, .shape = try entryShape(arena, sidecar.types, child), .next_edge = 0 });
-                    },
-                }
-                continue;
-            }
-            // Post-order: the deepest fully expanded value tree under
-            // this entry. Structural wrapping and named chains multiply
-            // when counted separately, so the bound is on their sum —
-            // the depth every downstream walk (encoders, emitters,
-            // sample builders) actually recurses to.
-            var deepest: usize = top.shape.leaf_levels;
-            for (top.shape.edges) |edge| {
-                deepest = @max(deepest, edge.wrap + (depths.get(edge.name) orelse 0));
-            }
-            const depth = deepest + 1;
-            try depths.put(arena, top.name, depth);
-            try states.put(arena, top.name, .done);
-            if (depth > max_chain_depth and !depth_refused) {
-                depth_refused = true;
-                diags.flag("types", "the value tree under \"{s}\" expands deeper than {d} levels (record chains and optional/slice wrapping both count) — no real contract nests state this deep, and every consumer bounds its walks; flatten the state in the core source", .{ top.name, max_chain_depth });
-            }
-            _ = stack.pop();
-        }
-    }
-}
-
-/// One named-type edge leaving a table entry: the referenced name and
-/// the structural levels (optional/slice) wrapped around the reference
-/// at its use site.
-const Edge = struct { name: []const u8, wrap: usize };
-
-const EntryShape = struct {
-    edges: []const Edge,
-    /// The deepest purely structural member (no named reference): its
-    /// wrapper count plus the leaf itself.
-    leaf_levels: usize,
-};
-
-/// The shape of one table entry's members for depth accounting
-/// (structural nesting within a reference is bounded by the reader, so
-/// the collection recursion is bounded too).
-fn entryShape(arena: std.mem.Allocator, types: Types, name: []const u8) error{OutOfMemory}!EntryShape {
-    var edges: std.ArrayListUnmanaged(Edge) = .empty;
-    var leaf_levels: usize = 0;
-    if (findStruct(types, name)) |record| {
-        for (record.fields) |field| try measureRef(arena, &edges, &leaf_levels, field.type, 0);
-    } else if (findUnion(types, name)) |tagged| {
-        for (tagged.arms) |arm| try measureRef(arena, &edges, &leaf_levels, arm.payload, 0);
-    }
-    return .{ .edges = edges.items, .leaf_levels = leaf_levels };
-}
-
-fn measureRef(arena: std.mem.Allocator, edges: *std.ArrayListUnmanaged(Edge), leaf_levels: *usize, ref: TypeRef, wrap: usize) error{OutOfMemory}!void {
-    switch (ref) {
-        .bool, .f64, .i64, .bytes, .void, .enum_ref => leaf_levels.* = @max(leaf_levels.*, wrap + 1),
-        .optional => |inner| try measureRef(arena, edges, leaf_levels, inner.*, wrap + 1),
-        .slice => |elem| try measureRef(arena, edges, leaf_levels, elem.*, wrap + 1),
-        .node, .value, .union_ref => |edge| try edges.append(arena, .{ .name = edge, .wrap = wrap }),
-    }
-}
-
-fn validateMsg(sidecar: Sidecar, diags: *Diagnostics) void {
-    // Tags are positional and dense by construction — there is no
-    // explicit tag field to get wrong. The reader checks the u8 bound,
-    // and the floor: a valueless union or enum has no declarable mirror
-    // form (`union(enum) {}` is not a type) and nothing could ever
-    // dispatch or encode it.
-    if (sidecar.msg.arms.len == 0) {
-        diags.flag("msg.arms", "the message union declares no arms — a core with no messages cannot dispatch; declare at least one arm", .{});
-    }
-    if (sidecar.msg.arms.len > 256) {
-        diags.flag("msg.arms", "{d} arms exceed the 256-arm bound (wire tags ride a u8) — V6", .{sidecar.msg.arms.len});
-    }
-    // The same u8 bound governs every tabled union (the canonical value
-    // encoding carries a one-byte arm index), and the mirror's enums
-    // ride enum(u8) with member index = wire value.
-    for (sidecar.types.unions, 0..) |entry, index| {
-        if (entry.arms.len == 0) {
-            diags.flag(pathOfStatic(diags, "types.unions[{d}]", .{index}), "union \"{s}\" declares no arms — a valueless union has no mirror form; declare at least one arm", .{entry.name});
-        }
-        if (entry.arms.len > 256) {
-            diags.flag(pathOfStatic(diags, "types.unions[{d}]", .{index}), "union \"{s}\" has {d} arms; encoded union values carry a one-byte declaration-order arm index (256 arms at most)", .{ entry.name, entry.arms.len });
-        }
-    }
-    for (sidecar.types.enums, 0..) |entry, index| {
-        if (entry.members.len == 0) {
-            diags.flag(pathOfStatic(diags, "types.enums[{d}]", .{index}), "enum \"{s}\" declares no members — a valueless enum has no mirror form; declare at least one member", .{entry.name});
-        }
-        if (entry.members.len > 256) {
-            diags.flag(pathOfStatic(diags, "types.enums[{d}]", .{index}), "enum \"{s}\" has {d} members; the mirror's enums ride a u8 tag with member index = wire value (256 members at most)", .{ entry.name, entry.members.len });
-        }
-    }
-    for (sidecar.msg.arms, 0..) |arm, index| {
-        switch (arm.payload) {
-            .number_bytes => |desc| {
-                if (std.mem.eql(u8, desc.number_field, desc.bytes_field)) {
-                    diags.flag(pathOfStatic(diags, "msg.arms[{d}].payload", .{index}), "number_field and bytes_field are both \"{s}\" — the two field names must be distinct (V7)", .{desc.number_field});
-                }
-            },
-            .scalar => |ref| switch (ref) {
-                .void => diags.flag(pathOfStatic(diags, "msg.arms[{d}].payload.type", .{index}), "a scalar descriptor cannot carry void — bare arms use the void descriptor kind (V7)", .{}),
-                .node, .value => diags.flag(pathOfStatic(diags, "msg.arms[{d}].payload.type", .{index}), "a scalar descriptor cannot carry a record — record payloads use the record descriptor kind (V7)", .{}),
-                else => {},
-            },
-            else => {},
-        }
-    }
-}
-
-fn pathOfStatic(diags: *Diagnostics, comptime fmt: []const u8, args: anytype) []const u8 {
-    return std.fmt.allocPrint(diags.arena, fmt, args) catch "";
-}
-
-/// The void TypeRef means "no value" and exists for bare union arms
-/// only (the schema's stated scope); anywhere else the mirror would
-/// declare a valueless slot the snapshot encoding cannot carry.
-fn validateVoidPositions(sidecar: Sidecar, diags: *Diagnostics) void {
-    for (sidecar.types.structs, 0..) |entry, index| {
-        for (entry.fields, 0..) |field, field_index| {
-            flagVoid(field.type, pathOfStatic(diags, "types.structs[{d}].fields[{d}].type", .{ index, field_index }), diags);
-        }
-    }
-    for (sidecar.types.unions, 0..) |entry, index| {
-        for (entry.arms, 0..) |arm, arm_index| {
-            // A bare void arm is the one sanctioned use; void NESTED
-            // inside an arm's payload is not.
-            if (arm.payload == .void) continue;
-            flagVoid(arm.payload, pathOfStatic(diags, "types.unions[{d}].arms[{d}].payload", .{ index, arm_index }), diags);
-        }
-    }
-    for (sidecar.model_helpers, 0..) |helper, index| {
-        flagVoid(helper.returns, pathOfStatic(diags, "model_helpers[{d}].returns", .{index}), diags);
-        for (helper.params, 0..) |param, param_index| {
-            flagVoid(param, pathOfStatic(diags, "model_helpers[{d}].params[{d}]", .{ index, param_index }), diags);
-        }
-    }
-    for (sidecar.msg.arms, 0..) |arm, index| {
-        switch (arm.payload) {
-            .scalar => |ref| flagVoid(ref, pathOfStatic(diags, "msg.arms[{d}].payload.type", .{index}), diags),
-            else => {},
-        }
-    }
-}
-
-fn flagVoid(ref: TypeRef, at: []const u8, diags: *Diagnostics) void {
-    switch (ref) {
-        .void => diags.flag(at, "the void TypeRef carries no value and is legal only as a bare union arm payload — this slot needs a value type", .{}),
-        .optional => |inner| flagVoid(inner.*, at, diags),
-        .slice => |elem| flagVoid(elem.*, at, diags),
-        else => {},
-    }
-}
-
-fn validateUnbound(sidecar: Sidecar, diags: *Diagnostics) void {
-    const model = findStruct(sidecar.types, sidecar.model) orelse return;
-    // The opt-out vocabulary spans everything a view could bind on the
-    // model: its fields AND its exported helpers (helpers surface as
-    // bindable model methods, so an author can declare one
-    // intentionally unbound). The schema's V8 wording says "field";
-    // the reader accepts the helper case the dead-state lint actually
-    // covers — see SCHEMA-GAPS.md.
-    outer: for (sidecar.model_unbound, 0..) |name, index| {
-        for (model.fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) continue :outer;
-        }
-        for (sidecar.model_helpers) |helper| {
-            if (std.mem.eql(u8, helper.name, name)) continue :outer;
-        }
-        diags.flag(pathOfStatic(diags, "model_unbound[{d}]", .{index}), "\"{s}\" is neither a field of the model struct \"{s}\" nor an exported helper (V8)", .{ name, sidecar.model });
-    }
-    outer: for (sidecar.msg.unbound, 0..) |name, index| {
-        for (sidecar.msg.arms) |arm| {
-            if (std.mem.eql(u8, arm.name, name)) continue :outer;
-        }
-        diags.flag(pathOfStatic(diags, "msg.unbound[{d}]", .{index}), "\"{s}\" is not an arm of the message union (V8)", .{name});
-    }
-}
-
 pub fn findArm(msg: Msg, name: []const u8) ?*const MsgArm {
     for (msg.arms) |*arm| {
         if (std.mem.eql(u8, arm.name, name)) return arm;
@@ -1408,361 +496,11 @@ pub fn findArm(msg: Msg, name: []const u8) ?*const MsgArm {
     return null;
 }
 
-fn exportListed(sidecar: Sidecar, suffix: []const u8) bool {
-    return abiHasExport(sidecar.abi, suffix);
-}
-
-fn abiHasExport(abi: Abi, suffix: []const u8) bool {
+pub fn abiHasExport(abi: Abi, suffix: []const u8) bool {
     for (abi.exports) |entry| {
         if (std.mem.eql(u8, entry, suffix)) return true;
     }
     return false;
-}
-
-fn validateChannels(sidecar: Sidecar, diags: *Diagnostics) void {
-    const record_channels = [_]struct { name: []const u8, arm: ?[]const u8 }{
-        .{ .name = "appearance_msg", .arm = sidecar.channels.appearance_msg },
-        .{ .name = "chrome_msg", .arm = sidecar.channels.chrome_msg },
-    };
-    for (record_channels) |channel| {
-        const arm_name = channel.arm orelse continue;
-        const at = pathOfStatic(diags, "channels.{s}", .{channel.name});
-        const arm = findArm(sidecar.msg, arm_name) orelse {
-            diags.flag(at, "\"{s}\" names no arm of the message union (V9)", .{arm_name});
-            continue;
-        };
-        switch (arm.payload) {
-            .record, .union_ref, .enum_ref, .scalar => {},
-            else => diags.flag(at, "arm \"{s}\" has a {s} payload descriptor, but this channel requires the named-type family (record/union/enum/scalar) — the host constructs the arm's payload itself, so it must learn the shape from the type table (V9)", .{ arm_name, @tagName(arm.payload) }),
-        }
-    }
-
-    outer: for (sidecar.channels.env_msgs, 0..) |entry, index| {
-        const at = pathOfStatic(diags, "channels.env_msgs[{d}].msg", .{index});
-        const arm = findArm(sidecar.msg, entry.msg) orelse {
-            diags.flag(at, "\"{s}\" names no arm of the message union (V9)", .{entry.msg});
-            continue :outer;
-        };
-        if (arm.payload != .bytes) {
-            diags.flag(at, "arm \"{s}\" has a {s} payload descriptor, but environment channels deliver the variable's value as bytes, so the target arm's descriptor must be bytes (V9)", .{ entry.msg, @tagName(arm.payload) });
-        }
-    }
-
-    const function_channels = [_]struct { name: []const u8, wired: bool }{
-        .{ .name = "command_msg", .wired = sidecar.channels.command_msg },
-        .{ .name = "frame_msg", .wired = sidecar.channels.frame_msg },
-        .{ .name = "key_msg", .wired = sidecar.channels.key_msg },
-        .{ .name = "pinch_msg", .wired = sidecar.channels.pinch_msg },
-        .{ .name = "drop_msg", .wired = sidecar.channels.drop_msg },
-    };
-    for (function_channels) |channel| {
-        const listed = exportListed(sidecar, channel.name);
-        if (channel.wired and !listed) {
-            diags.flag(pathOfStatic(diags, "channels.{s}", .{channel.name}), "the channel is declared wired but \"{s}\" is missing from abi.exports — presence is biconditional (V9)", .{channel.name});
-        }
-        if (!channel.wired and listed) {
-            diags.flag("abi.exports", "\"{s}\" is listed but channels.{s} is false — presence is biconditional (V9)", .{ channel.name, channel.name });
-        }
-    }
-}
-
-fn validateAbi(sidecar: Sidecar, diags: *Diagnostics) void {
-    // The list must be exactly: every unconditional suffix, then the
-    // wired conditional suffixes, in the normative canonical order —
-    // identity getters, mode-provided entries (set_panic_sink, init,
-    // collect, frame_reset), then the entry-point map. The "and the
-    // object exports nothing else" half needs the object and runs at
-    // link time.
-    var cursor: usize = 0;
-    for (unconditional_exports) |suffix| {
-        if (cursor < sidecar.abi.exports.len and std.mem.eql(u8, sidecar.abi.exports[cursor], suffix)) {
-            cursor += 1;
-        } else {
-            diags.flag(pathOfStatic(diags, "abi.exports[{d}]", .{cursor}), "expected the unconditional export \"{s}\" here — abi.exports lists every unconditional suffix, then the wired channel entries, in the canonical order: identity getters (abi_version, build_id), the mode-provided entries (set_panic_sink, init, collect, frame_reset), then the entry-point map (V11)", .{suffix});
-            return;
-        }
-    }
-    for (conditional_exports) |suffix| {
-        if (cursor < sidecar.abi.exports.len and std.mem.eql(u8, sidecar.abi.exports[cursor], suffix)) {
-            cursor += 1;
-        }
-    }
-    if (cursor < sidecar.abi.exports.len) {
-        diags.flag(pathOfStatic(diags, "abi.exports[{d}]", .{cursor}), "\"{s}\" is not an export suffix of ABI version {d} (or is out of canonical order) — V11", .{ sidecar.abi.exports[cursor], supported_abi_version });
-    }
-}
-
-pub const SlotPath = struct {
-    path: []const u8,
-    /// Whether any joined component itself contains a dot (the grammar
-    /// cannot address such a slot unambiguously).
-    components_dotted: bool,
-};
-
-fn dotted(names: []const []const u8) bool {
-    for (names) |name| {
-        if (std.mem.indexOfScalar(u8, name, '.') != null) return true;
-    }
-    return false;
-}
-
-/// The slot spellings V10's bijection is checked against: every i64
-/// spelling in the sidecar, at its schema-defined slot path.
-pub fn collectIntegerSlotPaths(arena: std.mem.Allocator, sidecar: Sidecar) error{OutOfMemory}![]const SlotPath {
-    var paths: std.ArrayListUnmanaged(SlotPath) = .empty;
-    for (sidecar.types.structs) |entry| {
-        for (entry.fields) |field| {
-            if (spellsInteger(field.type)) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ entry.name, field.name }), .components_dotted = dotted(&.{ entry.name, field.name }) });
-            }
-        }
-    }
-    for (sidecar.types.unions) |entry| {
-        for (entry.arms) |arm| {
-            if (spellsInteger(arm.payload)) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ entry.name, arm.name }), .components_dotted = dotted(&.{ entry.name, arm.name }) });
-            }
-        }
-    }
-    // The message-side path forms spell the union's AUTHORED name —
-    // an app whose union is named Action spells its slots
-    // `Action.<arm>`, never a literal `Msg` token.
-    for (sidecar.msg.arms) |arm| {
-        switch (arm.payload) {
-            .number => |class| if (class == .i64) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ sidecar.msg.name, arm.name }), .components_dotted = dotted(&.{ sidecar.msg.name, arm.name }) });
-            },
-            .number_bytes => |desc| if (desc.number_class == .i64) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}.{s}", .{ sidecar.msg.name, arm.name, desc.number_field }), .components_dotted = dotted(&.{ sidecar.msg.name, arm.name, desc.number_field }) });
-            },
-            .scalar => |ref| if (spellsInteger(ref)) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "{s}.{s}", .{ sidecar.msg.name, arm.name }), .components_dotted = dotted(&.{ sidecar.msg.name, arm.name }) });
-            },
-            else => {},
-        }
-    }
-    for (sidecar.model_helpers) |helper| {
-        if (spellsInteger(helper.returns)) {
-            try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "helpers.{s}.return", .{helper.name}), .components_dotted = dotted(&.{helper.name}) });
-        }
-        for (helper.params, 0..) |param, index| {
-            if (spellsInteger(param)) {
-                try paths.append(arena, .{ .path = try std.fmt.allocPrint(arena, "helpers.{s}.params[{d}]", .{ helper.name, index }), .components_dotted = dotted(&.{helper.name}) });
-            }
-        }
-    }
-    return paths.items;
-}
-
-/// Whether a TypeRef spells i64 at its own slot (through optionals; a
-/// slice element is its own slot grammar problem and the schema defines
-/// no path for it, so a slice of i64 cannot be attested — the emitter
-/// spells such elements f64 until the schema grows a path form).
-fn spellsInteger(ref: TypeRef) bool {
-    return switch (ref) {
-        .i64 => true,
-        .optional => |inner| spellsInteger(inner.*),
-        else => false,
-    };
-}
-
-/// What an `integer_slots` entry's path names once resolved against the
-/// sidecar's own tables under the format-1 slot-path grammar.
-pub const SlotTarget = union(enum) {
-    /// A slot the sidecar spells i64 — an attestable target.
-    integer,
-    /// A real slot, spelled or classed as described — not attestable.
-    not_integer: []const u8,
-    /// A sequence whose elements spell an integer: the format-1 grammar
-    /// has no slice-element form, so no path can attest it.
-    slice_element,
-    /// No grammar form reaches a slot of this spelling.
-    unresolved,
-};
-
-fn refSpelling(ref: TypeRef) []const u8 {
-    return switch (ref) {
-        .bool => "bool",
-        .f64 => "f64",
-        .i64 => "i64",
-        .bytes => "bytes",
-        .void => "void",
-        .optional => |inner| refSpelling(inner.*),
-        .slice => "a slice",
-        .node, .value => "a record",
-        .enum_ref => "an enum",
-        .union_ref => "a union",
-    };
-}
-
-fn wrapsInteger(ref: TypeRef) bool {
-    return switch (ref) {
-        .i64 => true,
-        .optional => |inner| wrapsInteger(inner.*),
-        .slice => |elem| wrapsInteger(elem.*),
-        else => false,
-    };
-}
-
-/// Classify the TypeRef a resolved path lands on: i64 through optionals
-/// is the attestable shape; an integer buried under a slice is the
-/// grammar's known gap; everything else is a real slot of another
-/// spelling.
-fn classifyRef(ref: TypeRef) SlotTarget {
-    return switch (ref) {
-        .i64 => .integer,
-        .optional => |inner| classifyRef(inner.*),
-        .slice => |elem| if (wrapsInteger(elem.*)) .slice_element else .{ .not_integer = "a slice" },
-        else => .{ .not_integer = refSpelling(ref) },
-    };
-}
-
-fn classifyNumberClass(class: NumberClass) SlotTarget {
-    return switch (class) {
-        .i64 => .integer,
-        .f64 => .{ .not_integer = "f64" },
-    };
-}
-
-/// Resolve one slot path against the sidecar's tables. The grammar's
-/// forms, each segment the author's spelling: `<TypeName>.<field>` (a
-/// struct field, or a non-msg union arm's payload),
-/// `<msgName>.<arm>` (a scalar-number arm), `<msgName>.<arm>.<field>`
-/// (a number_bytes arm's number field), `helpers.<name>.return`, and
-/// `helpers.<name>.params[<index>]`.
-pub fn resolveSlotPath(sidecar: Sidecar, path: []const u8) SlotTarget {
-    var segments: [4][]const u8 = undefined;
-    var count: usize = 0;
-    var it = std.mem.splitScalar(u8, path, '.');
-    while (it.next()) |segment| {
-        if (segment.len == 0) return .unresolved;
-        if (count == segments.len) return .unresolved;
-        segments[count] = segment;
-        count += 1;
-    }
-
-    if (count == 3 and std.mem.eql(u8, segments[0], "helpers")) {
-        for (sidecar.model_helpers) |helper| {
-            if (!std.mem.eql(u8, helper.name, segments[1])) continue;
-            if (std.mem.eql(u8, segments[2], "return")) return classifyRef(helper.returns);
-            if (std.mem.startsWith(u8, segments[2], "params[") and std.mem.endsWith(u8, segments[2], "]")) {
-                const digits = segments[2]["params[".len .. segments[2].len - 1];
-                const index = std.fmt.parseInt(usize, digits, 10) catch return .unresolved;
-                if (index >= helper.params.len) return .unresolved;
-                return classifyRef(helper.params[index]);
-            }
-            return .unresolved;
-        }
-        return .unresolved;
-    }
-
-    if (std.mem.eql(u8, segments[0], sidecar.msg.name)) {
-        if (count == 2) {
-            if (findArm(sidecar.msg, segments[1])) |arm| {
-                return switch (arm.payload) {
-                    .number => |class| classifyNumberClass(class),
-                    .scalar => |ref| classifyRef(ref),
-                    .void => .{ .not_integer = "void" },
-                    .bytes => .{ .not_integer = "bytes" },
-                    .number_bytes => .{ .not_integer = "a number_bytes record (its number field is the slot)" },
-                    .record => .{ .not_integer = "a record" },
-                    .union_ref => .{ .not_integer = "a union" },
-                    .enum_ref => .{ .not_integer = "an enum" },
-                };
-            }
-        }
-        if (count == 3) {
-            if (findArm(sidecar.msg, segments[1])) |arm| {
-                switch (arm.payload) {
-                    .number_bytes => |desc| {
-                        if (std.mem.eql(u8, segments[2], desc.number_field)) return classifyNumberClass(desc.number_class);
-                        if (std.mem.eql(u8, segments[2], desc.bytes_field)) return .{ .not_integer = "bytes" };
-                    },
-                    else => {},
-                }
-            }
-            return .unresolved;
-        }
-    }
-
-    if (count == 2) {
-        if (findStruct(sidecar.types, segments[0])) |record| {
-            for (record.fields) |field| {
-                if (std.mem.eql(u8, field.name, segments[1])) return classifyRef(field.type);
-            }
-            return .unresolved;
-        }
-        if (findUnion(sidecar.types, segments[0])) |tagged| {
-            for (tagged.arms) |arm| {
-                if (std.mem.eql(u8, arm.name, segments[1])) return classifyRef(arm.payload);
-            }
-            return .unresolved;
-        }
-    }
-    return .unresolved;
-}
-
-fn validateIntegerSlots(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diagnostics) error{OutOfMemory}!void {
-    const expected = try collectIntegerSlotPaths(arena, sidecar);
-
-    // The path grammar joins components with dots, so a component
-    // carrying its own dot would make two different slots spell one
-    // path — the bijection would silently thin. Refuse the ambiguity at
-    // its source.
-    for (expected) |path| {
-        if (path.components_dotted) {
-            diags.flag("integer_slots", "the i64 slot at \"{s}\" involves a name containing '.', which the slot path grammar cannot address unambiguously — rename it in the core source (V10)", .{path.path});
-        }
-    }
-    // Two DISTINCT slots spelling one path is the same ambiguity from
-    // another direction (a message union named `helpers` whose
-    // number_bytes field spells a helper's return slot, a table type
-    // sharing the message union's name): the bijection would consume
-    // entries interchangeably and one attestation would silently govern
-    // both slots.
-    for (expected, 0..) |path, index| {
-        for (expected[0..index]) |earlier| {
-            if (std.mem.eql(u8, earlier.path, path.path)) {
-                diags.flag("integer_slots", "two distinct i64 slots spell the one path \"{s}\" — the slot-path grammar cannot address them separately, so their attestations cannot be told apart; rename one of the colliding surfaces in the core source (V10)", .{path.path});
-            }
-        }
-    }
-    if (diags.hasErrors()) return;
-
-    // One-to-one both ways: every expected slot consumes exactly one
-    // entry, and no entry is left over or spent twice.
-    const consumed = try arena.alloc(bool, sidecar.integer_slots.len);
-    @memset(consumed, false);
-    outer: for (expected) |path| {
-        for (sidecar.integer_slots, 0..) |slot, index| {
-            if (!consumed[index] and std.mem.eql(u8, slot.slot, path.path)) {
-                consumed[index] = true;
-                continue :outer;
-            }
-        }
-        diags.flag("integer_slots", "the sidecar spells \"{s}\" i64 but attests no integer_slots entry for it — every i64 spelling has exactly one entry (V10)", .{path.path});
-    }
-    for (sidecar.integer_slots, 0..) |slot, index| {
-        if (consumed[index]) continue;
-        var duplicate = false;
-        for (sidecar.integer_slots[0..index]) |earlier| {
-            if (std.mem.eql(u8, earlier.slot, slot.slot)) duplicate = true;
-        }
-        const at = pathOfStatic(diags, "integer_slots[{d}].slot", .{index});
-        if (duplicate) {
-            diags.flag(at, "duplicate entry for \"{s}\" — every i64 slot has exactly one entry (V10)", .{slot.slot});
-            continue;
-        }
-        // The entry consumed nothing: resolve its path structurally so
-        // the teaching names what actually went wrong instead of one
-        // generic mismatch.
-        switch (resolveSlotPath(sidecar, slot.slot)) {
-            .integer => diags.flag(at, "\"{s}\" resolves to no slot the sidecar spells i64 — every entry must name a real i64 slot (V10)", .{slot.slot}),
-            .not_integer => |spelling| diags.flag(at, "\"{s}\" resolves to a slot the sidecar spells {s}, not i64 — an attested integer class must sit on an i64 spelling (V10)", .{ slot.slot, spelling }),
-            .slice_element => diags.flag(at, "\"{s}\" addresses a sequence — the format-1 slot-path grammar has no slice-element form, so slice elements are never integer-attested; the emitter spells them f64 and readers exempt them from the bijection (V10)", .{slot.slot}),
-            .unresolved => diags.flag(at, "\"{s}\" resolves against none of the sidecar's own tables — slot paths name a record field or union arm (<Type>.<name>), a message payload (\"{s}.<arm>\" or \"{s}.<arm>.<numberField>\"), or a helper signature slot (helpers.<name>.return, helpers.<name>.params[<index>]) (V10)", .{ slot.slot, sidecar.msg.name, sidecar.msg.name }),
-        }
-    }
 }
 
 /// Restate a validated sidecar after applying record-slot f64 demotions.
@@ -1771,56 +509,7 @@ fn validateIntegerSlots(arena: std.mem.Allocator, sidecar: Sidecar, diags: *Diag
 /// validates each path against the typed contract, so a miss here is internal
 /// projection drift rather than user input.
 pub fn projectF64SlotsJson(arena: std.mem.Allocator, source: []const u8, f64_slots: []const []const u8) ![]const u8 {
-    if (f64_slots.len == 0) return source;
-
-    var root = try std.json.parseFromSliceLeaky(std.json.Value, arena, source, .{});
-    const types = root.object.getPtr("types").?;
-    const structs = types.object.getPtr("structs").?;
-    for (f64_slots) |slot_path| {
-        const dot = std.mem.indexOfScalar(u8, slot_path, '.') orelse return error.ProjectionDrift;
-        const container = slot_path[0..dot];
-        const field_name = slot_path[dot + 1 ..];
-        var changed = false;
-        for (structs.array.items) |*entry| {
-            if (!std.mem.eql(u8, entry.object.get("name").?.string, container)) continue;
-            const fields = entry.object.getPtr("fields").?;
-            for (fields.array.items) |*field| {
-                if (!std.mem.eql(u8, field.object.get("name").?.string, field_name)) continue;
-                const ref = field.object.getPtr("type").?;
-                const kind = ref.object.getPtr("kind").?;
-                if (std.mem.eql(u8, kind.string, "optional")) {
-                    const inner = ref.object.getPtr("inner").?;
-                    inner.object.getPtr("kind").?.* = .{ .string = "f64" };
-                } else {
-                    kind.* = .{ .string = "f64" };
-                }
-                changed = true;
-                break;
-            }
-            break;
-        }
-        if (!changed) return error.ProjectionDrift;
-    }
-
-    const attestations = root.object.getPtr("integer_slots").?;
-    var index: usize = 0;
-    while (index < attestations.array.items.len) {
-        const slot = attestations.array.items[index].object.get("slot").?.string;
-        const demoted = for (f64_slots) |candidate| {
-            if (std.mem.eql(u8, slot, candidate)) break true;
-        } else false;
-        if (demoted) {
-            _ = attestations.array.orderedRemove(index);
-        } else {
-            index += 1;
-        }
-    }
-
-    var out: std.Io.Writer.Allocating = .init(arena);
-    var json: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .whitespace = .indent_2 } };
-    try json.write(root);
-    try out.writer.writeByte('\n');
-    return out.written();
+    return @import("invocation.zig").effective(arena, source, f64_slots);
 }
 
 // --------------------------------------------------------------- tests
@@ -1832,7 +521,7 @@ const testing = std.testing;
 pub const minimal_valid_json =
     \\{
     \\  "format": 1,
-    \\  "wire_version": 7,
+    \\  "wire_version": 10,
     \\  "abi_version": 2,
     \\  "compiler_version": "0.0.1",
     \\  "entry": "src/core.ts",
@@ -1890,6 +579,40 @@ pub const minimal_valid_json =
     \\  "async_free": true
     \\}
 ;
+
+test "compiled policy diagnostics and plan names remain owned across collect and init" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var diags = Diagnostics{ .arena = arena };
+    var parsed = try read(arena, minimal_valid_json, &diags);
+    const policy = @import("core_policy.zig");
+    parsed.types.structs = &.{
+        .{ .name = "Model", .fields = &.{} },
+        .{ .name = "Msg_insert", .fields = &.{
+            .{ .name = "label", .type = .bytes },
+            .{ .name = "active", .type = .bool },
+        } },
+    };
+    parsed.msg.arms = &.{.{ .name = "insert", .payload = .{ .record = "Msg_insert" } }};
+    const plan = try policy.evaluate(arena, parsed, "plan");
+    try testing.expectEqualStrings("Msg_insert", plan.inlined[0]);
+    try testing.expectEqualStrings("Msg_insert", plan.flattened[0]);
+    try testing.expectEqualStrings("Model", plan.node_stored[0]);
+    parsed.wire_version = std.math.maxInt(i64);
+    const refused = try policy.evaluate(arena, parsed, "core");
+    const before = try std.json.Stringify.valueAlloc(arena, refused, .{});
+    try testing.expect(std.mem.indexOf(u8, before, "9223372036854775807") != null);
+    for (0..12) |i| {
+        parsed.wire_version = @intCast(i + 20);
+        _ = try policy.evaluate(arena, parsed, if (i % 2 == 0) "core" else "facade");
+    }
+    const after = try std.json.Stringify.valueAlloc(arena, refused, .{});
+    try testing.expectEqualStrings(before, after);
+    try testing.expectEqualStrings("Msg_insert", plan.inlined[0]);
+    try testing.expectEqualStrings("Msg_insert", plan.flattened[0]);
+    try testing.expectEqualStrings("Model", plan.node_stored[0]);
+}
 
 test "drop_msg infers from the ABI export for older format-1 emitters" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -2399,6 +1122,114 @@ test "V11: an unknown export suffix refuses" {
     try expectRefusal(source, "abi.exports[22]", "not an export suffix of ABI version 2");
 }
 
+test "V11: the optional native view extension is unique and follows channels" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source = try replaced(arena, minimal_valid_json, "\"helper_call\"]", "\"helper_call\", \"native_view\"]");
+    const valid = try readValid(arena, source);
+    try testing.expect(abiHasExport(valid.abi, "native_view"));
+    const windows = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_window_view\"]");
+    const window_valid = try readValid(arena, windows);
+    try testing.expect(abiHasExport(window_valid.abi, "native_window_view"));
+    const policy = try replaced(arena, windows, "\"native_window_view\"]", "\"native_window_view\", \"native_radio_policy\"]");
+    const policy_valid = try readValid(arena, policy);
+    try testing.expect(abiHasExport(policy_valid.abi, "native_radio_policy"));
+    const tabs = try replaced(arena, policy, "\"native_radio_policy\"]", "\"native_radio_policy\", \"native_tabs_policy\"]");
+    const tabs_valid = try readValid(arena, tabs);
+    try testing.expect(abiHasExport(tabs_valid.abi, "native_tabs_policy"));
+    const tree = try replaced(arena, tabs, "\"native_tabs_policy\"]", "\"native_tabs_policy\", \"native_tree_policy\"]");
+    const tree_valid = try readValid(arena, tree);
+    try testing.expect(abiHasExport(tree_valid.abi, "native_tree_policy"));
+    const list = try replaced(arena, tree, "\"native_tree_policy\"]", "\"native_tree_policy\", \"native_list_policy\"]");
+    const list_valid = try readValid(arena, list);
+    try testing.expect(abiHasExport(list_valid.abi, "native_list_policy"));
+    const menu = try replaced(arena, list, "\"native_list_policy\"]", "\"native_list_policy\", \"native_menu_policy\"]");
+    const menu_valid = try readValid(arena, menu);
+    try testing.expect(abiHasExport(menu_valid.abi, "native_menu_policy"));
+    const toggle = try replaced(arena, menu, "\"native_menu_policy\"]", "\"native_menu_policy\", \"native_toggle_policy\"]");
+    const toggle_valid = try readValid(arena, toggle);
+    try testing.expect(abiHasExport(toggle_valid.abi, "native_toggle_policy"));
+    const accordion = try replaced(arena, toggle, "\"native_toggle_policy\"]", "\"native_toggle_policy\", \"native_accordion_policy\"]");
+    const accordion_valid = try readValid(arena, accordion);
+    try testing.expect(abiHasExport(accordion_valid.abi, "native_accordion_policy"));
+    const slider = try replaced(arena, accordion, "\"native_accordion_policy\"]", "\"native_accordion_policy\", \"native_slider_policy\"]");
+    const slider_valid = try readValid(arena, slider);
+    try testing.expect(abiHasExport(slider_valid.abi, "native_slider_policy"));
+    const split = try replaced(arena, slider, "\"native_slider_policy\"]", "\"native_slider_policy\", \"native_split_policy\"]");
+    const split_valid = try readValid(arena, split);
+    try testing.expect(abiHasExport(split_valid.abi, "native_split_policy"));
+    const scroll = try replaced(arena, split, "\"native_split_policy\"]", "\"native_split_policy\", \"native_scroll_policy\"]");
+    const scroll_valid = try readValid(arena, scroll);
+    try testing.expect(abiHasExport(scroll_valid.abi, "native_scroll_policy"));
+    const resizable = try replaced(arena, scroll, "\"native_scroll_policy\"]", "\"native_scroll_policy\", \"native_resizable_policy\"]");
+    const resizable_valid = try readValid(arena, resizable);
+    try testing.expect(abiHasExport(resizable_valid.abi, "native_resizable_policy"));
+    const text = try replaced(arena, resizable, "\"native_resizable_policy\"]", "\"native_resizable_policy\", \"native_text_policy\"]");
+    const text_valid = try readValid(arena, text);
+    try testing.expect(abiHasExport(text_valid.abi, "native_text_policy"));
+    const timer = try replaced(arena, text, "\"native_text_policy\"]", "\"native_text_policy\", \"native_timer_policy\"]");
+    const timer_valid = try readValid(arena, timer);
+    try testing.expect(abiHasExport(timer_valid.abi, "native_timer_policy"));
+    const db = try replaced(arena, timer, "\"native_timer_policy\"]", "\"native_timer_policy\", \"native_db_policy\"]");
+    const db_valid = try readValid(arena, db);
+    try testing.expect(abiHasExport(db_valid.abi, "native_db_policy"));
+    const effect = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_effect_policy\"]");
+    const effect_valid = try readValid(arena, effect);
+    try testing.expect(abiHasExport(effect_valid.abi, "native_effect_policy"));
+    const effect_duplicate = try replaced(arena, effect, "\"native_effect_policy\"]", "\"native_effect_policy\", \"native_effect_policy\"]");
+    try expectRefusal(effect_duplicate, "abi.exports[39]", "out of canonical order");
+    const window = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_window_policy\"]");
+    const window_policy_valid = try readValid(arena, window);
+    try testing.expect(abiHasExport(window_policy_valid.abi, "native_window_policy"));
+    const window_policy_duplicate = try replaced(arena, window, "\"native_window_policy\"]", "\"native_window_policy\", \"native_window_policy\"]");
+    try expectRefusal(window_policy_duplicate, "abi.exports[39]", "out of canonical order");
+    const theme = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_theme_policy\"]");
+    const theme_valid = try readValid(arena, theme);
+    try testing.expect(abiHasExport(theme_valid.abi, "native_theme_policy"));
+    const theme_duplicate = try replaced(arena, theme, "\"native_theme_policy\"]", "\"native_theme_policy\", \"native_theme_policy\"]");
+    try expectRefusal(theme_duplicate, "abi.exports[39]", "out of canonical order");
+    const status = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_status_policy\"]");
+    const status_valid = try readValid(arena, status);
+    try testing.expect(abiHasExport(status_valid.abi, "native_status_policy"));
+    const status_duplicate = try replaced(arena, status, "\"native_status_policy\"]", "\"native_status_policy\", \"native_status_policy\"]");
+    try expectRefusal(status_duplicate, "abi.exports[39]", "out of canonical order");
+    const db_duplicate = try replaced(arena, db, "\"native_db_policy\"]", "\"native_db_policy\", \"native_db_policy\"]");
+    try expectRefusal(db_duplicate, "abi.exports[38]", "out of canonical order");
+    const timer_duplicate = try replaced(arena, timer, "\"native_timer_policy\"]", "\"native_timer_policy\", \"native_timer_policy\"]");
+    try expectRefusal(timer_duplicate, "abi.exports[37]", "out of canonical order");
+    const text_duplicate = try replaced(arena, text, "\"native_text_policy\"]", "\"native_text_policy\", \"native_text_policy\"]");
+    try expectRefusal(text_duplicate, "abi.exports[36]", "out of canonical order");
+    const resizable_duplicate = try replaced(arena, resizable, "\"native_resizable_policy\"]", "\"native_resizable_policy\", \"native_resizable_policy\"]");
+    try expectRefusal(resizable_duplicate, "abi.exports[35]", "out of canonical order");
+    const scroll_duplicate = try replaced(arena, scroll, "\"native_scroll_policy\"]", "\"native_scroll_policy\", \"native_scroll_policy\"]");
+    try expectRefusal(scroll_duplicate, "abi.exports[34]", "out of canonical order");
+    const split_duplicate = try replaced(arena, split, "\"native_split_policy\"]", "\"native_split_policy\", \"native_split_policy\"]");
+    try expectRefusal(split_duplicate, "abi.exports[33]", "out of canonical order");
+    const slider_duplicate = try replaced(arena, slider, "\"native_slider_policy\"]", "\"native_slider_policy\", \"native_slider_policy\"]");
+    try expectRefusal(slider_duplicate, "abi.exports[32]", "out of canonical order");
+    const accordion_duplicate = try replaced(arena, accordion, "\"native_accordion_policy\"]", "\"native_accordion_policy\", \"native_accordion_policy\"]");
+    try expectRefusal(accordion_duplicate, "abi.exports[31]", "out of canonical order");
+    const toggle_duplicate = try replaced(arena, toggle, "\"native_toggle_policy\"]", "\"native_toggle_policy\", \"native_toggle_policy\"]");
+    try expectRefusal(toggle_duplicate, "abi.exports[30]", "out of canonical order");
+    const menu_duplicate = try replaced(arena, menu, "\"native_menu_policy\"]", "\"native_menu_policy\", \"native_menu_policy\"]");
+    try expectRefusal(menu_duplicate, "abi.exports[29]", "out of canonical order");
+    const list_duplicate = try replaced(arena, list, "\"native_list_policy\"]", "\"native_list_policy\", \"native_list_policy\"]");
+    try expectRefusal(list_duplicate, "abi.exports[28]", "out of canonical order");
+    const tree_duplicate = try replaced(arena, tree, "\"native_tree_policy\"]", "\"native_tree_policy\", \"native_tree_policy\"]");
+    try expectRefusal(tree_duplicate, "abi.exports[27]", "out of canonical order");
+    const tabs_duplicate = try replaced(arena, tabs, "\"native_tabs_policy\"]", "\"native_tabs_policy\", \"native_tabs_policy\"]");
+    try expectRefusal(tabs_duplicate, "abi.exports[26]", "out of canonical order");
+    const policy_duplicate = try replaced(arena, policy, "\"native_radio_policy\"]", "\"native_radio_policy\", \"native_radio_policy\"]");
+    try expectRefusal(policy_duplicate, "abi.exports[25]", "out of canonical order");
+    const window_duplicate = try replaced(arena, windows, "\"native_window_view\"]", "\"native_window_view\", \"native_window_view\"]");
+    try expectRefusal(window_duplicate, "abi.exports[24]", "out of canonical order");
+    const duplicate = try replaced(arena, source, "\"native_view\"]", "\"native_view\", \"native_view\"]");
+    try expectRefusal(duplicate, "abi.exports[23]", "out of canonical order");
+    const reordered = try replaced(arena, source, "\"helper_call\", \"native_view\"", "\"native_view\", \"helper_call\"");
+    try expectRefusal(reordered, "abi.exports[21]", "expected the unconditional export");
+}
+
 test "V11: a missing unconditional export refuses with the expected suffix" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -2428,8 +1259,8 @@ test "unknown payload descriptor kinds refuse as reader-too-old" {
 test "wire and abi version mismatches refuse with both values named" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
-    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"wire_version\": 7", "\"wire_version\": 8");
-    try expectRefusal(source, "wire_version", "generation 7, the sidecar declares 8");
+    const source = try replaced(arena_state.allocator(), minimal_valid_json, "\"wire_version\": 10", "\"wire_version\": 11");
+    try expectRefusal(source, "wire_version", "generation 10, the sidecar declares 11");
 }
 
 test "unknown fields warn and are ignored" {

@@ -240,6 +240,8 @@ pub const CanvasGpuCommand = struct {
 };
 
 pub const CanvasGpuPacket = struct {
+    /// Process-local portable packet preparation; never serialized or hashed.
+    preparation_policy: ?@import("gpu_packet_preparation_policy.zig").Policy = null,
     frame_index: u64 = 0,
     timestamp_ns: u64 = 0,
     /// Retained-command-state generation stamped into the binary wire
@@ -382,6 +384,10 @@ pub const RenderEncoderPlanner = struct {
         return .{ .commands = self.commands[0..self.len] };
     }
 
+    pub fn buildCompiled(self: *RenderEncoderPlanner, pass: canvas.CanvasRenderPass, policy: @import("gpu_planning_policy.zig").Policy) Error!RenderEncoderPlan {
+        return @import("gpu_planning_policy.zig").encoder(self, pass, policy);
+    }
+
     fn append(self: *RenderEncoderPlanner, command: RenderEncoderCommand) Error!void {
         if (self.len >= self.commands.len) return error.RenderEncoderListFull;
         self.commands[self.len] = command;
@@ -452,6 +458,10 @@ pub const CanvasGpuPacketPlanner = struct {
             .text_layout_action_count = pass.textLayoutActionCount(),
             .unsupported_command_count = self.unsupported_count,
         };
+    }
+
+    pub fn buildCompiled(self: *CanvasGpuPacketPlanner, pass: canvas.CanvasRenderPass, policy: @import("gpu_planning_policy.zig").Policy) Error!CanvasGpuPacket {
+        return @import("gpu_planning_policy.zig").packet(self, pass, policy);
     }
 
     fn append(self: *CanvasGpuPacketPlanner, command: CanvasGpuCommand) Error!void {

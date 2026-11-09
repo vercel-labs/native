@@ -273,7 +273,10 @@ pub const WidgetRuntimeFlags = packed struct(u8) {
     /// The runtime installed an OS-native scroll driver; engine-drawn
     /// scrollbar and kinetic physics stand down for this scroll view.
     native_scroll: bool = false,
-    _reserved: u6 = 0,
+    /// The callback accepts tagged scroll requests, independently of an
+    /// optional tree role sharing this scroll container's callback slot.
+    compiled_scroll_policy: bool = false,
+    _reserved: u5 = 0,
 };
 
 /// Two 128-line masks for code-only diff presentation. `Widget` packs them
@@ -901,6 +904,10 @@ pub const WidgetGroupSegment = enum {
 };
 
 pub const Widget = struct {
+    /// Portable appearance resolver installed by compiled views.
+    appearance_policy: ?*const fn ([]const u8, []u8) usize = null,
+    /// Optional portable retained component policy, installed by compiled views.
+    interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
     id: ObjectId = 0,
     kind: WidgetKind,
     frame: geometry.RectF = .{},
@@ -1183,6 +1190,9 @@ pub const Widget = struct {
 };
 
 pub const BuiltinComponentOptions = struct {
+    /// Explicit compiled construction for native toolkit extensions. Ordinary
+    /// TypeScript views receive the same owner through their Ui builder.
+    construction_policy: ?@import("component_construction_policy.zig").Policy = null,
     id: ObjectId = 0,
     frame: geometry.RectF = .{},
     opacity: f32 = 1,
@@ -1232,6 +1242,7 @@ pub const BuiltinSurfacePlacementOptions = struct {
     bounds: geometry.RectF,
     preferred_size: geometry.SizeF = .{},
     margin: f32 = 24,
+    surface_layout_policy: ?@import("surface_layout_policy.zig").Policy = null,
 };
 
 /// The input-catcher behind a modal surface: a full-bounds panel whose
@@ -1272,10 +1283,9 @@ pub const BuiltinSurfaceEnterAnimationOptions = struct {
 };
 
 pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinComponentOptions) Widget {
-    const descriptor = builtinComponentDescriptor(kind);
-    return .{
+    var widget: Widget = .{
         .id = options.id,
-        .kind = descriptor.root_widget_kind,
+        .kind = .stack,
         .frame = options.frame,
         .opacity = options.opacity,
         .transform = options.transform,
@@ -1296,13 +1306,24 @@ pub fn builtinComponentWidget(kind: BuiltinComponentKind, options: BuiltinCompon
         .layer = options.layer,
         .scrim = options.scrim,
         .state = options.state,
-        .layout = builtinComponentLayout(kind, options.size orelse builtinComponentDefaultSize(kind), options.layout),
-        .variant = options.variant orelse builtinComponentDefaultVariant(kind),
-        .size = options.size orelse builtinComponentDefaultSize(kind),
+        .layout = options.layout,
+        .variant = .default,
+        .size = .default,
         .style = options.style,
-        .semantics = builtinComponentSemantics(descriptor, options.semantics),
+        .semantics = options.semantics,
         .children = options.children,
     };
+    if (options.construction_policy) |policy| {
+        @import("component_construction_policy.zig").builtin(policy, kind, &widget, options);
+    } else {
+        const descriptor = builtinComponentDescriptor(kind);
+        widget.kind = descriptor.root_widget_kind;
+        widget.variant = options.variant orelse builtinComponentDefaultVariant(kind);
+        widget.size = options.size orelse builtinComponentDefaultSize(kind);
+        widget.layout = builtinComponentLayout(kind, widget.size, options.layout);
+        widget.semantics = builtinComponentSemantics(descriptor, options.semantics);
+    }
+    return widget;
 }
 
 pub fn widgetCommandPartId(part: WidgetCommandPart) ObjectId {
@@ -1351,6 +1372,14 @@ pub fn builtinStatusBarWidget(options: BuiltinStatusBarOptions) Widget {
 }
 
 pub fn builtinSurfaceFrame(kind: BuiltinComponentKind, options: BuiltinSurfacePlacementOptions) ?geometry.RectF {
+    if (options.surface_layout_policy) |policy| {
+        return @import("surface_layout_policy.zig").frame(policy, 0, switch (kind) {
+            .dialog => 0,
+            .drawer => 1,
+            .sheet => 2,
+            else => 255,
+        }, 0, &.{ options.bounds.x, options.bounds.y, options.bounds.width, options.bounds.height, options.preferred_size.width, options.preferred_size.height, 0, 0, 0, 0, 0, 0, options.margin });
+    }
     const bounds = options.bounds.normalized();
     if (bounds.isEmpty()) return null;
 
@@ -1647,11 +1676,12 @@ fn mergeLayoutDefaults(explicit: WidgetLayoutStyle, defaults: WidgetLayoutStyle)
     return merged;
 }
 
-test "Widget keeps the retained hot-path footprint after textarea policy flags" {
+test "Widget keeps the reviewed retained footprint with portable component and appearance policies" {
     // One layout tree holds thousands of Widgets by value. On the 64-bit
-    // targets that run the renderer, 776 bytes is the reviewed footprint;
-    // packing engine-only markers keeps the new textarea policy within it.
+    // targets that run the renderer, 792 bytes is the reviewed footprint:
+    // the 776-byte native widget plus two optional 8-byte policy callbacks.
+    // The callbacks borrow compiled code, with no per-widget allocation.
     if (@sizeOf(usize) == 8) {
-        try std.testing.expectEqual(@as(usize, 776), @sizeOf(Widget));
+        try std.testing.expectEqual(@as(usize, 792), @sizeOf(Widget));
     }
 }

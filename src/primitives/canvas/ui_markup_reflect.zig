@@ -49,6 +49,27 @@ pub fn Pointee(comptime T: type) type {
     };
 }
 
+/// Registered Markdown images are boundary data: source bytes, dimensions,
+/// and either an exact native integer or two unsigned identity words.
+pub fn isMarkdownImageItem(comptime Outer: type) bool {
+    const T = Pointee(Outer);
+    if (@typeInfo(T) != .@"struct") return false;
+    inline for (.{ "source", "image", "width", "height" }) |name| if (!@hasField(T, name)) return false;
+    if (sliceElement(@FieldType(T, "source")) != u8) return false;
+    if (!isImageNumber(@FieldType(T, "width")) or !isImageNumber(@FieldType(T, "height"))) return false;
+    const Identity = Pointee(@FieldType(T, "image"));
+    if (isImageNumber(Identity)) return true;
+    if (@typeInfo(Identity) != .@"struct" or !@hasField(Identity, "imageLower") or !@hasField(Identity, "imageUpper")) return false;
+    return @typeInfo(Identity).@"struct".fields.len == 2 and isImageNumber(@FieldType(Identity, "imageLower")) and isImageNumber(@FieldType(Identity, "imageUpper"));
+}
+
+fn isImageNumber(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .int, .float => true,
+        else => false,
+    };
+}
+
 /// The element type a `for each` can iterate from this declaration:
 /// slices, arrays, and single-item pointers to either.
 pub fn sliceElement(comptime T: type) ?type {
@@ -461,4 +482,26 @@ pub fn literalValueForAttribute(text: []const u8, attribute_name: []const u8) ex
     const info = schema.attrByName(attribute_name) orelse return literalValue(text);
     if (info.class == .text) return .{ .string = text };
     return literalValue(text);
+}
+
+/// Canonical viewport facts accepted by a model's windowed row query.
+pub fn declaredVirtualListRange(comptime T: type) bool {
+    if (@typeInfo(T) != .@"struct") return false;
+    const names = .{ "start_index", "end_index", "first_visible_index", "last_visible_index", "item_extent", "item_gap", "scroll_offset", "layout_offset", "content_extent", "before_extent", "after_extent", "anchor_extent" };
+    if (@typeInfo(T).@"struct".fields.len != names.len) return false;
+    inline for (names, 0..) |name, index| {
+        if (!@hasField(T, name)) return false;
+        if (index < 4) {
+            if (!isNumeric(@FieldType(T, name))) return false;
+        } else if (@typeInfo(@FieldType(T, name)) != .float) return false;
+    }
+    return true;
+}
+
+pub fn isVirtualItemFn(comptime Model: type, comptime DeclType: type) bool {
+    if (@typeInfo(DeclType) != .@"fn") return false;
+    const info = @typeInfo(DeclType).@"fn";
+    if ((info.params.len != 2 and info.params.len != 3) or info.params[0].type != *const Model or info.params[1].type == null or info.return_type == null) return false;
+    if (info.params.len == 3 and info.params[2].type != std.mem.Allocator) return false;
+    return declaredVirtualListRange(Pointee(info.params[1].type.?)) and sliceElement(info.return_type.?) != null;
 }

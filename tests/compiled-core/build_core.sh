@@ -8,8 +8,8 @@
 #   <fixture>: ai-chat | soundboard | system-monitor | host-fixture | markup
 #   <workdir>: scratch directory (created; contents replaced)
 #
-# The compiler resolves from the SDK's own exact-pinned dependency
-# (packages/core/node_modules — `npm ci` there installs it);
+# The compiler resolves from the SDK's own exact-pinned dependencies
+# (packages/core/node_modules — `npm ci` there installs them);
 # NATIVE_SDK_CORE_COMPILER overrides with any toolchain command, still
 # held to the pin.
 #
@@ -33,20 +33,24 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
   compiler="$NATIVE_SDK_CORE_COMPILER"
-elif [ -x "$repo/packages/core/node_modules/.bin/scriptc" ]; then
-  compiler="$repo/packages/core/node_modules/.bin/scriptc"
+elif compiler="$(node "$repo/packages/core/scripts/invoke_scriptc.mjs" --path 2>/dev/null)"; then
+  :
 else
   echo "the external core compiler is not installed — run \`npm ci --prefix $repo/packages/core\` (or point NATIVE_SDK_CORE_COMPILER at the pinned release's command)" >&2
   exit 2
 fi
 
-# The profile's determinism-fence table is RELEASE-PINNED DATA (see tools/corewire/emit_profile.zig): its ids resolve against one toolchain release's surface manifest, so the supplied command must BE that release. packages/core/package.json's dependencies.scriptc is the ONE place the pin lives — bump it there and everything downstream follows.
+# The profile's determinism-fence table is RELEASE-PINNED DATA (see tools/corewire/emit_profile.ts): its ids resolve against one toolchain release's surface manifest, so the supplied command must BE that release. packages/core/package.json's nativeToolchain.scriptc is the ONE place the pin lives — bump it there and everything downstream follows.
 pin="$(sed -n 's/.*"scriptc": *"\([0-9][0-9.]*\)".*/\1/p' "$repo/packages/core/package.json")"
 if [ -z "$pin" ]; then
   echo "packages/core/package.json carries no exact scriptc pin — the SDK tree is broken; reinstall or re-clone it" >&2
   exit 2
 fi
-reported="$($compiler -v)"
+if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
+  reported="$($compiler -v)"
+else
+  reported="$("$compiler" -v)"
+fi
 if [ "$reported" != "$pin" ]; then
   echo "external core toolchain reports version $reported, but the profile's fence table is pinned to $pin (packages/core/package.json) — supply that release, or bump the pin when the fence table has been re-verified against the new release's surface manifest" >&2
   exit 2
@@ -59,12 +63,12 @@ case "$fixture" in
     contract="ai-chat"
     ;;
   soundboard)
-    source_root="examples/soundboard-ts/src"
+    source_root="examples/soundboard/src"
     sources="core.ts library.ts player.ts"
     contract="soundboard"
     ;;
   system-monitor)
-    source_root="examples/system-monitor-ts/src"
+    source_root="examples/system-monitor/src"
     sources="core.ts parsers.ts table.ts"
     contract="system-monitor"
     ;;
@@ -107,6 +111,7 @@ mkdir -p "$work/sdk"
 #      Uint8Array directly and drop the alias declaration/imports.
 resolve_specifiers() {
   sed \
+    -e 's|"@native-sdk/core/bytes"|"./sdk/bytes.ts"|g' \
     -e 's|"@native-sdk/core/text"|"./sdk/text.ts"|g' \
     -e 's|"@native-sdk/core/events"|"./sdk/events.ts"|g' \
     -e 's|"@native-sdk/core"|"./sdk/core.ts"|g' \
@@ -131,7 +136,8 @@ done
 # field name. The two forms are interchangeable for these shapes (no
 # declaration merging, no inheritance), so the staged SDK event/text
 # modules spell them as aliases.
-for sdk_file in text.ts events.ts; do
+for sdk_file in bytes.ts text.ts events.ts internal/image_identity.ts internal/markdown_policy.ts; do
+  mkdir -p "$(dirname "$work/sdk/$sdk_file")"
   sed -e 's|^export interface \([A-Za-z0-9_]*\) {|export type \1 = {|' \
     "$repo/packages/core/sdk/$sdk_file" > "$work/sdk/$sdk_file"
 done
@@ -154,7 +160,7 @@ for src in $sources; do
   more="$(awk '/^export type [A-Za-z0-9_]+ =/ { print $3 }' "$work/$src" | tr '\n' ' ')"
   author_aliases="$author_aliases $more"
 done
-for sdk_file in text.ts events.ts; do
+for sdk_file in bytes.ts text.ts events.ts internal/image_identity.ts internal/markdown_policy.ts; do
   more="$(awk '/^export type [A-Za-z0-9_]+ =/ { print $3 }' "$work/sdk/$sdk_file" | tr '\n' ' ')"
   author_aliases="$author_aliases $more"
 done
@@ -179,12 +185,20 @@ cp "$staged/core_profile.json" "$work/profile.json"
 
 name="$(printf '%s' "$fixture" | tr '-' '_')_core"
 
+build_core() {
+  if [ -n "${NATIVE_SDK_CORE_COMPILER:-}" ]; then
+    $compiler build --lib --profile profile.json -o "$name"
+  else
+    node "$repo/packages/core/scripts/run_library_compiler.mjs" --profile profile.json --out "$name" --version "$pin"
+  fi
+}
+
 cd "$work"
 cold_start=$(date +%s)
-$compiler build --lib --profile profile.json -o "$name"
+build_core
 cold_end=$(date +%s)
 warm_start=$(date +%s)
-$compiler build --lib --profile profile.json -o "$name"
+build_core
 warm_end=$(date +%s)
 
 # The toolchain writes the ar archive at the bare -o name (some

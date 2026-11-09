@@ -1,4 +1,6 @@
 const std = @import("std");
+const motion_policy = @import("widget_motion_policy.zig");
+const sampling_policy = @import("motion_sampling_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
@@ -10,13 +12,11 @@ const canvas_widget_runtime = @import("canvas_widget_runtime.zig");
 const runtime_canvas_widget_scroll_drivers = @import("canvas_widget_scroll_drivers.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_canvas_widget_display = @import("canvas_widget_display.zig");
-const runtime_view = @import("view.zig");
 const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const widget_bridge = @import("widget_bridge.zig");
 
-const validateViewLabel = validation.validateViewLabel;
 const max_canvas_widget_nodes_per_view = canvas_limits.max_canvas_widget_nodes_per_view;
 const max_canvas_widget_semantics_per_view = canvas_limits.max_canvas_widget_semantics_per_view;
 const max_canvas_widget_text_bytes_per_view = canvas_limits.max_canvas_widget_text_bytes_per_view;
@@ -54,7 +54,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
     return struct {
         pub fn setCanvasWidgetLayout(self: *Runtime, window_id: platform.WindowId, label: []const u8, layout: canvas.WidgetLayoutTree) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (layout.nodes.len > max_canvas_widget_nodes_per_view) return error.WidgetNodeLimitReached;
@@ -76,7 +76,8 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             const previous_layout = self.views[index].widgetLayoutTree();
             const source_semantics = try layout.collectSemantics(&self.canvas_widget_source_semantics_scratch);
             const reconciled_nodes = &self.canvas_widget_reconcile_nodes;
-            const tokens = self.views[index].widget_tokens;
+            var tokens = self.views[index].widget_tokens;
+            tokens.text_run_policy = layout.text_run_policy orelse tokens.text_run_policy;
             // Reconcile scratch lives on the Runtime, not the stack: at
             // the 1024-node budget these arrays total several hundred
             // KiB, and the single-threaded event loop makes the shared
@@ -114,7 +115,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // regions before the copy so rebuild-time clamping and display
             // emission both see the flag (engine scrollbar + engine clamp
             // stand down; the OS scroller owns them).
-            ScrollDriverMethods(Runtime).stampCanvasWidgetNativeScroll(self, reconciled_nodes[0..reconciled_layout.nodes.len]);
+            ScrollDriverMethods(Runtime).stampCanvasWidgetNativeScroll(self, reconciled_nodes[0..reconciled_layout.nodes.len], self.views[index].canvas_widget_surface_scope_policy);
             // Engine-side rebuild clamp AFTER the stamp: natively driven
             // regions skip it, so a rebuild landing mid-rubber-band keeps
             // the OS scroller's overscrolled offset instead of clamping it
@@ -169,11 +170,11 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // replaces the former. The plan applies after the copy,
             // where it can restore the previous pose onto the freshly
             // retained nodes.
-            const disclosure_plan = planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
+            const disclosure_plan = try planCanvasWidgetDisclosureTween(self, index, previous_layout, reconciled_layout);
             // Drag reflow uses the same two-pose planning seam, but keeps
             // the adopted layout at its truthful final geometry and records
             // presentation-only offsets for keyed draggable widgets.
-            const drag_layout_motion_plan = planCanvasWidgetDragLayoutMotion(self, index, previous_layout, reconciled_layout);
+            const drag_layout_motion_plan = try planCanvasWidgetDragLayoutMotion(self, index, previous_layout, reconciled_layout);
             const previous_cursor = self.views[index].canvas_widget_cursor;
             const previous_widget_revision = self.views[index].widget_revision;
             // The adoption witness (`canvas_widget_layout_adoptions`)
@@ -253,7 +254,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn canvasWidgetLayout(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.WidgetLayoutTree {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             return self.views[index].widgetLayoutTree();
@@ -261,7 +262,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn canvasWidgetSemantics(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror![]const canvas.WidgetSemanticsNode {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             return self.views[index].widgetSemantics();
@@ -275,7 +276,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             action: runtime_api.CanvasWidgetAccessibilityAction,
         ) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (action.id == 0) return error.InvalidCommand;
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
@@ -370,7 +371,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn stepCanvasWidgetKineticScroll(self: *Runtime, window_id: platform.WindowId, label: []const u8, dt_ms: f32) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
 
@@ -416,7 +417,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// drag tracks the pointer and must re-wrap live.
         pub fn startCanvasWidgetLayoutTween(self: *Runtime, window_id: platform.WindowId, label: []const u8, tween: canvas.CanvasWidgetLayoutTween) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             try startCanvasWidgetLayoutTweenForView(self, index, tween, true);
@@ -435,6 +436,37 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         /// armed this tween IS the target declaration; echoing it back
         /// would be a redundant rebuild).
         fn startCanvasWidgetLayoutTweenForView(self: *Runtime, index: usize, tween: canvas.CanvasWidgetLayoutTween, announce: bool) anyerror!void {
+            if (self.views[index].widget_tokens.widget_motion_policy) |policy| {
+                const view = &self.views[index];
+                const node_index = view.canvasWidgetNodeIndexById(tween.id);
+                const active = view.findCanvasWidgetLayoutTween(tween.id);
+                const current = if (node_index) |i| view.widget_layout_nodes[i].widget.value else 0;
+                const flags = @as(u8, @intFromBool(tween.id != 0)) | (@as(u8, @intFromBool(std.math.isFinite(tween.to))) << 1) |
+                    (@as(u8, @intFromBool(if (node_index) |i| view.widget_layout_nodes[i].widget.kind == .split else false)) << 2) |
+                    (@as(u8, @intFromBool(active != null)) << 3) | (@as(u8, @intFromBool(self.appearance.reduce_motion)) << 4) |
+                    (@as(u8, @intFromBool(view.canvas_widget_layout_tween_count < view.canvas_widget_layout_tweens.len)) << 5) |
+                    (@as(u8, @intFromBool(announce)) << 6);
+                const plan = motion_policy.admission(policy, flags, tween.duration_ms, current, tween.to, if (active) |v| v.spec.to else 0);
+                if (plan.action == .invalid) return error.InvalidCommand;
+                if (plan.remove) view.removeCanvasWidgetLayoutTween(tween.id);
+                switch (plan.action) {
+                    .none => return,
+                    .snap => if (try view.applyCanvasWidgetSplitFraction(node_index.?, tween.to)) |dirty| {
+                        try CanvasWidgetEventMethods(Runtime).invalidateForCanvasWidgetDirty(self, index, dirty);
+                    },
+                    .arm => if (!view.armCanvasWidgetLayoutTween(.{ .spec = tween, .from = current })) @panic("compiled tween slot admission changed"),
+                    .retarget => {
+                        const retained = view.findCanvasWidgetLayoutTween(tween.id) orelse @panic("compiled tween owner vanished");
+                        retained.spec = tween;
+                        retained.from = current;
+                        retained.start_ns = 0;
+                    },
+                    .invalid => unreachable,
+                }
+                if (plan.announce) view.noteCanvasWidgetResizeEvent(tween.id);
+                if (plan.frame) try CanvasFrameMethods(Runtime).requestCanvasFrameForView(self, index);
+                return;
+            }
             if (tween.id == 0) return error.InvalidCommand;
             if (!std.math.isFinite(tween.to)) return error.InvalidCommand;
             const node_index = self.views[index].canvasWidgetNodeIndexById(tween.id) orelse return error.InvalidCommand;
@@ -485,10 +517,13 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         ///     tween re-arms on the first rebuild after release.
         fn armSourceDeclaredLayoutTweens(self: *Runtime, index: usize, source: canvas.WidgetLayoutTree) anyerror!void {
             for (source.nodes) |node| {
-                if (node.widget.kind != .split or node.widget.id == 0) continue;
-                if (node.widget.resize_duration_ms == 0) continue;
-                if (node.widget.value == 0) continue;
-                if (canvasWidgetSplitDividerPressed(self, index, node.widget.id)) continue;
+                if (self.views[index].widget_tokens.widget_motion_policy) |policy| {
+                    if (!motion_policy.source(policy, node.widget.kind, node.widget.id, canvasWidgetSplitDividerPressed(self, index, node.widget.id), node.widget.resize_duration_ms, node.widget.value)) continue;
+                } else {
+                    if (node.widget.kind != .split or node.widget.id == 0) continue;
+                    if (node.widget.resize_duration_ms == 0 or node.widget.value == 0) continue;
+                    if (canvasWidgetSplitDividerPressed(self, index, node.widget.id)) continue;
+                }
                 startCanvasWidgetLayoutTweenForView(self, index, .{
                     .id = node.widget.id,
                     .to = node.widget.value,
@@ -538,21 +573,17 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
         ///     reflow stopped being disclosure-shaped) — the new pose
         ///     stands snapped;
         ///   - `none`: nothing armed, nothing to arm.
-        const CanvasWidgetDisclosureAction = enum { none, arm, refresh, retire };
-
-        const CanvasWidgetDragLayoutMotionPlan = struct {
-            apply: bool = false,
-            motions: [canvas_limits.max_canvas_widget_drag_layout_motions_per_view]canvas.WidgetLayoutMotion = undefined,
-            motion_count: usize = 0,
-        };
+        const CanvasWidgetDisclosureAction = motion_policy.DisclosureAction;
+        const CanvasWidgetDragLayoutMotionPlan = motion_policy.DragPlan;
 
         /// FLIP planning for drag-driven list/board reflow. Each keyed
         /// draggable begins at its CURRENTLY PRESENTED origin (including an
         /// in-flight offset) and eases toward the newly declared frame. New
         /// placeholders have no previous pose and therefore appear as the
         /// honest blank destination immediately.
-        fn planCanvasWidgetDragLayoutMotion(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) CanvasWidgetDragLayoutMotionPlan {
+        fn planCanvasWidgetDragLayoutMotion(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) anyerror!CanvasWidgetDragLayoutMotionPlan {
             const view = &self.views[view_index];
+            if (self.views[view_index].widget_tokens.widget_motion_policy) |policy| return motion_policy.drag(self.owned_allocator, policy, previous, next, &self.views[view_index], self.appearance.reduce_motion);
             var plan = CanvasWidgetDragLayoutMotionPlan{};
             if (!view.canvas_widget_drag_layout_motion_armed) return plan;
             plan.apply = true;
@@ -632,21 +663,15 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             return previous_count > 0 or plan.motion_count > 0;
         }
 
-        const CanvasWidgetDisclosurePlan = struct {
-            action: CanvasWidgetDisclosureAction = .none,
-            duration_ms: u32 = 0,
-            revealing_ids: [canvas_limits.max_canvas_widget_disclosure_flips_per_view]canvas.ObjectId = undefined,
-            revealing_id_count: usize = 0,
-            moves: [canvas_limits.max_canvas_widget_disclosure_moves_per_view]runtime_view.CanvasWidgetDisclosureMove = undefined,
-            move_count: usize = 0,
-        };
+        const CanvasWidgetDisclosurePlan = motion_policy.DisclosurePlan;
 
         /// The planning half of the disclosure tween (see
         /// `CanvasWidgetDisclosureTweenState` for the design): pure
         /// reads over the previous retained pose and the reconciled
         /// next pose, no mutation — the caller applies the plan after
         /// the reconciled tree is retained.
-        fn planCanvasWidgetDisclosureTween(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) CanvasWidgetDisclosurePlan {
+        fn planCanvasWidgetDisclosureTween(self: *Runtime, view_index: usize, previous: canvas.WidgetLayoutTree, next: canvas.WidgetLayoutTree) anyerror!CanvasWidgetDisclosurePlan {
+            if (self.views[view_index].widget_tokens.widget_motion_policy) |policy| return motion_policy.disclosure(self.owned_allocator, policy, previous, next, &self.views[view_index], self.appearance.reduce_motion);
             var plan = CanvasWidgetDisclosurePlan{};
             const view = &self.views[view_index];
             const was_active = view.canvas_widget_disclosure_tween.active;
@@ -794,8 +819,9 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 const node = &view.widget_layout_nodes[move.node_index];
                 move.to_y = node.frame.y;
                 move.to_height = node.frame.height;
-                const y = move.from_y + (move.to_y - move.from_y) * tween.progress;
-                const height = move.from_height + (move.to_height - move.from_height) * tween.progress;
+                const pose = if (view.widget_tokens.widget_motion_policy) |policy| motion_policy.pose(policy, 2, tween.progress, move.from_y, move.to_y, move.from_height, move.to_height) else motion_policy.Pose{ .done = tween.progress >= 1, .a = move.from_y + (move.to_y - move.from_y) * tween.progress, .b = move.from_height + (move.to_height - move.from_height) * tween.progress };
+                const y = pose.a;
+                const height = pose.b;
                 if (node.frame.y == y and node.frame.height == height) continue;
                 node.frame.y = y;
                 node.frame.height = height;
@@ -829,19 +855,22 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // First advancing frame stamps the clock — the split
             // tween's discipline, so the ramp runs on the frame clock
             // from the first frame that could have painted it.
-            if (tween.start_ns == 0 or timestamp_ns < tween.start_ns) {
+            if (view.widget_tokens.widget_motion_policy) |policy| {
+                tween.start_ns = motion_policy.clock(policy, tween.start_ns, timestamp_ns);
+            } else if (tween.start_ns == 0 or timestamp_ns < tween.start_ns) {
                 tween.start_ns = timestamp_ns;
             }
-            const progress = canvas.layoutTweenProgress(tween.easing, tween.spring, tween.start_ns, tween.duration_ms, timestamp_ns);
-            const done = progress >= 1;
+            const progress = if (view.widget_tokens.widget_motion_policy) |policy| sampling_policy.progress(tween.easing, tween.spring, tween.start_ns, tween.duration_ms, timestamp_ns, policy) else canvas.layoutTweenProgress(tween.easing, tween.spring, tween.start_ns, tween.duration_ms, timestamp_ns);
+            const done = if (view.widget_tokens.widget_motion_policy) |policy| motion_policy.pose(policy, 1, progress, 0, 0, 0, 0).done else progress >= 1;
             tween.progress = progress;
 
             var dirty: ?geometry.RectF = null;
             for (tween.moves[0..tween.move_count]) |move| {
                 if (move.node_index >= view.widget_layout_node_count) continue;
                 const node = &view.widget_layout_nodes[move.node_index];
-                const y = if (done) move.to_y else move.from_y + (move.to_y - move.from_y) * progress;
-                const height = if (done) move.to_height else move.from_height + (move.to_height - move.from_height) * progress;
+                const pose = if (view.widget_tokens.widget_motion_policy) |policy| motion_policy.pose(policy, 1, progress, move.from_y, move.to_y, move.from_height, move.to_height) else motion_policy.Pose{ .done = done, .a = if (done) move.to_y else move.from_y + (move.to_y - move.from_y) * progress, .b = if (done) move.to_height else move.from_height + (move.to_height - move.from_height) * progress };
+                const y = pose.a;
+                const height = pose.b;
                 if (node.frame.y == y and node.frame.height == height) continue;
                 dirty = unionDisclosureDirty(dirty, node.frame.normalized());
                 node.frame.y = y;
@@ -879,13 +908,18 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             for (view.canvas_widget_drag_layout_motions[0..view.canvas_widget_drag_layout_motion_count]) |motion_value| {
                 if (view.canvasWidgetNodeIndexById(motion_value.id) == null) continue;
                 var motion = motion_value;
-                if (motion.start_ns == 0 or timestamp_ns < motion.start_ns) motion.start_ns = timestamp_ns;
-                const progress = canvas.layoutTweenProgress(motion.easing, motion.spring, motion.start_ns, motion.duration_ms, timestamp_ns);
-                if (progress >= 1) continue;
-                motion.offset = geometry.OffsetF.init(
-                    motion.from_offset.dx * (1 - progress),
-                    motion.from_offset.dy * (1 - progress),
-                );
+                if (view.widget_tokens.widget_motion_policy) |policy| {
+                    motion.start_ns = motion_policy.clock(policy, motion.start_ns, timestamp_ns);
+                } else if (motion.start_ns == 0 or timestamp_ns < motion.start_ns) motion.start_ns = timestamp_ns;
+                const progress = if (view.widget_tokens.widget_motion_policy) |policy| sampling_policy.progress(motion.easing, motion.spring, motion.start_ns, motion.duration_ms, timestamp_ns, policy) else canvas.layoutTweenProgress(motion.easing, motion.spring, motion.start_ns, motion.duration_ms, timestamp_ns);
+                if (view.widget_tokens.widget_motion_policy) |policy| {
+                    const pose = motion_policy.pose(policy, 3, progress, motion.from_offset.dx, 0, motion.from_offset.dy, 0);
+                    if (pose.done) continue;
+                    motion.offset = .init(pose.a, pose.b);
+                } else {
+                    if (progress >= 1) continue;
+                    motion.offset = geometry.OffsetF.init(motion.from_offset.dx * (1 - progress), motion.from_offset.dy * (1 - progress));
+                }
                 view.canvas_widget_drag_layout_motions[write_index] = motion;
                 write_index += 1;
             }
@@ -928,12 +962,15 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
                 // First advancing frame stamps the clock: the ramp runs
                 // on the frame clock from the first frame that could
                 // have painted it, the manual idiom's discipline.
-                if (tween.start_ns == 0 or timestamp_ns < tween.start_ns) {
+                if (self.views[view_index].widget_tokens.widget_motion_policy) |policy| {
+                    tween.start_ns = motion_policy.clock(policy, tween.start_ns, timestamp_ns);
+                } else if (tween.start_ns == 0 or timestamp_ns < tween.start_ns) {
                     tween.start_ns = timestamp_ns;
                 }
-                const progress = canvas.layoutTweenProgress(tween.spec.easing, tween.spec.spring, tween.start_ns, tween.spec.duration_ms, timestamp_ns);
-                const done = progress >= 1;
-                const value = if (done) tween.spec.to else tween.from + (tween.spec.to - tween.from) * progress;
+                const progress = if (self.views[view_index].widget_tokens.widget_motion_policy) |policy| sampling_policy.progress(tween.spec.easing, tween.spec.spring, tween.start_ns, tween.spec.duration_ms, timestamp_ns, policy) else canvas.layoutTweenProgress(tween.spec.easing, tween.spec.spring, tween.start_ns, tween.spec.duration_ms, timestamp_ns);
+                const pose = if (self.views[view_index].widget_tokens.widget_motion_policy) |policy| motion_policy.pose(policy, 0, progress, tween.from, tween.spec.to, 0, 0) else motion_policy.Pose{ .done = progress >= 1, .a = if (progress >= 1) tween.spec.to else tween.from + (tween.spec.to - tween.from) * progress, .b = 0 };
+                const done = pose.done;
+                const value = pose.a;
                 const dirty = if (done)
                     try self.views[view_index].applyCanvasWidgetSplitFraction(node_index, value)
                 else
@@ -967,7 +1004,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn setCanvasWidgetDesignTokens(self: *Runtime, window_id: platform.WindowId, label: []const u8, tokens: canvas.DesignTokens) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (std.meta.eql(self.views[index].widget_tokens, tokens)) return self.views[index].info();
@@ -982,7 +1019,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn canvasWidgetDesignTokens(self: *const Runtime, window_id: platform.WindowId, label: []const u8) anyerror!canvas.DesignTokens {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             return self.views[index].widget_tokens;
@@ -990,7 +1027,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn canvasWidgetTextGeometry(self: *const Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId) anyerror!canvas.WidgetTextGeometry {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (id == 0) return error.InvalidCommand;
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
@@ -1001,7 +1038,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
 
         pub fn editCanvasWidgetText(self: *Runtime, window_id: platform.WindowId, label: []const u8, id: canvas.ObjectId, edit: canvas.TextInputEvent) anyerror!platform.ViewInfo {
             try validateRuntimeViewParent(self, window_id);
-            try validateViewLabel(label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, label);
             if (id == 0) return error.InvalidCommand;
             const index = runtimeFindViewIndex(self, window_id, label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
@@ -1011,7 +1048,7 @@ pub fn RuntimeCanvasWidgetState(comptime Runtime: type) type {
             // source (the keyboard choke point's rule): a single-line
             // field's editor never accepts a line break, whoever writes.
             const node = self.views[index].widgetLayoutTree().findById(id) orelse return error.InvalidCommand;
-            const sanitized = canvas.sanitizedSingleLineTextInputEvent(node.widget.kind, edit) orelse return self.views[index].info();
+            const sanitized = canvas.sanitizedTextInputEventForWidget(node.widget, edit) orelse return self.views[index].info();
             if (self.views[index].canvasWidgetTextEditNeedsLargeStorage(id, sanitized)) {
                 try ensureCanvasWidgetLargeTextStorageThrough(self, index);
             }

@@ -2,15 +2,15 @@
     .id = "dev.native_sdk.system_monitor",
     .name = "system-monitor",
     .display_name = "System Monitor",
-    .description = "Live CPU, memory, and process sampling on a native canvas.",
+    .description = "Live CPU, memory, and process sampling authored entirely in TypeScript + Native markup.",
     .version = "0.1.0",
     .platforms = .{"macos"},
-    .permissions = .{ "view", "command" },
-    .capabilities = .{ "native_views", "gpu_surfaces", "shortcuts" },
+    // The clipboard permission covers the Copy Name context action
+    // (Cmd.clipboardWrite); command covers the sampler spawns (`ps`,
+    // `vm_stat`/`meminfo`, the boot probe, and the confirmed SIGTERM).
+    .permissions = .{ "view", "command", "clipboard" },
+    .capabilities = .{ "native_views", "gpu_surfaces" },
     .shortcuts = .{
-        // The standard settings shortcut (primary+comma): delivered as a
-        // command event and mapped to `.open_settings` in main.zig's
-        // `command` — the same code path the app-menu Settings item uses.
         .{ .id = "monitor.settings", .key = ",", .modifiers = .{"primary"} },
     },
     .shell = .{
@@ -22,10 +22,14 @@
                 .height = 720,
                 // The tile grid is machined for exactly this content
                 // size; the floor stops the resize where clipping would
-                // begin (proven by the layout audit sweep).
+                // begin (the Zig original's rule).
                 .min_width = 1144,
                 .min_height = 720,
                 .restore_policy = "center_on_primary",
+                // The header bar IS the titlebar: the core's chromeMsg
+                // channel delivers the band geometry, and the header row
+                // pads past the traffic lights and matches the band's
+                // height (see src/app.native).
                 .titlebar = "hidden_inset_tall",
                 .views = .{
                     .{ .label = "monitor-canvas", .kind = "gpu_surface", .fill = true, .role = "System monitor canvas", .accessibility_label = "System monitor", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
@@ -40,5 +44,4 @@
         },
     },
     .web_engine = "system",
-    .cef = .{ .dir = "third_party/cef/macos", .auto_install = false },
 }

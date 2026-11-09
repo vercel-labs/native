@@ -2,9 +2,88 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.10.1
+## 0.11.1
 
 <!-- release:start -->
+
+### New Features
+
+- **Global shortcuts with press and release**: Apps can register shortcuts that fire while any app has focus and receive both the press and the release, so hold-to-talk works (#744).
+- **Synthetic keyboard input**: Apps can send key chords such as `primary+V` to the focused app, behind a new `keyboard_input` permission (#745).
+- **Layout-aware key codes**: Shortcut key names map to macOS and Windows key codes in one place and resolve through the current keyboard layout, so chords keep working on Dvorak and AZERTY (#743).
+
+### Bug Fixes
+
+- **Published package as a Zig dependency**: Projects that depend on `@native-sdk/cli` as a Zig path dependency can evaluate their build graph again; `build.zig` no longer needs test files that the npm package does not ship (#713, #763).
+- **Matching Geist font weights**: Built-in medium and bold text render with matching Geist faces, restoring weight differences in software presentation and screenshots (#688).
+- **macOS window chrome follows the app theme**: Windows, including new and hidden secondary windows, use the app's light or dark scheme, and returning to the system appearance clears the override (#691).
+- **WebView inspection in development only**: Debug builds enable macOS WebView inspection and release builds disable it; `-Dwebview-inspect` overrides either default (#690).
+
+### Improvements
+
+- **Compiled TypeScript views in native dev**: `native dev` runs compiled TypeScript views by default, reloads them from markup edits, and reports provenance and write-back for edits.
+- **Markup runtime in TypeScript**: Markup preparation, expression parsing, element and attribute coordination, static expansion, and retained widget, scroll, virtual window, context-menu, and WebView pane coordination now run in TypeScript compiled by scriptc (#692, #693, #694, #696, #697, #698, #699, #700, #701, #702, #703, #704, #705, #714, #720, #727).
+- **Faster frames**: Exact text and metric decisions from compiled policies are reused across frames.
+- **Editor declarations without the TypeScript compiler**: Editor declarations are generated directly, and TypeScript app markup is checked with the TypeScript view compiler.
+- **Toolchain and release updates**: scriptc 0.3.2, docs on TypeScript 7, and pinned release workflow actions (#706).
+
+### Contributors
+
+- @ctate
+- @lahfir
+- @zogien
+
+<!-- release:end -->
+
+## 0.11.0
+
+### New Features
+
+- **TypeScript tests for compiled apps**: `@native-sdk/core/testing` and `native test` launch isolated native processes to drive widgets, inspect models and accessibility snapshots, answer fake effects, fire timers, and verify recorded sessions (#483).
+- **Reusable Native markup components**: Root views can import component files under `src/`, including release and mobile builds, with preserved hot reload, window boundaries, and ejected component behavior (#416, #417, #420).
+- **Segmented controls and square corners**: Native markup supports segmented controls and reusable stepper and timeline templates, and the `none` radius token keeps surfaces and their content clips square (#403, #417).
+- **Compiled typography and model themes**: TypeScript apps can declare typography and derive theme overrides from their model, with matching compiled views, font metrics, and native rendering (#575).
+- **Windowed list markup**: `virtual-window` and `virtual-list` render keyed rows over retained virtual windows, including extent estimates, overscan, scroll bindings, and leading or trailing anchors (#563, #565, #566, #567, #580).
+
+### Bug Fixes
+
+- **Reliable startup effects**: Command codecs initialize before boot commands are encoded, so startup requests use the correct lookup tables (#463).
+- **Safer markup validation**: Repeated virtual-list attributes are rejected before fixed-capacity projections, and numeric-looking text attributes retain their literal text (#427, #580).
+- **Correct structured integer inference**: Forwarded message records and contextual union arms preserve their integer contracts across modules, including Deck dispatch and SQLite result boundaries (#643).
+- **Predictable wheel scrolling**: Mechanical wheel notches on GTK and Windows apply the configured scroll distance without starting kinetic flings; recorded sessions preserve the input distinction (#470).
+- **Bounded audio spectrum reads**: macOS spectrum analysis stays within available FFT bins and silences bands above Nyquist, including low sample rates (#468).
+- **Reliable platform links**: Windows GNU TypeScript core and service builds use Zig's C compiler, optimized macOS links retain updater exports, and iOS development apps rebuild with Darwin alignment and include the simulator sanitizer runtime when required (#465, #466, #467, #469).
+- **Usable external URL policies**: Manifest validation rejects unsupported allowlist wildcards, and failed URL effects report their result (#464).
+- **Installed CLI skills**: Skill discovery resolves the payload shipped in split npm installations (#405).
+
+### Improvements
+
+- **Compiled TypeScript views by default**: Build and test paths compile views beside TypeScript app models, keep committed model ownership in the compiled core, and preserve complete ABI and integer contracts (#485, #486, #487, #488, #489, #620, #621, #674).
+- **Portable interaction behavior**: Control selection, keyboard and pointer intent, focus, text editing and history, composition, tooltips, menus, dragging, and surface dismissal now run in TypeScript compiled by scriptc, with native capabilities supplying input and OS execution (#491, #492, #493, #523, #535, #550, #551, #591, #600, #657, #658).
+- **Portable layout and painting**: Compiled TypeScript owns component construction, intrinsic and wrapped measurement, container and grid layout, virtual flow, retained damage, control painters, code and Markdown presentation, charts, and terminal canvas programs (#557, #559, #560, #561, #562, #572, #593, #595, #596, #598, #608, #612, #618, #686).
+- **Portable text and GPU planning**: Text runs, rich-text queries, measured widths, glyph atlas planning, vector geometry, resource budgets, GPU packet encoding, animation sampling, retained scene observations, and presentation decisions move into compiled TypeScript while native code supplies font, raster, and GPU execution (#622, #623, #624, #625, #629, #630, #631, #632, #633, #634, #635, #648, #650, #651, #652, #653, #654, #655).
+- **Portable app and capability coordination**: Compiled TypeScript coordinates timers, requests, streams, media, clipboard, persistence, dispatch, windows, shell installation, capability admission, and bridge authorization without changing effect or OS ownership contracts (#525, #526, #527, #528, #529, #530, #532, #582, #583, #584, #585, #586, #587, #588, #659, #660, #662, #663, #664, #665, #666, #667, #668, #669, #684).
+- **Portable automation and replay**: Accessibility publication, command and status policies, command grammar, interaction recipes, recording, replay progress, journals, blobs, profiles, and complete snapshot serialization run through compiled TypeScript with native reference parity (#590, #644, #645, #670, #672, #675, #676, #677, #678, #679, #680, #683).
+- **Portable build coordination**: Corewire profile and source generation, contract intake, service projections, file coordination, entry orchestration, and markup development recovery move into TypeScript, with a shared compiler source inventory (#484, #553, #554, #555, #556, #589, #649, #681, #682, #685).
+- **TypeScript showcase apps**: Showcase app logic and coordination migrate to TypeScript, including Inbox, Canvas Preview, Effects Probe, Video Player, Notes, Workbench, Feed, Markdown Viewer, Split Collapse, Code Editor, Channel Monitor, GPU Dashboard, and Deck (#573, #576, #577, #578, #579, #580, #636, #637, #638, #640, #641, #643).
+- **Verified scriptc 0.3.0 toolchain**: Matching compiler, API, types, and runtime packs are installed from integrity-pinned releases; incomplete or mixed installations are rejected. Debug fixture builds select development profiles while retaining complete exports and integer obligations (#639, #661, #671, #673).
+- **Less rendering work**: Linux GTK converts only damaged device pixels when safe, and text paths avoid initializing unused scratch storage (#434, #647).
+- **Faster CI partitions**: Zig Core runs across six complete shards with a required aggregate check, preserving the full local suite (#534).
+- **Updated documentation**: The documentation is reorganized around TypeScript and Native markup and uses Geistdocs for navigation, search, Markdown routes, and discovery while preserving established URLs and component previews (#508, #522).
+
+### Contributors
+
+- @ctate
+- @Railly
+- @sepehr-safari
+- @donpark
+- @kitada-brisys
+- @mynameistito
+- @groundfast
+- @eduardogarre
+- @fx89757
+
+## 0.10.1
 
 ### Bug Fixes
 
@@ -13,8 +92,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 ### Contributors
 
 - @ctate
-
-<!-- release:end -->
 
 ## 0.10.0
 

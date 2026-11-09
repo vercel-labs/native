@@ -697,6 +697,13 @@ pub fn parseTextForPath(allocator: std.mem.Allocator, path: []const u8, source: 
 }
 
 fn metadataFromRaw(allocator: std.mem.Allocator, raw: RawManifest) !Metadata {
+    if (raw.assets.fonts.len > 8) return error.TooManyFontAssets;
+    for (raw.assets.fonts, 0..) |font, index| {
+        if (font.id < 64 or font.id > 9_007_199_254_740_991) return error.InvalidFontAssetId;
+        try validateRelativePath(font.path);
+        if (!std.mem.startsWith(u8, font.path, "assets/")) return error.InvalidFontAssetPath;
+        for (raw.assets.fonts[0..index]) |previous| if (previous.id == font.id) return error.DuplicateFontAssetId;
+    }
     return .{
         .id = try allocator.dupe(u8, raw.id),
         .name = try allocator.dupe(u8, raw.name),
@@ -3890,4 +3897,32 @@ test "manifest validation resolves explicit DMG file items beside app.zon" {
     const missing = try validateFile(std.testing.allocator, std.testing.io, root ++ "/app.zon");
     try std.testing.expect(!missing.ok);
     try std.testing.expect(std.mem.indexOf(u8, missing.message, "dmg item source could not be read") != null);
+}
+
+test "font manifests enforce permanent ids, bundled paths and the native slot bound" {
+    const allocator = std.testing.allocator;
+    const good = try parseJsonText(allocator,
+        \\{"id":"dev.test.fonts","name":"fonts","version":"0.1.0","assets":{"fonts":[{"id":64,"path":"assets/mono.ttf"}]}}
+    );
+    good.deinit(allocator);
+    const zon = try parseText(allocator, ".{ .id = \"dev.test.fonts\", .name = \"fonts\", .version = \"0.1.0\", .assets = .{ .fonts = .{ .{ .id = 64, .path = \"assets/mono.ttf\" } } } }");
+    zon.deinit(allocator);
+    const nine = try std.fmt.allocPrint(
+        allocator,
+        "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":[{s}]}}}}",
+        .{"{\"id\":64,\"path\":\"assets/a.ttf\"}," ** 8 ++ "{\"id\":65,\"path\":\"assets/b.ttf\"}"},
+    );
+    defer allocator.free(nine);
+    try std.testing.expectError(error.TooManyFontAssets, parseJsonText(allocator, nine));
+    for ([_]struct { fonts: []const u8, err: anyerror }{
+        .{ .fonts = "[{\"id\":9007199254740992,\"path\":\"assets/a.ttf\"}]", .err = error.InvalidFontAssetId },
+        .{ .fonts = "[{\"id\":63,\"path\":\"assets/a.ttf\"}]", .err = error.InvalidFontAssetId },
+        .{ .fonts = "[{\"id\":64,\"path\":\"a.ttf\"}]", .err = error.InvalidFontAssetPath },
+        .{ .fonts = "[{\"id\":64,\"path\":\"assets/../a.ttf\"}]", .err = error.InvalidPath },
+        .{ .fonts = "[{\"id\":64,\"path\":\"assets/a.ttf\"},{\"id\":64,\"path\":\"assets/b.ttf\"}]", .err = error.DuplicateFontAssetId },
+    }) |case| {
+        const source = try std.fmt.allocPrint(allocator, "{{\"id\":\"dev.test.fonts\",\"name\":\"fonts\",\"version\":\"0.1.0\",\"assets\":{{\"fonts\":{s}}}}}", .{case.fonts});
+        defer allocator.free(source);
+        try std.testing.expectError(case.err, parseJsonText(allocator, source));
+    }
 }

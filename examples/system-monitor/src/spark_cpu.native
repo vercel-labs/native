@@ -1,8 +1,0 @@
-<!-- The CPU sparkline: zero-baseline bars pinned to the absolute 0..1
-     domain (percent of all cores). The 239x32 box is the tile plot
-     geometry (view.zig's spark_width/spark_height constants); the
-     values binding is the model's NaN-padded 60-sample window, so a
-     filling history enters from the right edge. -->
-<chart width="239" height="32" y-min="0" y-max="1" label="CPU history">
-  <series kind="bar" values="{cpuSpark}" />
-</chart>

@@ -1321,15 +1321,15 @@ test "the README-shaped fixture renders through the mapper and the reference ren
 // 760x2400 with default tokens and the deterministic bundled-face
 // metrics. It pins the whole document register in one number: heading
 // scales, wrapped bullets and em-dash spacing at the face's real
-// advances, real sans and mono outlines (fixed-pitch runs sit in their
-// 0.6 em cells), face-owned `.notdef` outlines for uncovered symbols,
-// GFM tables as borderless cells on hairline row
+// advances, regular/medium/bold sans and mono outlines (fixed-pitch
+// runs sit in their 0.6 em cells), face-owned `.notdef` outlines for
+// uncovered symbols, GFM tables as borderless cells on hairline row
 // separators with vertically centered cell content, bare fenced code
 // with preserved source indentation and language-token colors, and
 // near-black underlined links.
 // Update deliberately when markdown rendering changes, reviewing the
 // rendered pixels first (see reference_tests.zig conventions).
-const markdown_document_reference_signature: u64 = 5644786907234856288;
+const markdown_document_reference_signature: u64 = 10573377683347322420;
 
 fn markdownGoldenDumpRequested() bool {
     if (comptime !@import("builtin").link_libc) return false;

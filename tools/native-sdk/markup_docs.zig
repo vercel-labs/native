@@ -52,7 +52,10 @@ pub const element_docs = [_]Doc{
     .{ .name = "tabs", .doc = "Row container for a tab strip; children (buttons with selected) flow horizontally." },
     .{ .name = "toggle-group", .doc = "Row container grouping toggle-buttons; children flow horizontally." },
     .{ .name = "table", .doc = "Vertical table container; children are table-row elements." },
-    .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table, children are table-cells." },
+    .{ .name = "data-grid", .doc = "Data-grid container; children are table-row elements with table-cell children." },
+    .{ .name = "popover", .doc = "Overlay surface; children stack. Supports anchor placement and on-dismiss for model-owned visibility." },
+    .{ .name = "menu-surface", .doc = "Vertical menu surface. Supports anchor placement and on-dismiss for model-owned visibility." },
+    .{ .name = "table-row", .doc = "Horizontal table row; only allowed inside a table or data-grid, children are table-cells." },
     .{ .name = "table-cell", .doc = "Table cell text leaf; only allowed inside a table-row, dispatch with on-press." },
     .{ .name = "dropdown-menu", .doc = "Vertical menu surface; children are menu-item elements. anchor=\"below|above\" floats it against its parent (put it beside its trigger in a stack): late z-pass above the whole tree, window-clipped, auto-flipping at the edges. Pair with on-dismiss so Escape/click-outside close model-side." },
     .{ .name = "accordion", .doc = "Surface with a header (text attribute); children show when selected, dispatch with on-toggle." },
@@ -92,6 +95,8 @@ pub const element_docs = [_]Doc{
 };
 
 pub const structure_docs = [_]Doc{
+    .{ .name = "virtual-window", .doc = "Declare one retained virtual range around a single root; its as name exposes the complete range to children, and exactly one virtual-list consumes it." },
+    .{ .name = "virtual-list", .doc = "Render the enclosing virtual window through a Model-first range query. Each returned row has one keyed root; ordinary scroll styles and reach events apply." },
     .{ .name = "for", .doc = "Structure tag: repeats its element children over each (elements, use, if/else, nested for); requires each and as, key names an item field. A directly following else renders when the iterable is empty." },
     .{ .name = "if", .doc = "Structure tag: renders children when test={binding} or {a == b} is true." },
     .{ .name = "else", .doc = "Structure tag: must directly follow an if (renders when the test is false) or a for (renders when the iterable is empty)." },
@@ -101,7 +106,28 @@ pub const structure_docs = [_]Doc{
     .{ .name = "slot", .doc = "Template bodies only, at most one: marks where use-site children are inserted. Attribute-less leaf; a use with no children renders it empty." },
 };
 
+pub const virtual_window_attr_docs = [_]Doc{
+    .{ .name = "id", .doc = "Stable retained-list identity, unique within the view." },
+    .{ .name = "as", .doc = "Local name exposing the complete virtual range, including visible and rendered bounds, content extent, offset, and row extent." },
+    .{ .name = "item-count", .doc = "Total number of available rows, a literal or one model binding." },
+    .{ .name = "item-extent", .doc = "Fixed row extent in points." },
+    .{ .name = "extent-estimate", .doc = "Exported Model-first numeric index helper returning a row extent; its identity survives view rebuilds." },
+    .{ .name = "gap", .doc = "Space between rows; included in the virtual content extent." },
+    .{ .name = "overscan", .doc = "Number of extra rows rendered before and after the visible range." },
+    .{ .name = "viewport-fallback", .doc = "Viewport extent before the retained scroll widget has reported its actual size." },
+    .{ .name = "index-base", .doc = "Global starting index for the virtual range; defaults to zero." },
+    .{ .name = "anchor", .doc = "leading or trailing virtual-list anchor; defaults to leading." },
+};
+
+pub const virtual_list_attr_docs = [_]Doc{
+    .{ .name = "window", .doc = "Enclosing virtual-window as name; each declaration is consumed exactly once." },
+    .{ .name = "each", .doc = "Exported Model-first query taking the complete virtual range and returning exactly one record per rendered index." },
+    .{ .name = "as", .doc = "Local row binding used by the single keyed child template." },
+};
+
 pub const attribute_docs = [_]Doc{
+    .{ .name = "backdrop-blur", .doc = "Backdrop blur token: none, sm, or md. Resolves against the current design tokens." },
+    .{ .name = "command", .doc = "Command name retained with a widget and dispatched by the runtime when the control activates; a literal or one {binding}. Message handlers remain independent." },
     .{ .name = "text", .doc = "Text value for text-bearing elements; a literal or one {binding}." },
     .{ .name = "placeholder", .doc = "Hint text shown while a text entry is empty." },
     .{ .name = "value", .doc = "Value for slider/progress/text entry; a literal or one {binding}." },
@@ -150,6 +176,7 @@ pub const attribute_docs = [_]Doc{
     .{ .name = "accent-foreground", .doc = "Accent foreground color token (literal ColorTokens field name, e.g. accent_text)." },
     .{ .name = "border-color", .doc = "Border color token (literal ColorTokens field name, e.g. border)." },
     .{ .name = "focus-ring", .doc = "Focus ring color token (literal ColorTokens field name, e.g. focus_ring)." },
+    .{ .name = "focusable", .doc = "Whether the widget participates in keyboard focus (true/false); overrides its ordinary focusability, including on interactive list items." },
     .{ .name = "radius", .doc = "Corner radius token (literal RadiusTokens field name: sm, md, lg, xl, none)." },
 };
 
@@ -309,9 +336,9 @@ pub const reactions_attr_docs = [_]Doc{
 };
 
 pub const anchor_attr_docs = [_]Doc{
-    .{ .name = "anchor", .doc = "dropdown-menu and tooltip: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the surface beside its trigger inside a stack. An anchored tooltip's visibility is runtime-owned (hover intent on the trigger; see tooltip-delay), unlike the model-owned dropdown." },
-    .{ .name = "anchor-alignment", .doc = "dropdown-menu and tooltip (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
-    .{ .name = "anchor-offset", .doc = "dropdown-menu and tooltip (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
+    .{ .name = "anchor", .doc = "dropdown-menu, tooltip, popover, and menu-surface: floats the surface against its PARENT's frame instead of the flow (literal below or above; either side auto-flips at the window edges). Late z-pass above the whole tree, window-clipped — never cropped by a scroll pane, never reflows siblings. Put the surface beside its trigger inside a stack. An anchored tooltip's visibility is runtime-owned (hover intent on the trigger; see tooltip-delay), unlike the model-owned dropdown." },
+    .{ .name = "anchor-alignment", .doc = "dropdown-menu, tooltip, popover, and menu-surface (with anchor): horizontal alignment against the anchor - start, end, or stretch (stretch also widens the surface to at least the anchor's width, the select-menu look)." },
+    .{ .name = "anchor-offset", .doc = "dropdown-menu, tooltip, popover, and menu-surface (with anchor): literal gap in points between the anchor edge and the surface (default 4)." },
 };
 
 pub const event_docs = [_]Doc{
@@ -323,7 +350,7 @@ pub const event_docs = [_]Doc{
     .{ .name = "on-submit", .doc = "Dispatch a Msg on submit: tag or tag:{payload}. Enter in a text field, primary+enter in a textarea; on a list-item, plain Enter dispatches it as the row's primary action while Space keeps the row's select (on-press)." },
     .{ .name = "on-input", .doc = "Names a Msg variant with canvas.TextInputEvent payload; delivers each text edit." },
     .{ .name = "on-scroll", .doc = "scroll element only: names a Msg variant with canvas.ScrollState payload; delivers the post-scroll two-axis state (offset_x/offset_y, velocity_x/velocity_y, viewport_extent_x/viewport_extent_y, content_extent_x/content_extent_y) after wheel, kinetic, keyboard, and accessibility scrolls." },
-    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
+    .{ .name = "on-dismiss", .doc = "Dismissible surfaces only (dialog, drawer, sheet, dropdown-menu, popover, menu-surface): Msg dispatched when Escape or a click outside dismisses the surface, so the MODEL owns the close (clear the open flag in update). The engine hides the surface immediately as an optimistic echo; the source tree wins on the next rebuild." },
     .{ .name = "on-hold", .doc = "Press-and-hold Msg: a pointer held ~350 ms dispatches it and the release then presses nothing; a quick click dispatches on-press as usual. A right/ctrl-click with no context menu on the route dispatches it immediately. Like on-press, binding it makes any element pressable." },
     .{ .name = "on-resize", .doc = "split element only: names a Msg variant with f32 payload; delivers the applied first-pane fraction after every divider drag, keyboard adjustment, and assistive increment/decrement. Echo it back into value - the delivered fraction never fights the reconcile." },
     .{ .name = "on-terminal", .doc = "terminal element only: names a bare Msg variant with canvas.TerminalState payload; delivers the post-change view state (scrollback, history, cols, rows) after every runtime-applied change - wheel and keyboard scrollback, and the layout-derived grid resize. Echo scrollback back into the attribute - the delivered state never fights the reconcile." },
@@ -339,6 +366,8 @@ pub fn elementDoc(name: []const u8) ?[]const u8 {
 
 pub fn attributeDoc(name: []const u8) ?[]const u8 {
     if (findDoc(&attribute_docs, name)) |doc| return doc;
+    if (findDoc(&virtual_window_attr_docs, name)) |doc| return doc;
+    if (findDoc(&virtual_list_attr_docs, name)) |doc| return doc;
     if (findDoc(&event_docs, name)) |doc| return doc;
     if (findDoc(&for_attr_docs, name)) |doc| return doc;
     if (findDoc(&template_attr_docs, name)) |doc| return doc;
@@ -363,7 +392,11 @@ pub fn attributeDoc(name: []const u8) ?[]const u8 {
 /// shared registry. Composite elements intentionally reuse names such as
 /// `source`, so context-free lookup cannot choose the right authoring help.
 pub fn attributeDocForElement(element: []const u8, name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, element, "markdown")) {
+    if (std.mem.eql(u8, element, "virtual-window")) {
+        return findDoc(&virtual_window_attr_docs, name);
+    } else if (std.mem.eql(u8, element, "virtual-list")) {
+        if (findDoc(&virtual_list_attr_docs, name)) |doc| return doc;
+    } else if (std.mem.eql(u8, element, "markdown")) {
         if (findDoc(&markdown_attr_docs, name)) |doc| return doc;
     } else if (std.mem.eql(u8, element, "code")) {
         if (findDoc(&code_attr_docs, name)) |doc| return doc;

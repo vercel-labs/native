@@ -1,0 +1,1147 @@
+//! Native context menu tests: a secondary-button press asks the
+//! platform to present the OS menu (recorded by the null platform), the
+//! platform's `context_menu_action` event resolves to a
+//! `.canvas_widget_context_menu` runtime event for app-declared menus,
+//! and the zero-code defaults (editable-text Cut/Copy/Paste/Select All,
+//! terminal Copy/Paste, static-selection Copy) drive the existing
+//! clipboard and committed-input actions.
+
+const support = @import("test_support.zig");
+const std = support.std;
+const geometry = support.geometry;
+const canvas = support.canvas;
+const platform = support.platform;
+const automation = support.automation;
+const App = support.App;
+const Runtime = support.Runtime;
+const Event = support.Event;
+const TestHarness = support.TestHarness;
+const canvas_limits = @import("canvas_limits.zig");
+
+pub fn Cases(comptime policy: ?*const fn ([]const u8, []u8) usize) type {
+    return struct {
+        const MenuTestApp = struct {
+            pointer_count: u32 = 0,
+            raw_input_count: u32 = 0,
+            menu_count: u32 = 0,
+            last_menu_target: canvas.ObjectId = 0,
+            last_menu_item_index: usize = 0,
+            last_menu_label: [32]u8 = undefined,
+            last_menu_label_len: usize = 0,
+            shown_count: u32 = 0,
+            last_shown_token: u64 = 0,
+            last_shown_label: [32]u8 = undefined,
+            last_shown_label_len: usize = 0,
+            request_count: u32 = 0,
+            last_request_target: canvas.ObjectId = 0,
+            last_request_point: geometry.PointF = .{},
+            last_edit_insert: [64]u8 = undefined,
+            last_edit_insert_len: usize = 0,
+            keyboard_count: u32 = 0,
+            last_keyboard_phase: canvas.WidgetKeyboardPhase = .key_down,
+            last_keyboard_focused_id: ?canvas.ObjectId = null,
+            last_keyboard_terminal_paste: bool = false,
+            last_keyboard_standalone: bool = false,
+            saw_truncated: bool = false,
+            dismissed_count: u32 = 0,
+            last_dismissed_token: u64 = 0,
+            last_dismissed_label: [32]u8 = undefined,
+            last_dismissed_label_len: usize = 0,
+            /// When set, the dismissed-notice handler errors AFTER recording
+            /// the notice — the app heard it, then blew up.
+            dismissal_error: ?anyerror = null,
+            /// When set, the dismissed-notice handler closes this view on
+            /// window 1 — app code that compacts the runtime's view indices
+            /// while a supersession is mid-dispatch.
+            close_view_on_dismissal: ?[]const u8 = null,
+            /// When set, the dismissed-notice handler right-clicks this view's
+            /// declared-menu widget — app code that synchronously presents a
+            /// SUPERSEDING menu while a supersession is mid-dispatch.
+            present_menu_on_dismissal: ?[]const u8 = null,
+
+            fn app(self: *@This()) App {
+                return .{ .context = self, .name = "context-menus", .source = platform.WebViewSource.html("<h1>Hello</h1>"), .event_fn = event, .context_menu_policy = policy };
+            }
+
+            fn event(context: *anyopaque, runtime: *Runtime, event_value: Event) anyerror!void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                switch (event_value) {
+                    .canvas_widget_pointer => self.pointer_count += 1,
+                    .gpu_surface_input => self.raw_input_count += 1,
+                    .canvas_widget_context_menu => |menu_event| {
+                        self.menu_count += 1;
+                        self.last_menu_target = menu_event.target_id;
+                        self.last_menu_item_index = menu_event.item_index;
+                        const len = @min(menu_event.view_label.len, self.last_menu_label.len);
+                        @memcpy(self.last_menu_label[0..len], menu_event.view_label[0..len]);
+                        self.last_menu_label_len = len;
+                    },
+                    .canvas_widget_context_menu_shown => |shown_event| {
+                        self.shown_count += 1;
+                        self.last_shown_token = shown_event.token;
+                        const len = @min(shown_event.view_label.len, self.last_shown_label.len);
+                        @memcpy(self.last_shown_label[0..len], shown_event.view_label[0..len]);
+                        self.last_shown_label_len = len;
+                    },
+                    .canvas_widget_context_menu_request => |request_event| {
+                        self.request_count += 1;
+                        self.last_request_target = request_event.target_id;
+                        self.last_request_point = request_event.point;
+                    },
+                    .canvas_widget_context_menu_dismissed => |dismissed_event| {
+                        self.dismissed_count += 1;
+                        self.last_dismissed_token = dismissed_event.token;
+                        const len = @min(dismissed_event.view_label.len, self.last_dismissed_label.len);
+                        @memcpy(self.last_dismissed_label[0..len], dismissed_event.view_label[0..len]);
+                        self.last_dismissed_label_len = len;
+                        if (self.close_view_on_dismissal) |close_label| {
+                            self.close_view_on_dismissal = null;
+                            try runtime.closeView(1, close_label);
+                        }
+                        if (self.present_menu_on_dismissal) |present_label| {
+                            self.present_menu_on_dismissal = null;
+                            try runtime.dispatchPlatformEvent(self.app(), rightClickOn(present_label, 50, 20));
+                        }
+                        if (self.dismissal_error) |err| return err;
+                    },
+                    .canvas_widget_keyboard => |keyboard_event| {
+                        self.keyboard_count += 1;
+                        self.last_keyboard_phase = keyboard_event.keyboard.phase;
+                        self.last_keyboard_focused_id = keyboard_event.keyboard.focused_id;
+                        self.last_keyboard_terminal_paste = keyboard_event.terminal_paste;
+                        self.last_keyboard_standalone = keyboard_event.standalone;
+                        if (keyboard_event.keyboard.edit_truncated) self.saw_truncated = true;
+                        if (keyboard_event.keyboard.edit) |edit| switch (edit) {
+                            .insert_text => |text| {
+                                const len = @min(text.len, self.last_edit_insert.len);
+                                @memcpy(self.last_edit_insert[0..len], text[0..len]);
+                                self.last_edit_insert_len = len;
+                            },
+                            else => {},
+                        };
+                    },
+                    else => {},
+                }
+            }
+        };
+
+        fn rightClick(x: f32, y: f32) platform.Event {
+            return rightClickOn("canvas", x, y);
+        }
+
+        fn rightClickOn(label: []const u8, x: f32, y: f32) platform.Event {
+            return .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = label,
+                .kind = .pointer_down,
+                .button = 1,
+                .x = x,
+                .y = y,
+                .timestamp_ns = 1_000_000_000,
+            } };
+        }
+
+        fn menuAction(token: u64, item_id: u32) platform.Event {
+            return .{ .context_menu_action = .{
+                .window_id = 1,
+                .view_label = "canvas",
+                .token = token,
+                .item_id = item_id,
+            } };
+        }
+
+        fn createMenuHarness(app: App) !*TestHarness() {
+            const harness = try TestHarness().create(std.testing.allocator, .{});
+            harness.null_platform.gpu_surfaces = true;
+            try harness.start(app);
+            _ = try harness.runtime.createView(.{
+                .window_id = 1,
+                .label = "canvas",
+                .kind = .gpu_surface,
+                .frame = geometry.RectF.init(0, 0, 320, 200),
+            });
+            return harness;
+        }
+
+        pub fn case0() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const items = [_]canvas.WidgetContextMenuItem{
+                .{ .label = "Complete" },
+                .{ .separator = true },
+                .{ .label = "Delete" },
+            };
+            const row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Task",
+                .context_menu = &items,
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+
+            // The platform was asked to present at the pointer with the declared
+            // items (ids are 1-based item indices; separators stay separators).
+            try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+            try std.testing.expectEqualStrings("canvas", harness.null_platform.contextMenuLabel());
+            // The request's correlation token is minted per request (opaque to
+            // the platform, which only echoes it on the action event).
+            try std.testing.expect(harness.null_platform.context_menu_token != 0);
+            try std.testing.expectEqualDeep(geometry.PointF.init(50, 20), harness.null_platform.context_menu_point);
+            const recorded = harness.null_platform.contextMenuItems();
+            try std.testing.expectEqual(@as(usize, 3), recorded.len);
+            try std.testing.expectEqual(@as(u32, 1), recorded[0].id);
+            try std.testing.expectEqualStrings("Complete", recorded[0].label);
+            try std.testing.expect(recorded[1].separator);
+            try std.testing.expectEqual(@as(u32, 3), recorded[2].id);
+            try std.testing.expectEqualStrings("Delete", recorded[2].label);
+
+            // The right press never acted as a primary press; the raw input event
+            // stayed observable.
+            try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+            try std.testing.expectEqual(@as(u32, 1), app_state.raw_input_count);
+
+            // Selecting "Delete" dispatches the typed context-menu event.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 2), app_state.last_menu_item_index);
+
+            // A dismissal (item 0) resolves silently.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 0));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+        }
+
+        pub fn case1() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const first_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+            const second_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+            const first_row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "First",
+                .context_menu = &first_items,
+            };
+            const second_row = canvas.Widget{
+                .id = 3,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 60, 200, 40),
+                .text = "Second",
+                .context_menu = &second_items,
+            };
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ first_row, second_row } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // The second presentation supersedes the first: the app hears one
+            // dismissed notice carrying the OLD token and the VIEW the dismissed
+            // menu was presented on (a raw app tracking per-canvas menu state
+            // needs the correlation — the notice must never publish an empty
+            // label).
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            const first_token = harness.null_platform.context_menu_token;
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 70));
+            const second_token = harness.null_platform.context_menu_token;
+            try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+            try std.testing.expectEqual(first_token, app_state.last_dismissed_token);
+            try std.testing.expectEqualStrings("canvas", app_state.last_dismissed_label[0..app_state.last_dismissed_label_len]);
+
+            // The replacement pending was committed BEFORE the (fallible)
+            // dismissed notice dispatched, so the successor menu on the glass
+            // resolves normally.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+        }
+
+        pub fn case2() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Two rows, each with its own declared menu: the second right-click
+            // supersedes the first request while the first menu's deferred
+            // dismissal is still in flight (the GTK presenter tears the old menu
+            // down one loop turn later).
+            const first_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+            const second_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+            const first_row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "First",
+                .context_menu = &first_items,
+            };
+            const second_row = canvas.Widget{
+                .id = 3,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 60, 200, 40),
+                .text = "Second",
+                .context_menu = &second_items,
+            };
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ first_row, second_row } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // First request presents, then the second arrives before the first's
+            // dismissal is delivered. Each request carries its own minted token.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            const first_token = harness.null_platform.context_menu_token;
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 70));
+            const second_token = harness.null_platform.context_menu_token;
+            try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+            try std.testing.expect(first_token != second_token);
+
+            // The superseded request's dismissal arrives late, carrying the OLD
+            // token: it is swallowed, never resolving (or clearing) the pending
+            // successor.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(first_token, 0));
+            try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+
+            // The successor stays pending and resolvable: its own selection
+            // dispatches exactly one context-menu event for the second target.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+
+            // One event per request: neither token can resolve again.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(first_token, 1));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+        }
+
+        pub fn case3() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // ONE widget: with a widget-id token the two requests would be
+            // indistinguishable and the superseded menu's deferred dismissal
+            // would resolve (clear) the replacement's pending request.
+            const items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Complete" }, .{ .label = "Delete" } };
+            const row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Task",
+                .context_menu = &items,
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            const first_token = harness.null_platform.context_menu_token;
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(60, 24));
+            const second_token = harness.null_platform.context_menu_token;
+            try std.testing.expect(first_token != second_token);
+
+            // The first menu's deferred dismissal lands after the re-click: its
+            // stale token is swallowed and the replacement stays live.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(first_token, 0));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(second_token, 2));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+        }
+
+        pub fn case4() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const text_field = canvas.Widget{
+                .id = 2,
+                .kind = .text_field,
+                .frame = geometry.RectF.init(12, 16, 200, 36),
+                .text = "Query",
+                .semantics = .{ .label = "Search" },
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // Select "Query" through the keyboard select-all path, then right-click.
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = "canvas",
+                .kind = .pointer_down,
+                .x = 100,
+                .y = 30,
+            } });
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = "canvas",
+                .kind = .key_down,
+                .key = "a",
+                .modifiers = .{ .primary = true, .command = true },
+            } });
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
+
+            try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+            const recorded = harness.null_platform.contextMenuItems();
+            try std.testing.expectEqual(@as(usize, 5), recorded.len);
+            try std.testing.expectEqualStrings("Cut", recorded[0].label);
+            try std.testing.expect(recorded[0].enabled);
+            try std.testing.expectEqualStrings("Copy", recorded[1].label);
+            try std.testing.expectEqualStrings("Paste", recorded[2].label);
+            try std.testing.expect(recorded[3].separator);
+            try std.testing.expectEqualStrings("Select All", recorded[4].label);
+
+            // Copy through the menu: clipboard captures the selection, text stays.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 2));
+            var clipboard_buffer: [256]u8 = undefined;
+            try std.testing.expectEqualStrings("Query", try harness.runtime.readClipboard(&clipboard_buffer));
+            var retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expectEqualStrings("Query", retained.nodes[1].widget.text);
+
+            // Cut through the menu: clipboard keeps the selection, field empties.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 1));
+            try std.testing.expectEqualStrings("Query", try harness.runtime.readClipboard(&clipboard_buffer));
+            retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expectEqualStrings("", retained.nodes[1].widget.text);
+
+            // Paste through the menu: the clipboard lands at the caret.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
+            retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expectEqualStrings("Query", retained.nodes[1].widget.text);
+
+            // Select All through the menu re-selects everything.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 4));
+            retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            try std.testing.expectEqualDeep(canvas.TextSelection{ .anchor = 0, .focus = 5 }, retained.nodes[1].widget.text_selection.?);
+        }
+
+        pub fn case5() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Same boundary as the cmd+V shortcut test: exactly three free bytes
+            // in the view's shared widget-text storage, clipboard "a\nbc". The
+            // context menu's Paste flows through the same sanitize-then-clamp
+            // helper, so the sanitized "abc" lands whole instead of the raw
+            // clamp's "a\nb" -> "ab".
+            const fill_len = canvas_limits.max_canvas_widget_text_bytes_per_view - 3;
+            const fill = try std.testing.allocator.alloc(u8, fill_len);
+            defer std.testing.allocator.free(fill);
+            @memset(fill, 'x');
+            const text_field = canvas.Widget{
+                .id = 2,
+                .kind = .text_field,
+                .frame = geometry.RectF.init(12, 16, 200, 36),
+                .text = fill,
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text_field} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+            try std.testing.expectEqual(fill_len, harness.runtime.views[0].widget_text_len);
+
+            try harness.runtime.writeClipboard("a\nbc");
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 30));
+            // Paste is the default edit menu's third item.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
+
+            // Retained editor and the app's stamped edit hear the same whole
+            // sanitized suffix, with no false truncation flag.
+            const retained = try harness.runtime.canvasWidgetLayout(1, "canvas");
+            const text = retained.nodes[1].widget.text;
+            try std.testing.expectEqual(fill_len + 3, text.len);
+            try std.testing.expectEqualStrings("abc", text[text.len - 3 ..]);
+            try std.testing.expectEqualStrings("abc", app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+            try std.testing.expect(!app_state.saw_truncated);
+        }
+
+        pub fn case6() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            var grid = canvas.TerminalGrid{
+                .background = canvas.Color.rgba(0, 0, 0, 1),
+                .foreground = canvas.Color.rgba(1, 1, 1, 1),
+                .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+                .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+                .screen_text = "alpha beta",
+                .selection_text = "beta",
+                .selection_active = true,
+            };
+            const terminal = canvas.Widget{
+                .id = 2,
+                .kind = .terminal,
+                .frame = geometry.RectF.init(12, 16, 280, 120),
+                .terminal = .{ .pty = 7, .grid = &grid },
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 40));
+
+            try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+            const recorded = harness.null_platform.contextMenuItems();
+            try std.testing.expectEqual(@as(usize, 2), recorded.len);
+            try std.testing.expectEqual(@as(u32, 2), recorded[0].id);
+            try std.testing.expectEqualStrings("Copy", recorded[0].label);
+            try std.testing.expect(recorded[0].enabled);
+            try std.testing.expectEqual(@as(u32, 3), recorded[1].id);
+            try std.testing.expectEqualStrings("Paste", recorded[1].label);
+            try std.testing.expect(recorded[1].enabled);
+            // Secondary-click focus ensures the eventual paste addresses this
+            // terminal even when another editor previously owned focus.
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), harness.runtime.views[0].canvas_widget_focused_id);
+
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 2));
+            var clipboard_buffer: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("beta", try harness.runtime.readClipboard(&clipboard_buffer));
+
+            const paste = "printf 'ready'\n";
+            try harness.runtime.writeClipboard(paste);
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 40));
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 3));
+            try std.testing.expectEqual(canvas.WidgetKeyboardPhase.text_input, app_state.last_keyboard_phase);
+            try std.testing.expectEqual(@as(?canvas.ObjectId, 2), app_state.last_keyboard_focused_id);
+            try std.testing.expect(app_state.last_keyboard_terminal_paste);
+            try std.testing.expect(app_state.last_keyboard_standalone);
+            try std.testing.expectEqualStrings(paste, app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+
+            // The keyboard shortcut takes the same provenance-sensitive path,
+            // but remains part of the gpu-input cycle rather than a standalone
+            // native-menu dispatch.
+            const shortcut_paste = "echo shortcut\n";
+            try harness.runtime.writeClipboard(shortcut_paste);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{
+                .window_id = 1,
+                .label = "canvas",
+                .kind = .key_down,
+                .key = "v",
+                .modifiers = .{ .primary = true, .command = true },
+            } });
+            try std.testing.expectEqual(canvas.WidgetKeyboardPhase.text_input, app_state.last_keyboard_phase);
+            try std.testing.expectEqual(@as(?canvas.ObjectId, 2), app_state.last_keyboard_focused_id);
+            try std.testing.expect(app_state.last_keyboard_terminal_paste);
+            try std.testing.expect(!app_state.last_keyboard_standalone);
+            try std.testing.expectEqualStrings(shortcut_paste, app_state.last_edit_insert[0..app_state.last_edit_insert_len]);
+        }
+
+        pub fn case7() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            var grid = canvas.TerminalGrid{
+                .background = canvas.Color.rgba(0, 0, 0, 1),
+                .foreground = canvas.Color.rgba(1, 1, 1, 1),
+                .cursor_color = canvas.Color.rgba(1, 1, 1, 1),
+                .selection_color = canvas.Color.rgba(0, 0.5, 1, 1),
+            };
+            const terminal = canvas.Widget{
+                .id = 2,
+                .kind = .terminal,
+                .frame = geometry.RectF.init(12, 16, 280, 120),
+                .terminal = .{ .pty = 7, .grid = &grid },
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{terminal} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            try harness.runtime.writeClipboard("must-not-escape");
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 40));
+            const live_token = harness.null_platform.context_menu_token;
+            try std.testing.expect(harness.null_platform.contextMenuItems()[1].enabled);
+
+            // GTK resolves menus asynchronously: the pty can exit while its
+            // live menu remains open. The action-time guard must swallow that
+            // stale Paste instead of emitting terminal input that could fall
+            // through to an app-level text handler.
+            grid.running = false;
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(live_token, 3));
+            try std.testing.expectEqual(@as(u32, 0), app_state.keyboard_count);
+
+            // A new menu on the ended terminal describes the same truth up
+            // front: Copy remains selection-dependent, Paste is disabled.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(100, 40));
+            const ended_items = harness.null_platform.contextMenuItems();
+            try std.testing.expectEqual(@as(usize, 2), ended_items.len);
+            try std.testing.expect(!ended_items[1].enabled);
+        }
+
+        pub fn case8() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const text = canvas.Widget{
+                .id = 2,
+                .kind = .text,
+                .frame = geometry.RectF.init(12, 16, 200, 20),
+                .text = "Release notes",
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{text} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // Establish the view's live static selection the way click-drag does.
+            harness.runtime.views[0].canvas_widget_selected_text_id = 2;
+            harness.runtime.views[0].widget_layout_nodes[1].widget.text_selection = .{ .anchor = 0, .focus = 7 };
+
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 24));
+            try std.testing.expectEqual(@as(usize, 1), harness.null_platform.context_menu_request_count);
+            const recorded = harness.null_platform.contextMenuItems();
+            try std.testing.expectEqual(@as(usize, 1), recorded.len);
+            try std.testing.expectEqualStrings("Copy", recorded[0].label);
+
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(harness.null_platform.context_menu_token, 2));
+            var clipboard_buffer: [64]u8 = undefined;
+            try std.testing.expectEqualStrings("Release", try harness.runtime.readClipboard(&clipboard_buffer));
+        }
+
+        pub fn case9() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const button = canvas.Widget{
+                .id = 2,
+                .kind = .button,
+                .frame = geometry.RectF.init(10, 10, 96, 32),
+                .text = "Run",
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{button} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+            try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+
+            // A stray action event with no pending request is a no-op.
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(2, 1));
+            try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+        }
+
+        pub fn case10() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try TestHarness().create(std.testing.allocator, .{});
+            harness.null_platform.gpu_surfaces = true;
+            // Model a host without a native menu presenter (the mobile toolkit
+            // hosts and embed hosts today): the service is null and the feature
+            // reports false.
+            // Service POINTERS are captured at init, so re-capture after the
+            // flip (feature FLAGS like gpu_surfaces read live through context).
+            harness.null_platform.context_menus = false;
+            harness.runtime.options.platform = harness.null_platform.platform();
+            try harness.start(app);
+            defer harness.destroy(std.testing.allocator);
+            _ = try harness.runtime.createView(.{
+                .window_id = 1,
+                .label = "canvas",
+                .kind = .gpu_surface,
+                .frame = geometry.RectF.init(0, 0, 320, 200),
+            });
+
+            const items = [_]canvas.WidgetContextMenuItem{
+                .{ .label = "Complete" },
+                .{ .label = "Delete" },
+            };
+            const row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Task",
+                .context_menu = &items,
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // Right-click: nothing to present natively, so the app loop is asked
+            // to mount the anchored fallback surface for the declared target.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+            try std.testing.expectEqual(@as(u32, 1), app_state.request_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_request_target);
+            // The click point rides the request: the fallback surface anchors at
+            // the pointer, not a target-widget edge.
+            try std.testing.expectEqualDeep(geometry.PointF.init(50, 20), app_state.last_request_point);
+            // Never the hold alternative: a declared menu consumed the press.
+            try std.testing.expectEqual(@as(u32, 0), app_state.pointer_count);
+
+            // The automation verb still drives the SAME selection dispatch — no
+            // presenter required (the OS tracking loop is skipped on macOS too).
+            try harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 1");
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+        }
+
+        pub fn case11() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const items = [_]canvas.WidgetContextMenuItem{
+                .{ .label = "Complete" },
+                .{ .separator = true },
+                .{ .label = "Delete" },
+                .{ .label = "Archive", .enabled = false },
+            };
+            const row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Task",
+                .context_menu = &items,
+            };
+            const plain = canvas.Widget{
+                .id = 3,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 60, 200, 40),
+                .text = "Bare",
+            };
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ row, plain } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // Invoking "Delete" (index 2) takes the same dispatch a real pick
+            // does: a context_menu_action platform event resolved against the
+            // pending request the verb armed.
+            try harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 2");
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 2), app_state.last_menu_item_index);
+            // The verb never asked the platform to present: the OS menu's
+            // tracking loop cannot be driven programmatically.
+            try std.testing.expectEqual(@as(usize, 0), harness.null_platform.context_menu_request_count);
+
+            // Dead invocations fail by name instead of silently doing nothing.
+            try std.testing.expectError(error.ContextMenuUndeclared, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 3 0"));
+            try std.testing.expectError(error.ContextMenuItemOutOfRange, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 4"));
+            try std.testing.expectError(error.ContextMenuItemSeparator, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 1"));
+            try std.testing.expectError(error.ContextMenuItemDisabled, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 2 3"));
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+        }
+
+        pub fn case12() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const first_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+            const second_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+            const first_row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "First",
+                .context_menu = &first_items,
+            };
+            const second_row = canvas.Widget{
+                .id = 3,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 60, 200, 40),
+                .text = "Second",
+                .context_menu = &second_items,
+            };
+            var nodes: [3]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{ first_row, second_row } }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // A real menu is on the glass for the first row when the verb
+            // supersedes it — and the app's dismissed handler errors under the
+            // harness's `.propagate` policy.
+            try harness.runtime.dispatchPlatformEvent(app, rightClick(50, 20));
+            const first_token = harness.null_platform.context_menu_token;
+            app_state.dismissal_error = error.DismissalHandlerBlewUp;
+
+            // The verb's synthetic selection is its request's ONLY outcome (no
+            // native menu presents), so the erroring notice must not skip it:
+            // the selection dispatches, the notice error still propagates, and
+            // no error path leaves a pending token with no presented menu and
+            // no delivered outcome.
+            try std.testing.expectError(error.DismissalHandlerBlewUp, harness.runtime.dispatchAutomationCommand(app, "widget-context-menu canvas 3 0"));
+            try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+            try std.testing.expectEqual(first_token, app_state.last_dismissed_token);
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 0), app_state.last_menu_item_index);
+            try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+        }
+
+        /// Three same-window views with a declared-menu widget on the first
+        /// two: alpha holds the superseded menu, beta the superseding action,
+        /// and gamma is the view a stale index would land on after alpha's
+        /// removal shifts the array down.
+        fn createCompactionHarness(app: App) !*TestHarness() {
+            const harness = try TestHarness().create(std.testing.allocator, .{});
+            harness.null_platform.gpu_surfaces = true;
+            try harness.start(app);
+            for ([_][]const u8{ "alpha", "beta", "gamma" }) |label| {
+                _ = try harness.runtime.createView(.{
+                    .window_id = 1,
+                    .label = label,
+                    .kind = .gpu_surface,
+                    .frame = geometry.RectF.init(0, 0, 320, 200),
+                });
+            }
+            const alpha_items = [_]canvas.WidgetContextMenuItem{.{ .label = "Complete" }};
+            const beta_items = [_]canvas.WidgetContextMenuItem{ .{ .label = "Open" }, .{ .label = "Delete" } };
+            const alpha_row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "First",
+                .context_menu = &alpha_items,
+            };
+            const beta_row = canvas.Widget{
+                .id = 3,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Second",
+                .context_menu = &beta_items,
+            };
+            var alpha_nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const alpha_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{alpha_row} }, geometry.RectF.init(0, 0, 320, 200), &alpha_nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "alpha", alpha_layout);
+            var beta_nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const beta_layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{beta_row} }, geometry.RectF.init(0, 0, 320, 200), &beta_nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "beta", beta_layout);
+            return harness;
+        }
+
+        pub fn case13() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createCompactionHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Alpha's menu is pending when the verb supersedes it from beta —
+            // and the app's dismissal handler closes alpha, shifting beta and
+            // gamma down one index mid-dispatch.
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            const first_token = harness.null_platform.context_menu_token;
+            app_state.close_view_on_dismissal = "alpha";
+
+            try harness.runtime.dispatchAutomationCommand(app, "widget-context-menu beta 3 0");
+
+            // The notice named the superseded menu and ran the closure...
+            try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+            try std.testing.expectEqual(first_token, app_state.last_dismissed_token);
+            try std.testing.expectEqual(@as(usize, 2), harness.runtime.view_count);
+            // ...and the synthetic selection still dispatched against BETA:
+            // the event names its view from the request's own copy, never a
+            // compacted index (which now points at gamma). No pending request
+            // survives.
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 0), app_state.last_menu_item_index);
+            try std.testing.expectEqualStrings("beta", app_state.last_menu_label[0..app_state.last_menu_label_len]);
+            try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+        }
+
+        pub fn case14() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createCompactionHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Alpha's menu is pending; the verb targets alpha's own item, but
+            // the dismissal notice for the superseded presentation right-clicks
+            // beta — app code that synchronously presents a SUPERSEDING menu,
+            // replacing the verb's freshly armed request before its synthetic
+            // action dispatches.
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            app_state.present_menu_on_dismissal = "beta";
+            try std.testing.expectError(
+                error.ContextMenuSuperseded,
+                harness.runtime.dispatchAutomationCommand(app, "widget-context-menu alpha 2 0"),
+            );
+
+            // Never a silent success: the requested item did not dispatch, and
+            // the driver heard why. Both supersessions were announced (the
+            // right-click's menu, then the verb's own).
+            try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+            try std.testing.expectEqual(@as(u32, 2), app_state.dismissed_count);
+
+            // The handler's successor menu is on the glass with its own pending
+            // request — nothing orphaned, still resolvable.
+            try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+            const successor_token = harness.null_platform.context_menu_token;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+                .window_id = 1,
+                .view_label = "beta",
+                .token = successor_token,
+                .item_id = 2,
+            } });
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+        }
+
+        pub fn case15() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createCompactionHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Alpha's menu is pending; the verb targets beta, but the dismissal
+            // notice for the superseded presentation closes BETA — the verb's
+            // own target view. Its armed request can never resolve, so the verb
+            // disarms it and refuses by name instead of reporting success while
+            // the action dispatch silently drops the selection.
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            app_state.close_view_on_dismissal = "beta";
+            try std.testing.expectError(
+                error.ContextMenuViewClosed,
+                harness.runtime.dispatchAutomationCommand(app, "widget-context-menu beta 3 0"),
+            );
+
+            try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+            try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+            try std.testing.expectEqual(@as(usize, 2), harness.runtime.view_count);
+            // No orphan: the unresolvable request is disarmed with the refusal.
+            try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+        }
+
+        pub fn case16() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createCompactionHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Menu A is pending on alpha; right-clicking beta presents menu B,
+            // and A's dismissal notice closes BETA — the view B presented on.
+            // B's request can never resolve, so it disarms without announcing:
+            // a shown event would promise a snapshot for a menu whose action
+            // can never be delivered.
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+            app_state.close_view_on_dismissal = "beta";
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("beta", 50, 20));
+            const dead_token = harness.null_platform.context_menu_token;
+
+            try std.testing.expectEqual(@as(usize, 2), harness.null_platform.context_menu_request_count);
+            try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+            try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+            try std.testing.expectEqual(@as(usize, 2), harness.runtime.view_count);
+            try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+
+            // A late action carrying the dead request's token is inert...
+            try harness.runtime.dispatchPlatformEvent(app, menuAction(dead_token, 1));
+            try std.testing.expectEqual(@as(u32, 0), app_state.menu_count);
+
+            // ...and a fresh presentation arms cleanly.
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            try std.testing.expectEqual(@as(u32, 2), app_state.shown_count);
+            try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+                .window_id = 1,
+                .view_label = "alpha",
+                .token = harness.null_platform.context_menu_token,
+                .item_id = 1,
+            } });
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+        }
+
+        pub fn case17() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createCompactionHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            // Menu A is pending on alpha. Right-clicking beta presents menu B,
+            // whose supersession notice for A synchronously re-presents alpha's
+            // menu (C) — replacing B's freshly committed request before B's
+            // shown event dispatches.
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+            app_state.present_menu_on_dismissal = "alpha";
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("beta", 50, 20));
+
+            // Three presentations reached the platform (A, B, C), but only TWO
+            // announced themselves: B was superseded mid-notice, so its late
+            // shown event must not overwrite the successor's snapshot — the
+            // last announcement is C's, carrying C's token on alpha's canvas.
+            try std.testing.expectEqual(@as(usize, 3), harness.null_platform.context_menu_request_count);
+            try std.testing.expectEqual(@as(u32, 2), app_state.shown_count);
+            const successor_token = harness.null_platform.context_menu_token;
+            try std.testing.expectEqual(successor_token, app_state.last_shown_token);
+            try std.testing.expectEqualStrings("alpha", app_state.last_shown_label[0..app_state.last_shown_label_len]);
+            // Both supersessions were announced: A's (by B), then B's (by C).
+            try std.testing.expectEqual(@as(u32, 2), app_state.dismissed_count);
+
+            // The successor resolves normally against its own token.
+            try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+                .window_id = 1,
+                .view_label = "alpha",
+                .token = successor_token,
+                .item_id = 1,
+            } });
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 2), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 0), app_state.last_menu_item_index);
+            try std.testing.expect(harness.runtime.canvas_widget_context_menu_pending == null);
+        }
+
+        pub fn case18() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createCompactionHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("alpha", 50, 20));
+            try std.testing.expectEqual(@as(u32, 1), app_state.shown_count);
+            try std.testing.expectEqualStrings("alpha", app_state.last_shown_label[0..app_state.last_shown_label_len]);
+
+            // Beta's presentation supersedes alpha's; the dismissal handler
+            // closes alpha, compacting the view array while the shown event is
+            // still to be dispatched.
+            app_state.close_view_on_dismissal = "alpha";
+            try harness.runtime.dispatchPlatformEvent(app, rightClickOn("beta", 50, 20));
+            const second_token = harness.null_platform.context_menu_token;
+            try std.testing.expectEqual(@as(u32, 1), app_state.dismissed_count);
+            // The shown event describes the menu on the glass from the request
+            // itself: beta's canvas, beta's token — never the view a stale
+            // index lands on after the compaction.
+            try std.testing.expectEqual(@as(u32, 2), app_state.shown_count);
+            try std.testing.expectEqual(second_token, app_state.last_shown_token);
+            try std.testing.expectEqualStrings("beta", app_state.last_shown_label[0..app_state.last_shown_label_len]);
+
+            // The successor resolves normally on its own view.
+            try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{
+                .window_id = 1,
+                .view_label = "beta",
+                .token = second_token,
+                .item_id = 2,
+            } });
+            try std.testing.expectEqual(@as(u32, 1), app_state.menu_count);
+            try std.testing.expectEqual(@as(canvas.ObjectId, 3), app_state.last_menu_target);
+            try std.testing.expectEqual(@as(usize, 1), app_state.last_menu_item_index);
+            try std.testing.expectEqualStrings("beta", app_state.last_menu_label[0..app_state.last_menu_label_len]);
+        }
+
+        pub fn case19() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const items = [_]canvas.WidgetContextMenuItem{
+                .{ .label = "Complete" },
+                .{ .separator = true },
+                .{ .label = "Archive", .enabled = false },
+            };
+            const row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Task",
+                .context_menu = &items,
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            _ = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            var buffer: [16384]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try automation.snapshot.writeText(harness.runtime.automationSnapshot("Menus"), &writer);
+            // List position = the widget-context-menu item index; separators
+            // keep their slots and disabled items say so.
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "context_menu=[\"Complete\",separator,\"Archive\"(disabled)]") != null);
+        }
+
+        pub fn case20() !void {
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const items = [_]canvas.WidgetContextMenuItem{
+                .{ .label = "Complete" },
+                .{ .separator = true },
+                .{ .label = "Delete" },
+            };
+            const row = canvas.Widget{
+                .id = 2,
+                .kind = .list_item,
+                .frame = geometry.RectF.init(10, 10, 200, 40),
+                .text = "Task",
+                .context_menu = &items,
+            };
+            var nodes: [2]canvas.WidgetLayoutNode = undefined;
+            const layout = try canvas.layoutWidgetTree(.{ .kind = .stack, .children = &.{row} }, geometry.RectF.init(0, 0, 320, 200), &nodes);
+            const info = try harness.runtime.setCanvasWidgetLayout(1, "canvas", layout);
+
+            // Separators count against the budget: they occupy retained slots.
+            try std.testing.expectEqual(@as(usize, 3), info.widget_context_menu_item_count);
+
+            // The gpu_surface view line reports declared/budget headroom so
+            // authors watch the cliff without overflowing.
+            var buffer: [16384]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&buffer);
+            try automation.snapshot.writeText(harness.runtime.automationSnapshot("Menus"), &writer);
+            const expected = std.fmt.comptimePrint("context_menu_items=3/{d}", .{canvas_limits.max_canvas_widget_context_menu_items_per_view});
+            try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), expected) != null);
+        }
+
+        pub fn case21() !void {
+            const budget = canvas_limits.max_canvas_widget_context_menu_items_per_view;
+            var app_state: MenuTestApp = .{};
+            const app = app_state.app();
+            const harness = try createMenuHarness(app);
+            defer harness.destroy(std.testing.allocator);
+
+            const bulk = [_]canvas.WidgetContextMenuItem{.{ .label = "Op" }} ** (budget - 1);
+            const pair = [_]canvas.WidgetContextMenuItem{ .{ .label = "A" }, .{ .label = "B" } };
+            var nodes = [_]canvas.WidgetLayoutNode{
+                .{
+                    .widget = .{ .id = 2, .kind = .list_item, .text = "Bulk", .context_menu = &bulk },
+                    .frame = geometry.RectF.init(0, 0, 200, 40),
+                    .depth = 0,
+                },
+                .{
+                    .widget = .{ .id = 3, .kind = .list_item, .text = "Tail", .context_menu = pair[0..1] },
+                    .frame = geometry.RectF.init(0, 40, 200, 40),
+                    .depth = 0,
+                },
+            };
+
+            // Exactly at the budget: the layout retains every declared item.
+            const info = try harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes });
+            try std.testing.expectEqual(budget, info.widget_context_menu_item_count);
+
+            // One extra declared item anywhere in the view overflows loudly.
+            nodes[1].widget.context_menu = &pair;
+            try std.testing.expectError(error.WidgetContextMenuLimitReached, harness.runtime.setCanvasWidgetLayout(1, "canvas", .{ .nodes = &nodes }));
+        }
+    };
+}

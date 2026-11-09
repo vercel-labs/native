@@ -161,8 +161,20 @@ pub const DisplayList = struct {
         return planner.build(self);
     }
 
+    pub fn renderPlanWithWorkspace(self: DisplayList, output: []RenderCommand, policy: ?@import("render_cache_policy.zig").Policy, workspace: ?*@import("render_cache_policy.zig").Workspace) Error!RenderPlan {
+        var planner = RenderPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner, workspace orelse @panic("missing render plan workspace"));
+        return planner.build(self);
+    }
+
     pub fn resourcePlan(self: DisplayList, output: []RenderResource) Error!RenderResourcePlan {
         var planner = RenderResourcePlanner.init(output);
+        return planner.build(self);
+    }
+
+    pub fn resourcePlanWithPolicy(self: DisplayList, output: []RenderResource, policy: ?@import("render_resource_policy.zig").Policy) Error!RenderResourcePlan {
+        var planner = RenderResourcePlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
@@ -171,8 +183,20 @@ pub const DisplayList = struct {
         return planner.build(self);
     }
 
+    pub fn visualEffectPlanWithPolicy(self: DisplayList, output: []VisualEffect, policy: ?@import("vector_effect_policy.zig").Policy) Error!VisualEffectPlan {
+        var planner = VisualEffectPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
+        return planner.build(self);
+    }
+
     pub fn glyphAtlasPlan(self: DisplayList, output: []GlyphAtlasEntry) Error!GlyphAtlasPlan {
         var planner = GlyphAtlasPlanner.init(output);
+        return planner.build(self);
+    }
+
+    pub fn glyphAtlasPlanWithPolicy(self: DisplayList, output: []GlyphAtlasEntry, policy: ?@import("glyph_atlas_policy.zig").Policy) Error!GlyphAtlasPlan {
+        var planner = GlyphAtlasPlanner.init(output);
+        if (policy) |owner| return planner.buildCompiled(self, owner);
         return planner.build(self);
     }
 
@@ -380,6 +404,8 @@ pub const max_display_list_text_bytes: usize = 32768;
 pub const Builder = struct {
     commands: []CanvasCommand,
     len: usize = 0,
+    /// Portable planner stamped onto emitted text as process-local context.
+    text_run_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Builder-owned storage for path elements built at emit time (the
     /// checkbox mark, chart polylines and bands, the spinner arc and
     /// segments). Emitters allocate from here via `allocPathElements`,
@@ -515,7 +541,9 @@ pub const Builder = struct {
     }
 
     pub fn drawText(self: *Builder, value: DrawText) error{DisplayListFull}!void {
-        try self.append(.{ .draw_text = value });
+        var text = value;
+        if (text.text_run_policy == null) text.text_run_policy = self.text_run_policy;
+        try self.append(.{ .draw_text = text });
     }
 
     pub fn shadow(self: *Builder, value: Shadow) error{DisplayListFull}!void {

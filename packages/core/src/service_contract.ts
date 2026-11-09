@@ -73,6 +73,10 @@ export interface ServiceSurfaceResult {
   readonly diagnostics: readonly SubsetDiagnostic[];
   readonly contract: string | null;
   readonly client: string | null;
+  /// The client's declaration module: exactly what declaration emit
+  /// produces for `client` (the exported operation signatures and the
+  /// imports they reference).
+  readonly clientDeclarations: string | null;
 }
 
 function report(site: string, node: ts.Node): SubsetDiagnostic {
@@ -141,9 +145,10 @@ function throwIsLexicallyCaught(node: ts.ThrowStatement): boolean {
 function pinnedScriptcVersion(): string {
   const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as {
+    nativeToolchain?: { scriptc?: unknown };
     dependencies?: { scriptc?: unknown };
   };
-  const pin = manifest.dependencies?.scriptc;
+  const pin = manifest.nativeToolchain?.scriptc ?? manifest.dependencies?.scriptc;
   if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {
     throw new Error("packages/core/package.json carries no exact scriptc pin");
   }
@@ -396,6 +401,52 @@ function emitServiceClientDocument(document: {
   return out;
 }
 
+/// The declaration module for `emitServiceClientDocument`'s client: one
+/// `export declare function` per operation, keeping only the imports those
+/// signatures reference, in the client's own import order. Matches
+/// declaration emit for the client byte for byte (test/editor_declarations.test.ts).
+function emitServiceClientDeclarations(document: {
+  readonly operations: readonly ServiceOperation[];
+  readonly types: ServiceTypes;
+}): string {
+  const referenced = new Set<string>();
+  const reference = (ref: ServiceTypeRef): void => {
+    switch (ref.kind) {
+      case "optional": reference(ref.inner); break;
+      case "slice": reference(ref.elem); break;
+      case "record":
+      case "enum":
+      case "union": referenced.add(ref.name); break;
+      default: break;
+    }
+  };
+  const routes = new Set<string>();
+  const signatures: string[] = [];
+  for (const operation of document.operations) {
+    const request = operation.request.kind === "none" ? null : operation.request;
+    if (request) reference(request);
+    reference(operation.result);
+    const routeType = operation.stream === null ? "ServiceRoute" : "ServiceStreamRoute";
+    routes.add(routeType);
+    const requestParam = request ? `request: ${typeSpelling(request)}, ` : "";
+    signatures.push(`export declare function ${operation.client}(${requestParam}route: ${routeType}<Msg, ${typeSpelling(operation.result)}>): Cmd<Msg>;\n`);
+  }
+  const imports = new Map<string, Set<string>>();
+  imports.set("core.ts", new Set(["Msg"]));
+  for (const type of [...document.types.records, ...document.types.enums, ...document.types.unions]) {
+    if (!referenced.has(type.name)) continue;
+    const names = imports.get(type.origin) ?? new Set<string>();
+    names.add(type.name);
+    imports.set(type.origin, names);
+  }
+  const coreNames = ["Cmd", ...["ServiceRoute", "ServiceStreamRoute"].filter((name) => routes.has(name)).map((name) => `type ${name}`)];
+  let out = `import { ${coreNames.join(", ")} } from "@native-sdk/core";\n`;
+  for (const [origin, names] of [...imports].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    out += `import type { ${[...names].sort().join(", ")} } from "./${origin}";\n`;
+  }
+  return out + signatures.join("");
+}
+
 export function emitServiceContract(
   tast: TypedAst,
   table: TypeTable,
@@ -406,7 +457,7 @@ export function emitServiceContract(
   packages: readonly ServicePackage[] = [],
 ): ServiceSurfaceResult {
   const emptyTypes: ServiceTypes = { records: [], enums: [], unions: [] };
-  if (files.length === 0) return { operations: [], types: emptyTypes, diagnostics: [], contract: null, client: null };
+  if (files.length === 0) return { operations: [], types: emptyTypes, diagnostics: [], contract: null, client: null, clientDeclarations: null };
 
   const diagnostics: SubsetDiagnostic[] = [];
   const operations: ServiceOperation[] = [];
@@ -587,7 +638,7 @@ export function emitServiceContract(
     diagnostics.push(report("The service tree exports no callable operations.", files[0]));
   }
   const types = shapes.document();
-  if (diagnostics.length > 0) return { operations, types, diagnostics, contract: null, client: null };
+  if (diagnostics.length > 0) return { operations, types, diagnostics, contract: null, client: null, clientDeclarations: null };
   const document = {
     format: serviceContractFormat,
     protocol_version: serviceProtocolVersion,
@@ -603,5 +654,6 @@ export function emitServiceContract(
     diagnostics,
     contract: `${JSON.stringify(document, null, 2)}\n`,
     client: emitServiceClientDocument(document),
+    clientDeclarations: emitServiceClientDeclarations(document),
   };
 }

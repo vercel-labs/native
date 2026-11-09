@@ -23,7 +23,8 @@
 // into a slot some use forces to be an integer — that is a conflict reported
 // as a teaching error (NS1016), never a downstream Zig type error.
 
-import { ts, TypedAst, exportListBindings } from "./typed_ast.ts";
+import { ts, TypedAst, exportListBindings, sdkLibraryModules } from "./typed_ast.ts";
+import path from "node:path";
 import { constFunctionValue } from "./ownership.ts";
 import { thrownShapeOf } from "./checker.ts";
 import type { TypeTable } from "./types.ts";
@@ -275,7 +276,23 @@ export class IntInference {
           this.addSlot(node, node.name.text);
         }
       } else if (ts.isPropertySignature(node) && node.name && ts.isIdentifier(node.name)) {
-        if (this.numberish(node.type)) this.addSlot(node, node.name.text);
+        if (this.numberish(node.type)) {
+          // Canonical token numbers cross a fixed native register. Their ABI
+          // remains f64 across apps; the native capability validates integer
+          // ids/ranges and performs the explicit f32 conversion.
+          const theme = sdkLibraryModules.get("@native-sdk/core/theme");
+          const events = sdkLibraryModules.get("@native-sdk/core/events");
+          let owner: ts.Node = node.parent;
+          while (!ts.isInterfaceDeclaration(owner) && !ts.isTypeAliasDeclaration(owner) && owner.parent) owner = owner.parent;
+          const canvasRecord = events !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(events) &&
+            (ts.isInterfaceDeclaration(owner) || ts.isTypeAliasDeclaration(owner)) &&
+            ["CanvasFrameEvent", "CanvasColor", "CanvasRect", "CanvasPoint", "CanvasGradientStop", "CanvasStroke", "CanvasRadius", "CanvasPathElement", "CanvasChromeCommand", "CanvasChromeContext", "CanvasTransform", "CanvasAnimation"].includes(owner.name.text);
+          // Canvas inputs include fractional native geometry; declarations
+          // retain one f64 ABI across apps. Native checks integer selectors
+          // and durations and explicitly converts GPU scalars to f32.
+          if (canvasRecord || theme !== undefined && path.resolve(node.getSourceFile().fileName) === path.resolve(theme)) this.addFloatSlot(node, node.name.text);
+          else this.addSlot(node, node.name.text);
+        }
       } else if (ts.isPropertyDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
         // R19: a class field is a slot like a record field, fed by its
         // initializer and by `this.x = ...` writes (wired in collectFlows).
@@ -489,6 +506,14 @@ export class IntInference {
       }
     };
     markType("Msg");
+    // Fixed helper arguments are constructed by the host. Their nested
+    // records, arrays and optional records obey the same boundary rule as
+    // Msg; only actual integer demand can specialize a numeric field.
+    for (const helper of this.table.modelHelperDecls()) {
+      for (const parameter of helper.decl.parameters.slice(1)) {
+        if (parameter.type) this.markNested(this.table.resolveTypeNode(parameter.type), markType);
+      }
+    }
     // Only the ENTRY module's exports face the host ABI (the wiring and
     // markup bind through the entry). An exported function in an imported
     // module is an ordinary cross-module call, so proof still applies —
@@ -555,7 +580,7 @@ export class IntInference {
       // model may return fractional positions or dimensions through the same
       // SDK record. Mark the descriptor's immediate number fields as boundary
       // values, exactly like a host-constructed event record in reverse.
-      if (stmt.name?.text === "windows" && stmt.type) {
+      if ((stmt.name?.text === "windows" || stmt.name?.text === "webPanes") && stmt.type) {
         const returned = this.table.resolveTypeNode(stmt.type);
         if (returned.k === "slice" && returned.elem.k === "struct") {
           const descriptor = this.table.structs.get(returned.elem.name);
@@ -841,7 +866,12 @@ export class IntInference {
       }
     }
     if (ts.isConditionalExpression(expr)) {
-      this.contribute(expr.whenTrue, c);
+      // A positive, finite, safe range makes truncation whole, including
+      // the NaN/Infinity and negative-zero corners that unguarded Math
+      // calls must retain. Only this branch gains the proof; the fallback
+      // still contributes its own class normally.
+      if (this.positiveBoundedTruncation(expr.condition, expr.whenTrue)) c.intSource = true;
+      else this.contribute(expr.whenTrue, c);
       this.contribute(expr.whenFalse, c);
       return;
     }
@@ -891,7 +921,7 @@ export class IntInference {
             for (const arg of expr.arguments) this.contribute(arg, c);
             return;
           }
-          if (method === "round" || method === "sqrt") {
+          if (method === "round" || method === "sqrt" || method === "fround") {
             // Definitely-float sources: round/sqrt of NaN/Infinity is not an
             // integer (and sqrt is irrational off perfect squares), so these
             // live in f64 slots and an index use is a taught conflict. The
@@ -976,11 +1006,121 @@ export class IntInference {
     c.unknown = true;
   }
 
+  private positiveBoundedTruncation(condition: ts.Expression, branch: ts.Expression): boolean {
+    const isTruncation = (node: ts.Expression): node is ts.CallExpression => {
+      if (!ts.isCallExpression(node) || node.arguments.length !== 1 ||
+          !ts.isPropertyAccessExpression(node.expression) ||
+          !ts.isIdentifier(node.expression.expression) || node.expression.expression.text !== "Math" ||
+          node.expression.name.text !== "trunc" || !ts.isIdentifier(node.arguments[0])) return false;
+      const math = this.tast.declarationOf(node.expression.expression);
+      return math === undefined || !this.fileSet.has(math.getSourceFile());
+    };
+    if (!isTruncation(branch)) return false;
+    const declaration = this.tast.declarationOf(branch.arguments[0]!);
+    if (!declaration) return false;
+    const sameValue = (node: ts.Expression): boolean => ts.isIdentifier(node) && this.tast.declarationOf(node) === declaration;
+    let positive = false, bounded = false;
+    const visit = (node: ts.Expression): boolean => {
+      if (ts.isParenthesizedExpression(node)) return visit(node.expression);
+      if (!ts.isBinaryExpression(node)) return false;
+      if (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) return visit(node.left) && visit(node.right);
+      if (!sameValue(node.left)) return false;
+      // This optional whole-value check is pure. All other terms are refused:
+      // an intervening call or assignment could invalidate an earlier bound.
+      if (node.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken &&
+          isTruncation(node.right) && sameValue(node.right.arguments[0]!)) return true;
+      // Literal bounds require no execution and cannot hide a shadowed Math.
+      if (!ts.isNumericLiteral(node.right)) return false;
+      const bound = Number(node.right.text), op = node.operatorToken.kind;
+      if (!Number.isFinite(bound)) return false;
+      if (op === ts.SyntaxKind.GreaterThanToken && bound >= 0 ||
+          op === ts.SyntaxKind.GreaterThanEqualsToken && bound > 0) { positive = true; return true; }
+      if ((op === ts.SyntaxKind.LessThanToken || op === ts.SyntaxKind.LessThanEqualsToken) &&
+          bound > 0 && Number.isSafeInteger(bound)) { bounded = true; return true; }
+      return false;
+    };
+    return visit(condition) && positive && bounded;
+  }
+
   private flowInto(target: ts.Node | undefined, expr: ts.Expression): void {
     if (!target) return;
     const slot = this.slots.get(target);
-    if (!slot) return;
-    slot.inflows.push(this.contribution(expr));
+    if (slot) {
+      slot.inflows.push(this.contribution(expr));
+      return;
+    }
+    // Passing a whole record does not read its numeric fields syntactically,
+    // but it still assigns each field to the callee's corresponding slot.
+    // Wire declarations, not spellings: separate union arms may use the same
+    // field name while requiring different numeric representations.
+    if (ts.isParameter(target) || ts.isVariableDeclaration(target) ||
+        ts.isPropertySignature(target) || ts.isPropertyDeclaration(target)) {
+      this.flowStructured(this.tast.typeOf(target), this.tast.typeOf(expr), expr);
+    }
+  }
+
+  private flowStructured(destination: ts.Type, source: ts.Type, site: ts.Expression): void {
+    const visited = new Map<ts.Type, Set<ts.Type>>();
+    const walk = (dst: ts.Type, src: ts.Type): void => {
+      const seen = visited.get(dst);
+      if (seen?.has(src)) return;
+      if (seen) seen.add(src);
+      else visited.set(dst, new Set([src]));
+      if (dst.isUnion()) {
+        for (const member of dst.types) walk(member, src);
+        return;
+      }
+      if (src.isUnion()) {
+        for (const member of src.types) walk(dst, member);
+        return;
+      }
+      if (!(dst.flags & ts.TypeFlags.Object) || !(src.flags & ts.TypeFlags.Object)) return;
+      const dstTag = this.tast.propertyTypeOf(dst, "kind");
+      const srcTag = this.tast.propertyTypeOf(src, "kind");
+      if (dstTag?.isStringLiteral() && srcTag?.isStringLiteral() && dstTag.value !== srcTag.value) return;
+      if (this.tast.isArrayLikeType(dst) && this.tast.isArrayLikeType(src)) {
+        const dstElement = this.tast.typeArgumentsOf(dst)[0];
+        const srcElement = this.tast.typeArgumentsOf(src)[0];
+        if (dstElement && srcElement) walk(dstElement, srcElement);
+        return;
+      }
+      for (const property of dst.getProperties()) {
+        const target = property.valueDeclaration ?? property.declarations?.[0];
+        // Library implementation details and methods are not model fields.
+        if (!target || !this.fileSet.has(target.getSourceFile()) ||
+            !(ts.isPropertySignature(target) || ts.isPropertyDeclaration(target))) continue;
+        const input = src.getProperty(property.name);
+        const inputDecl = input?.valueDeclaration ?? input?.declarations?.[0];
+        if (!inputDecl || inputDecl === target) continue;
+        // SDK records cross their own checked boundary (for example, the
+        // bounded SQLite page decoder). This application forwarding pass
+        // must not invent unknown inflows for declarations it does not
+        // analyze, demoting an already established model field ABI.
+        if (!this.fileSet.has(inputDecl.getSourceFile())) continue;
+        const slot = this.slots.get(target);
+        if (slot) {
+          const inputSlot = this.slots.get(inputDecl);
+          if (inputSlot) {
+            slot.inflows.push({ slots: [inputSlot], float: false, unknown: false, intSource: false, site });
+          } else if (ts.isPropertyAssignment(inputDecl)) {
+            slot.inflows.push(this.contribution(inputDecl.initializer));
+          } else if (ts.isShorthandPropertyAssignment(inputDecl)) {
+            const value = this.tast.shorthandValueDeclaration(inputDecl);
+            const valueSlot = value ? this.slots.get(value) : undefined;
+            slot.inflows.push({ slots: valueSlot ? [valueSlot] : [], float: false,
+              unknown: valueSlot === undefined, intSource: false, site });
+          } else {
+            // An untracked numeric source cannot establish integer proof.
+            slot.inflows.push({ slots: [], float: false, unknown: true, intSource: false, site });
+          }
+        } else {
+          const dstField = this.tast.propertyTypeOf(dst, property.name);
+          const srcField = this.tast.propertyTypeOf(src, property.name);
+          if (dstField && srcField) walk(dstField, srcField);
+        }
+      }
+    };
+    walk(destination, source);
   }
 
   private demand(expr: ts.Expression): void {
@@ -1432,7 +1572,9 @@ export class IntInference {
           );
           if (hardFed || tentativeFed) {
             demandSlot(s, !hardFed);
-            changed = true;
+            // Comparison demand may yield to a host-boundary inflow.
+            // An unchanged slot does not advance this fixed point.
+            if (s.demanded) changed = true;
           }
         } else if (s.comparisonDemanded && hardFed) {
           demandSlot(s, false);

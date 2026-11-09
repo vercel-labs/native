@@ -125,6 +125,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
     }
 
     const wants_frontend_dev = verb == .dev and metadata.frontend != null and metadata.frontend.?.dev != null;
+    var view_reload = false;
     var release_fast = false;
     var dev_debug = false;
     switch (verb) {
@@ -144,6 +145,18 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
                 // optimize flag explicitly to override.
                 try argv.append(allocator, "-Doptimize=Debug");
                 dev_debug = true;
+            }
+            if (core_tree == .ts and !wants_frontend_dev and !typeScriptViewDisabled(options.forwarded_args) and
+                !hasFlag(options.forwarded_args, "-Dview-reload") and !targetsMobile(options.forwarded_args) and
+                (dev_debug or hasDebugOptimizeFlag(options.forwarded_args)))
+            {
+                // TypeScript apps run their compiled views in dev, and a
+                // Debug run reloads markup edits in place: the build stages
+                // the development evaluator, and a watcher started below
+                // hands the app each edit. `-Dtypescript-view=false` selects
+                // the native markup backend instead.
+                try argv.append(allocator, "-Dview-reload=true");
+                view_reload = true;
             }
         },
         .build => {
@@ -172,7 +185,23 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, verb: Verb, options: Option
         });
     }
 
-    try runZig(io, verb, argv.items);
+    if (view_reload) {
+        const framework_root = (try buildgraph.resolveFrameworkRoot(allocator, io, options.base_env)) orelse return error.MissingFramework;
+        defer allocator.free(framework_root);
+        var watcher = try ts_core.startViewReloadWatch(allocator, io, options.base_env, framework_root);
+        defer {
+            // Closing its stdin ends the watcher; kill covers a stuck one.
+            if (watcher.stdin) |stdin| stdin.close(io);
+            watcher.stdin = null;
+            watcher.kill(io);
+        }
+        var env = std.process.Environ.Map.init(allocator);
+        defer env.deinit();
+        for (options.base_env.keys(), options.base_env.values()) |key, value| try env.put(key, value);
+        try env.put("NATIVE_SDK_DEV_VIEW", ts_core.view_reload_dir);
+        std.debug.print("native dev: markup edits reload in place (compiled views)\n", .{});
+        try runZigWithEnv(io, verb, argv.items, &env);
+    } else try runZig(io, verb, argv.items);
     if (rebuild_snapshot) |snapshot| try persistRebuildSnapshot(io, snapshot);
 
     if (wants_frontend_dev) {
@@ -232,6 +261,43 @@ fn hasOptimizeFlag(args: []const []const u8) bool {
     for (args) |arg| {
         if (std.mem.startsWith(u8, arg, "-Doptimize")) return true;
         if (std.mem.startsWith(u8, arg, "--release")) return true;
+    }
+    return false;
+}
+
+/// Whether the forwarded args turn compiled TypeScript views off (they are
+/// the default for TypeScript apps); the last spelling wins.
+fn typeScriptViewDisabled(args: []const []const u8) bool {
+    var disabled = false;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "-Dtypescript-view") or std.mem.eql(u8, arg, "-Dtypescript-view=true")) disabled = false;
+        if (std.mem.eql(u8, arg, "-Dtypescript-view=false")) disabled = true;
+    }
+    return disabled;
+}
+
+/// Mobile builds reload by rebuilding; their dev runs never stage the
+/// development evaluator.
+fn targetsMobile(args: []const []const u8) bool {
+    for (args) |arg| {
+        if (!std.mem.startsWith(u8, arg, "-Dtarget=")) continue;
+        if (std.mem.indexOf(u8, arg, "ios") != null or std.mem.indexOf(u8, arg, "android") != null) return true;
+    }
+    return false;
+}
+
+fn hasDebugOptimizeFlag(args: []const []const u8) bool {
+    var debug = false;
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "-Doptimize")) debug = std.mem.eql(u8, arg, "-Doptimize=Debug");
+        if (std.mem.startsWith(u8, arg, "--release")) debug = false;
+    }
+    return debug;
+}
+
+fn hasFlag(args: []const []const u8, comptime name: []const u8) bool {
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, name) or std.mem.startsWith(u8, arg, name ++ "=")) return true;
     }
     return false;
 }
@@ -399,6 +465,10 @@ fn persistRebuildSnapshot(io: std.Io, snapshot: []const u8) !void {
 }
 
 fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
+    return runZigWithEnv(io, verb, argv, null);
+}
+
+fn runZigWithEnv(io: std.Io, verb: Verb, argv: []const []const u8, environ_map: ?*const std.process.Environ.Map) !void {
     // The dev verb owns a whole process TREE: `zig build run` spawns the
     // app as its child, and a `native dev` that dies (Ctrl-C, a driver
     // killing the CLI) must not leave that app running — an orphaned
@@ -411,6 +481,7 @@ fn runZig(io: std.Io, verb: Verb, argv: []const []const u8) !void {
         .stdin = .inherit,
         .stdout = .inherit,
         .stderr = .inherit,
+        .environ_map = environ_map,
         .pgid = if (own_tree) process_tree.spawnPgid() else null,
     });
     // Capture the group id at spawn: wait() clears the child's id.
@@ -496,6 +567,21 @@ test "optimize flags are detected among forwarded args" {
     try std.testing.expect(hasOptimizeFlag(&.{ "-Dautomation=true", "--release=safe" }));
     try std.testing.expect(!hasOptimizeFlag(&.{"-Dautomation=true"}));
     try std.testing.expect(!hasOptimizeFlag(&.{}));
+}
+
+test "compiled views reload markup in a Debug dev run unless the native backend is selected" {
+    try std.testing.expect(!typeScriptViewDisabled(&.{}));
+    try std.testing.expect(!typeScriptViewDisabled(&.{"-Dtypescript-view=true"}));
+    try std.testing.expect(typeScriptViewDisabled(&.{"-Dtypescript-view=false"}));
+    try std.testing.expect(!typeScriptViewDisabled(&.{ "-Dtypescript-view=false", "-Dtypescript-view" }));
+    try std.testing.expect(hasDebugOptimizeFlag(&.{"-Doptimize=Debug"}));
+    try std.testing.expect(!hasDebugOptimizeFlag(&.{"-Doptimize=ReleaseFast"}));
+    try std.testing.expect(!hasDebugOptimizeFlag(&.{ "-Doptimize=Debug", "--release=safe" }));
+    try std.testing.expect(hasFlag(&.{"-Dview-reload=false"}, "-Dview-reload"));
+    try std.testing.expect(!hasFlag(&.{"-Dview-reloads=true"}, "-Dview-reload"));
+    try std.testing.expect(targetsMobile(&.{"-Dtarget=aarch64-ios-simulator"}));
+    try std.testing.expect(targetsMobile(&.{"-Dtarget=aarch64-linux-android"}));
+    try std.testing.expect(!targetsMobile(&.{"-Dtarget=x86_64-linux-gnu.2.36"}));
 }
 
 test "rebuild explanations persist manifest and source hashes" {

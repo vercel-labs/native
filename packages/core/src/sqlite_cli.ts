@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import ts from "@typescript/old";
-import { analyzeSqlite, checkMigrationState, formatSqliteDiagnostic, generateCoreSurface, generateMigrationsZig } from "./sqlite_codegen.ts";
+import { analyzeSqlite, checkMigrationState, formatSqliteDiagnostic, generateCoreDeclarations, generateCoreSurface, generateMigrationsZig } from "./sqlite_codegen.ts";
 
 function argsOf(argv: string[]): Map<string, string> {
   const out = new Map<string, string>();
@@ -48,6 +47,17 @@ try {
     const sdkSource = generateCoreSurface(fs.readFileSync(sdkIn!, "utf8"), analysis);
     fs.writeFileSync(sdkOut!, sdkSource);
     const sdkDir = path.dirname(sdkIn!);
+    // Generated core surfaces retain these relative SDK imports. Carry
+    // their complete implementation and declaration siblings with each
+    // projection, including the editor's app-specific relational overlay.
+    const siblingDirs = new Set([path.dirname(sdkOut!), path.dirname(staticOut!), ...(dtsOut ? [path.dirname(dtsOut)] : [])]);
+    for (const destination of siblingDirs) for (const name of ["bytes", "events", "text", "theme", "internal/image_identity", "internal/markdown_policy"]) {
+      for (const extension of [".ts", ".d.ts"]) {
+        const output = path.join(destination, name + extension);
+        fs.mkdirSync(path.dirname(output), { recursive: true });
+        fs.copyFileSync(path.join(sdkDir, name + extension), output);
+      }
+    }
     for (const [source, destination] of [
       ["events.ts", sdkEventsOut!],
       ["text.ts", sdkTextOut!],
@@ -58,50 +68,8 @@ try {
       fs.copyFileSync(path.join(sdkDir, source), destination);
     }
     if (dtsOut) {
-      const compilerOptions: ts.CompilerOptions = {
-        strict: true,
-        exactOptionalPropertyTypes: true,
-        target: ts.ScriptTarget.ESNext,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        lib: ["lib.esnext.d.ts"],
-        types: [],
-        allowImportingTsExtensions: true,
-        rewriteRelativeImportExtensions: true,
-        declaration: true,
-        emitDeclarationOnly: true,
-        skipLibCheck: false,
-      };
-      const input = path.resolve(sdkIn!);
-      const host = ts.createCompilerHost(compilerOptions);
-      const getSourceFile = host.getSourceFile.bind(host);
-      host.getSourceFile = (fileName, languageVersion, onError, shouldCreateNewSourceFile) =>
-        path.resolve(fileName) === input
-          ? ts.createSourceFile(fileName, sdkSource, languageVersion, true)
-          : getSourceFile(fileName, languageVersion, onError, shouldCreateNewSourceFile);
-      let output = "";
-      host.writeFile = (fileName, text) => {
-        if (fileName.endsWith("core.d.ts")) output = text;
-      };
-      const program = ts.createProgram([input], compilerOptions, host);
-      const errors = ts
-        .getPreEmitDiagnostics(program)
-        .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error);
-      if (errors.length > 0) {
-        throw new Error(
-          errors
-            .map(
-              (diagnostic) =>
-                `TS${diagnostic.code} ${ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n")}`,
-            )
-            .join("\n"),
-        );
-      }
-      const emit = program.emit();
-      if (emit.emitSkipped || output.length === 0) {
-        throw new Error("generated SQLite SDK declaration emit failed");
-      }
-      fs.writeFileSync(dtsOut, output.replace(/(from\s+")(\.\.?\/[^\"]+)\.ts(\")/g, "$1$2.js$3"));
+      const declarations = fs.readFileSync(path.join(sdkDir, "core.d.ts"), "utf8");
+      fs.writeFileSync(dtsOut, generateCoreDeclarations(fs.readFileSync(sdkIn!, "utf8"), declarations, analysis));
     }
     fs.writeFileSync(staticOut!, generateCoreSurface(fs.readFileSync(staticIn!, "utf8"), analysis));
   }

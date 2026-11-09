@@ -30,6 +30,7 @@ pub fn build(b: *std.Build) void {
     const platform_option = b.option(PlatformOption, "platform", "Desktop backend: auto, null, macos, linux, windows") orelse .auto;
     const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
     const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
     const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
     const cef_dir_override = b.option([]const u8, "cef-dir", "Override CEF root directory for Chromium builds");
     const cef_auto_install_override = b.option(bool, "cef-auto-install", "Override app.zon CEF auto-install setting");
@@ -61,6 +62,7 @@ pub fn build(b: *std.Build) void {
     options.addOption([]const u8, "trace", @tagName(trace_option));
     options.addOption([]const u8, "web_engine", @tagName(web_engine));
     options.addOption(bool, "automation", automation_enabled);
+    options.addOption(?bool, "webview_inspection", webview_inspection);
     const options_mod = options.createModule();
 
     const runner_mod = localModule(b, target, optimize, "src/runner.zig");

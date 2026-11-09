@@ -1,7 +1,6 @@
-// Exact regression for a generated facade normalizing
-// Model | [Model, Cmd<Msg>] with Array.isArray. A negative tick returns the
-// bare model; an effect-bearing tick returns a spawn tuple. The ABI battery
-// commits and snapshots after both dispatches.
+// A compiled boot fetch exercises command encoding during module init.
+// Updates also cover Model | [Model, Cmd<Msg>] normalization: a negative tick
+// returns the bare model; an effect-bearing tick returns a spawn tuple.
 
 import { Cmd, asciiBytes } from "@native-sdk/core";
 
@@ -13,10 +12,17 @@ export type Msg =
   | { readonly kind: "tick"; readonly at: number }
   | { readonly kind: "line"; readonly text: Uint8Array }
   | { readonly kind: "exited"; readonly code: number }
-  | { readonly kind: "failed"; readonly reason: Uint8Array };
+  | { readonly kind: "failed"; readonly reason: Uint8Array }
+  | { readonly kind: "fetched"; readonly status: number; readonly body: Uint8Array };
 
-export function initialModel(): Model {
-  return { n: 0 };
+export function initialModel(): Model | [Model, Cmd<Msg>] {
+  return [
+    { n: 0 },
+    Cmd.fetch(
+      { url: asciiBytes("https://example.test/boot"), headers: { accept: "text/plain" }, timeoutMs: 500 },
+      { ok: "fetched", err: "failed" },
+    ),
+  ];
 }
 
 export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
@@ -34,6 +40,7 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
       return { ...model, n: model.n < 9007199254740991 ? model.n + 1 : model.n };
     case "line":
     case "failed":
+    case "fetched":
       return model;
   }
 }

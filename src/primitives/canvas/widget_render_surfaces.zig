@@ -1,4 +1,5 @@
 const std = @import("std");
+const recipe = @import("surface_recipe_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const text_model = @import("text.zig");
@@ -26,8 +27,8 @@ const Widget = widget_model.Widget;
 const booleanControlSelected = widget_access.booleanControlSelected;
 const widgetBodyTextSize = widget_metrics.widgetBodyTextSize;
 const widgetLabelTextSize = widget_metrics.widgetLabelTextSize;
-const widgetLineHeight = widget_metrics.widgetLineHeight;
-const widgetTypographySize = widget_metrics.widgetTypographySize;
+const widgetLineHeightWithTokens = widget_metrics.widgetLineHeightWithTokens;
+const widgetTypographySizeWithTokens = widget_metrics.widgetTypographySizeWithTokens;
 const widgetControlInset = widget_metrics.widgetControlInset;
 const widgetAlertInset = widget_metrics.widgetAlertInset;
 const widgetSizedDensityValue = widget_metrics.widgetSizedDensityValue;
@@ -45,16 +46,11 @@ const controlStrokeWidth = widget_render_style.controlStrokeWidth;
 const snapHairlineStrokeRect = widget_render_style.snapHairlineStrokeRect;
 const washHovered = widget_render_style.washHovered;
 const surfaceStateBackground = widget_render_style.surfaceStateBackground;
-const disabledWash = widget_render_style.disabledWash;
-const alertControlVisualTokens = widget_render_style.alertControlVisualTokens;
-const cardControlVisualTokens = widget_render_style.cardControlVisualTokens;
-const dialogControlVisualTokens = widget_render_style.dialogControlVisualTokens;
-const drawerControlVisualTokens = widget_render_style.drawerControlVisualTokens;
-const sheetControlVisualTokens = widget_render_style.sheetControlVisualTokens;
 const surfaceControlVisualTokens = widget_render_style.surfaceControlVisualTokens;
 
 pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const visual = alertControlVisualTokens(tokens);
+    if (tokens.control_geometry_policy != null) return recipe.emit(.alert, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
+    const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -78,7 +74,7 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
     // the icon column (`alertContentFrame` indents children the same
     // way, so a description column lines up under the title).
     const text_size = widgetBodyTextSize(widget, tokens);
-    const line_height = widgetLineHeight(text_size);
+    const line_height = widgetLineHeightWithTokens(text_size, tokens);
     const inset = widgetAlertInset(widget, tokens);
     const icon_size = widgetSizedDensityValue(widget, tokens, 16);
     const icon_frame = geometry.RectF.init(
@@ -119,30 +115,8 @@ pub fn emitAlertWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
 /// The alert's identity color: destructive alerts read in the
 /// destructive hue (the house style `text-destructive` treatment on a plain
 /// card surface); every other variant keeps the plain foreground.
-fn alertBackgroundColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
-    if (widget.variant != .destructive) return surfaceStateBackground(widget, visual, tokens);
-    if (widget.style.background) |color| return disabledWash(color, widget.state.disabled, tokens.states.disabled_alpha);
-    const hue = widget.style.accent orelse tokens.colors.destructive;
-    const wash = colorWithAlpha(hue, if (widget.state.pressed)
-        tokens.states.destructive_wash_pressed_alpha
-    else if (washHovered(widget))
-        tokens.states.destructive_wash_hover_alpha
-    else
-        tokens.states.destructive_wash_alpha);
-    return disabledWash(wash, widget.state.disabled, tokens.states.disabled_alpha);
-}
-
-fn alertBorderColor(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
-    const border = widget.style.border orelse if (widget.variant == .destructive)
-        // Destructive alerts use the callout edge from the house recipe:
-        // the destructive hue at half strength. ControlTokens has one
-        // shared alert table, not per-variant alert tables, so a flat
-        // neutral `alert.border` cannot masquerade as variant theming.
-        colorWithAlpha(widget.style.accent orelse tokens.colors.destructive, 0.5)
-    else
-        visual.border orelse tokens.colors.border;
-    return disabledWash(border, widget.state.disabled, tokens.states.disabled_alpha);
-}
+const alertBackgroundColor = widget_render_style.alertBackgroundColor;
+const alertBorderColor = widget_render_style.alertBorderColor;
 
 fn alertVariantForeground(widget: Widget, visual: ControlVisualTokens, tokens: DesignTokens) Color {
     return switch (widget.variant) {
@@ -155,6 +129,14 @@ fn alertVariantForeground(widget: Widget, visual: ControlVisualTokens, tokens: D
 }
 
 pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, frame: geometry.RectF, color_value: Color) Error!void {
+    if (tokens.control_geometry_policy != null) {
+        var copied = widget;
+        copied.frame = frame;
+        var request = recipe.Request.init(.alert_mark, copied, tokens, .{}, 0);
+        request.putColor(192, color_value);
+        const planned = request.run(copied, tokens);
+        return planned.emit(builder, copied, tokens);
+    }
     const normalized = pixelSnapGeometryRect(tokens, frame.normalized());
     if (normalized.isEmpty()) return;
     // The registry icons the house alerts wear: `info` for the plain
@@ -164,11 +146,12 @@ pub fn emitAlertMark(builder: *Builder, widget: Widget, tokens: DesignTokens, fr
     // blur 12. Slots are 4-bit (`widgetPartId` packs id*16+slot), so
     // they must stay below 16.
     const icon = icon_model.resolve(if (widget.variant == .destructive) "alert" else "info") orelse return;
-    try widget_render_controls.emitVectorIcon(builder, widget.id, 3, normalized, color_value, icon);
+    try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 3, normalized, color_value, icon, tokens);
 }
 
 pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    const visual = cardControlVisualTokens(tokens);
+    if (tokens.control_geometry_policy != null) return recipe.emit(.card, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
+    const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     try builder.fillRoundedRect(.{
         .id = widgetPartId(widget.id, 1),
@@ -187,7 +170,7 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
     }));
     if (widget.text.len == 0) return;
 
-    const title_size = widgetTypographySize(widget, tokens.typography.body_size + 1);
+    const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.body_size + 1, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.lg);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 3),
@@ -198,7 +181,7 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
         .text = widget.text,
         .text_layout = .{
             .max_width = @max(1, widget.frame.width - inset * 2),
-            .line_height = widgetLineHeight(title_size),
+            .line_height = widgetLineHeightWithTokens(title_size, tokens),
             .wrap = .word,
             .alignment = widget.text_alignment,
             .measure = tokens.text_measure,
@@ -207,18 +190,19 @@ pub fn emitCardWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTok
 }
 
 pub fn emitDialogSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitModalSurfaceWidgetChrome(builder, widget, tokens, dialogControlVisualTokens(tokens), tokens.radius.xl);
+    try emitModalSurfaceWidgetChrome(builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl);
 }
 
 pub fn emitDrawerSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitModalSurfaceWidgetChrome(builder, widget, tokens, drawerControlVisualTokens(tokens), tokens.radius.xl);
+    try emitModalSurfaceWidgetChrome(builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl);
 }
 
 pub fn emitSheetSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
-    try emitModalSurfaceWidgetChrome(builder, widget, tokens, sheetControlVisualTokens(tokens), tokens.radius.lg);
+    try emitModalSurfaceWidgetChrome(builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
 }
 
 pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens, fallback_radius: f32) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.modal, builder, widget, tokens, visual, fallback_radius);
     const radius = controlRadius(widget, visual, fallback_radius);
     const shadow_token = tokens.shadow.md;
     if (shadow_token.y != 0 or shadow_token.blur != 0 or shadow_token.spread != 0) {
@@ -250,7 +234,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
     }));
     if (widget.text.len == 0) return;
 
-    const title_size = widgetTypographySize(widget, tokens.typography.title_size);
+    const title_size = widgetTypographySizeWithTokens(widget, tokens.typography.title_size, tokens);
     const inset = widgetControlInset(widget, tokens, tokens.spacing.xl);
     try builder.drawText(.{
         .id = widgetPartId(widget.id, 4),
@@ -261,7 +245,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
         .text = widget.text,
         .text_layout = .{
             .max_width = @max(1, widget.frame.width - inset * 2),
-            .line_height = widgetLineHeight(title_size),
+            .line_height = widgetLineHeightWithTokens(title_size, tokens),
             .wrap = .word,
             .alignment = widget.text_alignment,
             .measure = tokens.text_measure,
@@ -270,6 +254,7 @@ pub fn emitModalSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: D
 }
 
 pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.panel, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     const background = surfaceStateBackground(widget, visual, tokens);
@@ -316,6 +301,10 @@ pub fn emitPanelWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTo
 /// instead of ballooning into a lozenge. Deriving from the lg token
 /// keeps themed radius scales in step. An author `radius` wins.
 pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
+    if (tokens.control_geometry_policy != null) {
+        const planned = recipe.plan(.bubble_radius, widget, tokens, .{}, 0);
+        return planned.bubbleRadius();
+    }
     if (widget.style.radius) |radius| return Radius.all(@max(0, radius));
     return Radius.all(@max(0, tokens.radius.lg) + 12);
 }
@@ -342,6 +331,7 @@ pub fn bubbleWidgetRadius(widget: Widget, tokens: DesignTokens) Radius {
 /// Themed apps may still pin `controls.bubble` background/border; those
 /// land on the default variant, and author `style.*` always wins.
 pub fn emitBubbleWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.bubble, builder, widget, tokens, tokens.controls.bubble, 0);
     const radius = bubbleWidgetRadius(widget, tokens);
     if (bubbleFillColor(widget, tokens)) |background| {
         try builder.fillRoundedRect(.{
@@ -401,6 +391,10 @@ fn bubbleBorderColor(widget: Widget, tokens: DesignTokens) ?Color {
 /// captions); an explicit `style.foreground` on a child still wins,
 /// and the unfilled variants pass the palette through untouched.
 pub fn bubbleContentTokens(widget: Widget, tokens: DesignTokens) DesignTokens {
+    if (tokens.control_geometry_policy != null) {
+        const planned = recipe.plan(.bubble_ink, widget, tokens, .{}, 0);
+        return planned.contentTokens(tokens);
+    }
     var content = tokens;
     switch (widget.variant) {
         .primary => {
@@ -448,12 +442,16 @@ pub const bubble_reactions_ring: f32 = 3;
 /// reference, the pill consumes no flow space, so a thread gives the
 /// overlap breathing room with its own turn spacing.
 pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
+    if (tokens.control_geometry_policy != null) {
+        const planned = recipe.plan(.pill_rect, widget, tokens, .{}, 0);
+        return planned.pill();
+    }
     if (widget.kind != .bubble or widget.text.len == 0) return null;
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return null;
     const text_size = widgetLabelTextSize(widget, tokens);
-    const height = widgetLineHeight(text_size) + bubble_reactions_pad_v * 2;
-    const text_width = text_model.measureTextWidthForFont(tokens.text_measure, tokens.typography.font_id, widget.text, text_size);
+    const height = widgetLineHeightWithTokens(text_size, tokens) + bubble_reactions_pad_v * 2;
+    const text_width = text_model.measureTextWidthForFontWithPolicy(tokens.text_measure, tokens.text_run_policy, tokens.typography.font_id, widget.text, text_size);
     // The capsule floor: a one-glyph pill stays a circle-ish chip
     // instead of collapsing narrower than it is tall.
     const width = @max(height, @ceil(text_width) + bubble_reactions_pad_h * 2);
@@ -472,6 +470,7 @@ pub fn bubbleWidgetReactionsPillRect(widget: Widget, tokens: DesignTokens) ?geom
 /// a primary bubble's knockout ink never applies — so it draws from the
 /// page tokens regardless of variant.
 pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.reactions, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), 0);
     const pill = bubbleWidgetReactionsPillRect(widget, tokens) orelse return;
     const snapped = pixelSnapGeometryRect(tokens, pill);
     const ring = snapped.inflate(geometry.InsetsF.all(bubble_reactions_ring));
@@ -488,7 +487,7 @@ pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: Desi
         .fill = colorFill(tokens.colors.surface_subtle),
     });
     const text_size = widgetLabelTextSize(widget, tokens);
-    const line_height = widgetLineHeight(text_size);
+    const line_height = widgetLineHeightWithTokens(text_size, tokens);
     // Baseline centered in the pill, the single-line label convention.
     const baseline = snapped.y + @max(text_size, (snapped.height - line_height) * 0.5 + text_size);
     try builder.drawText(.{
@@ -514,10 +513,11 @@ pub fn emitBubbleWidgetReactions(builder: *Builder, widget: Widget, tokens: Desi
 /// explicit background (author style or themed control tokens) still
 /// paints.
 pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.accordion, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), 0);
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
-    const visual = widget_render_style.accordionControlVisualTokens(tokens);
+    const visual = surfaceControlVisualTokens(widget, tokens);
     if (widget.style.background orelse visual.background) |background| {
         try builder.fillRoundedRect(.{
             .id = widgetPartId(widget.id, 1),
@@ -554,7 +554,7 @@ pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: Desi
             .text = widget.text,
             .text_layout = .{
                 .max_width = @max(1, content.width - chevron_size - chevron_gap),
-                .line_height = widgetLineHeight(text_size),
+                .line_height = widgetLineHeightWithTokens(text_size, tokens),
                 .wrap = .none,
                 .alignment = widget.text_alignment,
                 .overflow = widget.text_overflow,
@@ -578,6 +578,13 @@ pub fn emitAccordionWidgetChrome(builder: *Builder, widget: Widget, tokens: Desi
 /// at its endpoints). The icon takes slots 4/5 (single stroke shape),
 /// clear of the chrome slots — slots are 4-bit, never 16 or above.
 pub fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTokens, frame: geometry.RectF) Error!void {
+    if (tokens.control_geometry_policy != null) {
+        var copied = widget;
+        copied.frame = frame;
+        const request = recipe.Request.init(.chevron, copied, tokens, .{}, 0);
+        const planned = request.run(copied, tokens);
+        return planned.emit(builder, copied, tokens);
+    }
     const icon = icon_model.resolve("chevron-down") orelse return;
     const normalized = pixelSnapGeometryRect(tokens, frame.normalized());
     if (normalized.isEmpty()) return;
@@ -594,10 +601,10 @@ pub fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTok
             .ty = normalized.y * 2 + normalized.height,
         };
         try builder.transform(flip);
-        try widget_render_controls.emitVectorIcon(builder, widget.id, 4, normalized, color, icon);
+        try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, normalized, color, icon, tokens);
         try builder.transform(flip);
     } else {
-        try widget_render_controls.emitVectorIcon(builder, widget.id, 4, normalized, color, icon);
+        try widget_render_controls.emitVectorIconWithTokens(builder, widget.id, 4, normalized, color, icon, tokens);
     }
 }
 
@@ -614,6 +621,7 @@ pub fn emitAccordionChevron(builder: *Builder, widget: Widget, tokens: DesignTok
 ///   trigger's bar sinks to this same edge and covers the hairline
 ///   where they meet.
 pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.tabs, builder, widget, tokens, tokens.controls.tabs, tokens.radius.lg);
     // No children guard: the retained layout copy flattens children into
     // sibling nodes, so the container paints purely from its own frame
     // (an empty tabs list lays out to a sliver nothing meaningful paints
@@ -670,6 +678,7 @@ pub fn emitTabsListWidgetChrome(builder: *Builder, widget: Widget, tokens: Desig
 }
 
 pub fn emitResizableWidgetHandle(builder: *Builder, widget: Widget, tokens: DesignTokens, visual: ControlVisualTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.grip, builder, widget, tokens, visual, 0);
     const frame = widget.frame.normalized();
     if (frame.isEmpty()) return;
 
@@ -702,6 +711,7 @@ pub fn emitResizableWidgetHandle(builder: *Builder, widget: Widget, tokens: Desi
 }
 
 pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.floating, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.xl);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.xl);
     const shadow_token = tokens.shadow.md;
@@ -735,6 +745,7 @@ pub fn emitPopoverWidgetChrome(builder: *Builder, widget: Widget, tokens: Design
 }
 
 pub fn emitMenuSurfaceWidgetChrome(builder: *Builder, widget: Widget, tokens: DesignTokens) Error!void {
+    if (tokens.control_geometry_policy != null) return recipe.emit(.floating, builder, widget, tokens, surfaceControlVisualTokens(widget, tokens), tokens.radius.lg);
     const visual = surfaceControlVisualTokens(widget, tokens);
     const radius = controlRadius(widget, visual, tokens.radius.lg);
     const shadow_token = tokens.shadow.md;

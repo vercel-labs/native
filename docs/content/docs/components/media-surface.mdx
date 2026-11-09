@@ -1,0 +1,52 @@
+---
+title: "Media Surface"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `media-surface` to display a texture from a video decoder, camera, or external renderer. It participates in layout, clipping, transforms, and rounded corners like other widgets.
+
+`surface` binds to a model-owned surface id (`u64` in Zig). A Zig toolkit extension acquires a producer for the same id through `runtime.acquireMediaSurfaceProducer` and submits tightly packed RGBA8 frames. The compositor uses the newest frame, paces producers against presented frames, and tracks damage.
+
+Use a nonzero id below bit 63; `0` means unbound, and the high bit is reserved for toolkit textures. If the id comes from a hash, clear its top bit.
+
+Live hosts display an id-derived placeholder until the first frame arrives. The reference renderer always displays that placeholder. Reference screenshots, goldens, fingerprints, and replay verification exclude producer pixels, so a recorded session can replay without an attached producer.
+
+<ComponentPreview name="media-surface" alt="A media surface rendering its id-derived placeholder" caption="the deterministic placeholder (no producer attached)" />
+
+## Markup
+
+```html
+<column gap="10">
+  <media-surface surface="{preview}" height="180" radius="md" label="Camera preview" />
+  <text foreground="text_muted">Awaiting producer frames</text>
+</column>
+```
+
+The surface has no intrinsic size — like `image`, give it definite `width`/`height` or flex `grow`. It is display-only: presses fall through to the nearest pressable ancestor, and the a11y lint asks for a `label` describing the content.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same leaf; the surface id rides the `image` channel (the same model-owned u64 shape registered images use):
+
+```zig
+ui.mediaSurface(.{ .image = model.preview_surface, .height = 180, .semantics = .{ .label = "Camera preview" } })
+```
+
+## Producing frames
+
+Producers are Zig-tier toolkit extensions in this release — acquire a handle for the surface id and push frames from your decoder or render loop:
+
+```zig
+const producer = try runtime.acquireMediaSurfaceProducer(model.preview_surface);
+defer producer.release();
+// From any thread, e.g. the decoder's:
+try producer.pushFrame(width, height, rgba8);
+```
+
+See [Media Producers](/docs/media-producers) for the full recipe: thread contract, pacing, teardown, and the external-renderer (mpv) shape.
+
+## Attributes
+
+<AttrTable element="media-surface" attrs={["surface", "width", "height", "grow", "radius", "label", "key", "global-key"]} />

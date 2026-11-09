@@ -1,0 +1,52 @@
+<column>
+  <row height="54" padding="10" gap="12" cross="center" window-drag="true">
+    <stack width="{chrome_leading}" />
+    <segmented-control min-width="214" label="Dashboard mode" on-press="set_mode">Overview|Revenue|Latency</segmented-control>
+    <button variant="secondary" label="Refresh dashboard" on-press="refresh">Refresh</button>
+    <spacer grow="1" />
+  </row>
+  <row grow="1" padding="38" gap="24">
+    <column width="168" padding="16" gap="12">
+      <list height="108" gap="8" label="Dashboard navigation">
+        <for each="navEntries" as="entry" key="title">
+          <list-item selected="{entry.selected}" on-press="select_nav:{entry.index}">{entry.title}
+            <context-menu><menu-item on-press="select_nav:{entry.index}">Open Section</menu-item><separator /><menu-item on-press="refresh">Refresh Dashboard</menu-item></context-menu>
+          </list-item>
+        </for>
+      </list>
+    </column>
+    <column grow="1" gap="18">
+      <column gap="6"><text>Revenue pulse</text><text>Retained canvas dashboard</text></column>
+      <grid height="76" gap="8" columns="2" role="list" label="Dashboard metrics">
+        <for each="metricEntries" as="entry" key="title"><list-item selected="{entry.selected}" on-press="select_metric:{entry.index}">{entry.title}</list-item></for>
+      </grid>
+      <progress value="0.68" label="Conversion progress" />
+      <panel padding="20" label="Conversion trend">
+        <column gap="14"><text>Conversion trend</text>
+          <data-grid height="28" text="Deployment latency"><table-row height="28"><table-cell grow="1" on-press="open_deployment">iad1 8.6ms P95</table-cell></table-row></data-grid>
+        </column>
+      </panel>
+      <panel padding="14" label="Forecast form">
+        <row gap="14" cross="center">
+          <text-field label="Forecast amount" on-submit="submit_forecast" text="$13.4M" />
+          <search-field label="Segment search" on-submit="submit_search" text="enterprise" />
+          <switch checked="{auto_refresh}" value="{auto_refresh_value}" label="Auto refresh" on-toggle="toggle_auto">Auto</switch>
+          <slider value="{confidence}" label="Confidence threshold" on-change="confidence_changed" />
+          <spacer grow="1" />
+        </row>
+      </panel>
+    </column>
+    <column width="196" gap="16">
+      <button label="Live render status" on-press="toggle_live">Live render</button>
+      <popover height="124" padding="12" label="Revenue filter popover" backdrop-blur="md">
+        <menu-surface gap="2" label="Filter options">
+          <for each="filterEntries" as="entry" key="title"><menu-item selected="{entry.selected}" on-press="select_filter:{entry.index}">{entry.title}</menu-item></for>
+        </menu-surface>
+      </popover>
+      <scroll height="112" value="{activity_scroll}" on-scroll="activity_scrolled" label="Recent activity">
+        <column gap="4"><for each="activityEntries" as="entry" key="title"><list-item height="32" selected="{entry.selected}" on-press="select_activity:{entry.index}">{entry.title}</list-item></for></column>
+      </scroll>
+    </column>
+  </row>
+  <row height="34" padding="8" cross="center"><text grow="1" size="sm" label="{status}">{status}</text></row>
+</column>

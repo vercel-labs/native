@@ -1,0 +1,44 @@
+---
+title: "Tooltip"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `tooltip` to annotate a control. It is a text leaf with model interpolation. Place it beside a trigger in a `stack` and set `anchor="above"` or `anchor="below"`. The runtime manages visibility on hover and keyboard focus; no model hover state is required. Without an anchor, the tooltip is ordinary static content. For a chat-message surface, see [bubble](/docs/components/bubble).
+
+<ComponentPreview name="tooltip" alt="A tooltip above a hovered button rendered by the engine" caption="the tooltip leaf above the hovered control it annotates" />
+
+## Markup
+
+```html
+<stack>
+  <button variant="outline" on-press="toggle_bold">Bold</button>
+  <tooltip anchor="above">Bold the selection</tooltip>
+</stack>
+```
+
+## Hover intent
+
+An anchored tooltip appears after `tooltip-delay` milliseconds of pointer hover (default 600). Set the delay to `0` for immediate display. After the pointer leaves a shown tooltip, a shared 400 ms window allows the next trigger’s tooltip to appear immediately. Theme metric tokens `tooltip_show_delay_ms` and `tooltip_warm_window_ms` control these defaults.
+
+The tooltip stays open while the pointer is over the trigger, the tooltip, or the gap between them. Scrolling updates hit testing: moving a trigger out from under the pointer hides or cancels its tooltip; bringing one under the pointer starts the delay.
+
+Keyboard focus shows the tooltip immediately. Moving focus away or pressing Escape hides it without opening the pointer warm window. Any pointer-down or Space/Enter activation cancels pending display, hides the tooltip, and clears that window. Losing view or window focus clears tooltip state.
+
+Without `anchor`, the element displays whenever it is present in the view. Use a model-bound `if` to control that form.
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.el(.stack, .{}, .{
+    ui.button(.{ .variant = .outline, .on_press = .toggle_bold }, "Bold"),
+    ui.el(.tooltip, .{ .text = "Bold the selection", .anchor = .above }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable element="tooltip" attrs={["text", "anchor", "anchor-alignment", "anchor-offset", "tooltip-delay"]} />

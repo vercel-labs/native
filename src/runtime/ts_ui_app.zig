@@ -4,7 +4,8 @@
 //! immutable committed graph plus a pure `update` returning the next
 //! root — this adapter closes that gap with no per-app glue:
 //!
-//!   Model    = core.Model — the emitted struct itself. Markup views
+//!   Model    = the full source model for native markup, or the generated
+//!              stateless handle for compiled views. Markup views
 //!              (`canvas.CompiledMarkupView(core.Model, core.Msg, src)`)
 //!              and Zig builder views bind its fields directly; the
 //!              binding names are the TS interface's own field names
@@ -15,7 +16,7 @@
 //!   update   = the bridge (`TsCoreHost(core)`): every Msg runs the
 //!              core's dispatch cycle — update, commit, command walk,
 //!              subscription reconcile — and the UiApp-held root is
-//!              refreshed to the committed value. Every pointer inside
+//!              refreshed to the committed value. Full reference pointers inside
 //!              it IS the committed graph (valid until the next
 //!              dispatch, exactly a view build's lifetime).
 //!   init     = the core's `initialModel`: the boot model commits at
@@ -45,7 +46,7 @@
 //! an exported `themePack(model): "house" | "geist"` helper selects the
 //! stock pack live through `theme_fn`, without taking ownership of the
 //! system appearance axes; `themeState(model)` subsumes it with scheme and
-//! accent axes through `theme_state_fn`. An exported
+//! accent and optional accessibility axes through `theme_state_fn`. An exported
 //! `statusItem(model): StatusItemState` helper similarly owns one complete
 //! menu-bar item through `status_item_fn`; `statusItems(model)` owns a keyed
 //! collection through `status_items_fn`. Both keep shell, presentation, and
@@ -61,6 +62,9 @@
 //! place, which cannot exist for a committed graph. TS apps keep
 //! continuous controls model-driven (`on-change`/`on-scroll` Msgs echo
 //! the value back into the model — the pattern UiApp already supports).
+//! `sliderStateMsg(model, sliders)` can additionally sample retained
+//! main-canvas sliders through a pure message and the normal commit walker.
+//! Its update must return no commands; native only supplies observations.
 //!
 //! Record/replay, automation, and pixel fingerprints need nothing
 //! extra: the adapter rides the ordinary UiApp dispatch path, so the
@@ -84,6 +88,10 @@ const ui_app = @import("ui_app.zig");
 const ts_core_host = @import("ts_core_host.zig");
 
 const ts_ui_app_log = std.log.scoped(.zero_ts_ui_app);
+
+test {
+    _ = @import("ts_canvas_icons.zig");
+}
 
 /// Quota for a comptime scan of an app-authored type. TS `Msg` unions may
 /// legally carry 256 arms; include total identifier bytes because
@@ -114,13 +122,15 @@ pub fn TsUiApp(comptime core: type) type {
 /// apps keep the runtime markup interpreter for hot reload, while release and
 /// mobile apps compile it out after installing the same comptime view.
 pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppFeatures) type {
+    if (features.compiled_model and features.runtime_markup) @compileError("compiled_model requires a compiled view; runtime markup reads the full source model");
     return struct {
-        /// The effect bridge — shared with any direct `TsCoreHost(core)`
-        /// instantiation (comptime memoization), so harnesses can read
+        /// The effect bridge shares its selected representation by comptime
+        /// memoization, so harnesses can read
         /// `Host.model()` and tests can name the bridge's key bases.
-        pub const Host = ts_core_host.TsCoreHost(core);
-        pub const Model = core.Model;
+        pub const Host = ts_core_host.TsCoreHostWithRuntimeModel(core, features.compiled_model);
+        pub const Model = Host.Model;
         pub const Msg = core.Msg;
+        pub const view_backend = if (@hasDecl(core, "nativeView")) "typescript" else "zig";
         pub const App = ui_app.UiAppWithFeatures(Model, Msg, features);
         pub const Options = App.Options;
         pub const Effects = App.Effects;
@@ -202,55 +212,89 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 };
             }
 
-            fn persistenceName(name: []const u8) bool {
-                return std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush");
+            fn targets(operation: u8, name: []const u8) [2]u8 {
+                if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                    var inline_request: [256]u8 = undefined;
+                    const request_bytes = if (name.len <= inline_request.len - 3) inline_request[0 .. 3 + name.len] else std.heap.page_allocator.alloc(u8, 3 + name.len) catch @panic("service carrier request allocation failed");
+                    defer if (name.len > inline_request.len - 3) std.heap.page_allocator.free(request_bytes);
+                    request_bytes[0..3].* = .{ 18, 7, operation };
+                    @memcpy(request_bytes[3..], name);
+                    const plan = compiledLifecycle(request_bytes);
+                    if (plan[0] == 0 or plan[0] > 2 or plan[1] > 2 or (operation < 5 and plan[1] != 0))
+                        @panic("invalid compiled service carrier plan");
+                    for (plan[2..]) |byte| if (byte != 0) @panic("invalid compiled service carrier reserved byte");
+                    return plan[0..2].*;
+                }
+                return if (operation < 2 and (std.mem.eql(u8, name, "core.persist") or std.mem.eql(u8, name, "core.persist.flush")))
+                    .{ 2, 0 }
+                else if (operation >= 5) .{ 1, 2 } else .{ 1, 0 };
+            }
+
+            fn carrier(self: *HostCallMux, target: u8) runtime_effects.HostCallBinding {
+                return switch (target) {
+                    1 => self.primary,
+                    2 => self.persist,
+                    else => @panic("invalid service carrier target"),
+                };
             }
 
             fn send(context: *anyopaque, name: []const u8, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = self.carrier(targets(0, name)[0]);
                 target.send_fn(target.context, name, payload);
             }
 
             fn request(context: *anyopaque, name: []const u8, key: u64, payload: []const u8) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const target = if (persistenceName(name)) self.persist else self.primary;
+                const target = self.carrier(targets(1, name)[0]);
                 target.request_fn(target.context, name, key, payload);
             }
 
             fn cancel(context: *anyopaque, key: u64) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.cancel_fn) |cancel_fn| cancel_fn(self.primary.context, key);
+                const target = self.carrier(targets(2, "")[0]);
+                if (target.cancel_fn) |cancel_fn| cancel_fn(target.context, key);
             }
 
             fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const poll_fn = self.primary.poll_fn orelse return null;
-                return poll_fn(self.primary.context);
+                const target = self.carrier(targets(3, "")[0]);
+                const poll_fn = target.poll_fn orelse return null;
+                return poll_fn(target.context);
             }
 
             fn pending(context: *anyopaque) bool {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                const pending_fn = self.primary.pending_fn orelse return false;
-                return pending_fn(self.primary.context);
+                const target = self.carrier(targets(4, "")[0]);
+                const pending_fn = target.pending_fn orelse return false;
+                return pending_fn(target.context);
             }
 
             fn bindServices(context: *anyopaque, services: *const platform.PlatformServices) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_services_fn) |bind_fn| bind_fn(self.primary.context, services);
-                if (self.persist.bind_services_fn) |bind_fn| bind_fn(self.persist.context, services);
+                for (targets(5, "")) |selection| {
+                    if (selection == 0) break;
+                    const target = self.carrier(selection);
+                    if (target.bind_services_fn) |bind_fn| bind_fn(target.context, services);
+                }
             }
 
             fn bindChannels(context: *anyopaque, channels: runtime_effects.HostChannelBinding) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.bind_channels_fn) |bind_fn| bind_fn(self.primary.context, channels);
-                if (self.persist.bind_channels_fn) |bind_fn| bind_fn(self.persist.context, channels);
+                for (targets(6, "")) |selection| {
+                    if (selection == 0) break;
+                    const target = self.carrier(selection);
+                    if (target.bind_channels_fn) |bind_fn| bind_fn(target.context, channels);
+                }
             }
 
             fn shutdown(context: *anyopaque) void {
                 const self: *HostCallMux = @ptrCast(@alignCast(context));
-                if (self.primary.shutdown_fn) |shutdown_fn| shutdown_fn(self.primary.context);
-                if (self.persist.shutdown_fn) |shutdown_fn| shutdown_fn(self.persist.context);
+                for (targets(7, "")) |selection| {
+                    if (selection == 0) break;
+                    const target = self.carrier(selection);
+                    if (target.shutdown_fn) |shutdown_fn| shutdown_fn(target.context);
+                }
             }
         };
 
@@ -328,14 +372,14 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             const stamped = stampOptions(options);
             Host.boot();
             applyCoreOptions(core_options);
-            return App.init(backing, Host.model().*, stamped);
+            return App.init(backing, Host.runtimeModel().*, stamped);
         }
 
         /// Mobile counterpart of `init`/`create`: the embed host
         /// (`native_sdk.embed.UiAppHost`) owns App construction, so this
         /// resolves the adapter's stamped options and applies the core
         /// options — the boot model commits here, and the generated mobile
-        /// wiring's `initModel` reads `Host.model()` afterwards. The embed
+        /// wiring's `initModel` reads `Host.runtimeModel()` afterwards. The embed
         /// host then drives the same stamped `init_fx`/`update_fx` seams
         /// the desktop wiring gets.
         pub fn mobileOptions(core_options: CoreOptions, options: Options) Options {
@@ -355,7 +399,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             applyCoreOptions(core_options);
             const self = try backing.create(App);
             App.initInPlace(self, backing, stamped);
-            self.model = Host.model().*;
+            self.model = Host.runtimeModel().*;
             return self;
         }
 
@@ -404,18 +448,181 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 @panic("TsUiApp does not support Options.sync: a committed model cannot be mutated in place - echo widget state through on-change/on-scroll Msgs instead");
             }
             var stamped = options;
+            if (comptime @hasDecl(Model, "sliderStateMsg")) stamped.sync = syncSliders;
+            if (options.pty_key_resolver != null) @panic("TsUiApp owns pty_key_resolver - remove custom PTY identity wiring");
+            stamped.pty_key_resolver = Host.resolvePtyKey;
+            if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                // The compiled core's window policy answers from its request bytes
+                // alone (no module state, deterministic core), so layout may reuse
+                // an earlier answer to an identical request.
+                canvas.decision_reuse.registerPurePolicy(core.nativeWindowPolicy);
+                if (options.construction_policy != null) @panic("TsUiApp owns construction_policy - remove custom construction wiring");
+                stamped.construction_policy = core.nativeWindowPolicy;
+                if (options.expression_policy != null) @panic("TsUiApp owns expression_policy - remove custom expression wiring");
+                stamped.expression_policy = core.nativeWindowPolicy;
+                if (options.composition_policy != null) @panic("TsUiApp owns composition_policy - remove custom composition wiring");
+                stamped.composition_policy = core.nativeWindowPolicy;
+                if (options.code_content_policy != null) @panic("TsUiApp owns code_content_policy - remove custom code content wiring");
+                stamped.code_content_policy = core.nativeWindowPolicy;
+                if (options.paragraph_policy != null) @panic("TsUiApp owns paragraph_policy - remove custom paragraph wiring");
+                stamped.paragraph_policy = core.nativeWindowPolicy;
+                if (options.text_run_policy != null) @panic("TsUiApp owns text_run_policy - remove custom text run wiring");
+                stamped.text_run_policy = core.nativeWindowPolicy;
+                if (options.chart_content_policy != null) @panic("TsUiApp owns chart_content_policy - remove custom chart content wiring");
+                stamped.chart_content_policy = core.nativeWindowPolicy;
+                if (options.markdown_content_policy != null) @panic("TsUiApp owns markdown_content_policy - remove custom Markdown content wiring");
+                stamped.markdown_content_policy = core.nativeMarkdownPolicy;
+                if (options.surface_layout_policy != null) @panic("TsUiApp owns surface_layout_policy - remove custom surface layout wiring");
+                stamped.surface_layout_policy = core.nativeWindowPolicy;
+                if (options.grid_layout_policy != null) @panic("TsUiApp owns grid_layout_policy - remove custom grid layout wiring");
+                stamped.grid_layout_policy = core.nativeWindowPolicy;
+                if (options.container_layout_policy != null) @panic("TsUiApp owns container_layout_policy - remove custom container layout wiring");
+                stamped.container_layout_policy = core.nativeWindowPolicy;
+                if (options.intrinsic_layout_policy != null) @panic("TsUiApp owns intrinsic_layout_policy - remove custom intrinsic layout wiring");
+                stamped.intrinsic_layout_policy = core.nativeWindowPolicy;
+                if (options.measurement_coordination_policy != null) @panic("TsUiApp owns measurement_coordination_policy - remove custom measurement coordination wiring");
+                stamped.measurement_coordination_policy = core.nativeWindowPolicy;
+                if (options.flow_measurement_policy != null) @panic("TsUiApp owns flow_measurement_policy - remove custom flow measurement wiring");
+                stamped.flow_measurement_policy = core.nativeWindowPolicy;
+                if (options.layout_coordination_policy != null) @panic("TsUiApp owns layout_coordination_policy - remove custom layout coordination wiring");
+                stamped.layout_coordination_policy = core.nativeWindowPolicy;
+                if (options.render_coordination_policy != null) @panic("TsUiApp owns render_coordination_policy - remove custom render coordination wiring");
+                stamped.render_coordination_policy = core.nativeWindowPolicy;
+                if (options.control_command_policy != null) @panic("TsUiApp owns control_command_policy - remove custom control command wiring");
+                stamped.control_command_policy = core.nativeWindowPolicy;
+                if (options.widget_motion_policy != null) @panic("TsUiApp owns widget_motion_policy - remove custom motion wiring");
+                stamped.widget_motion_policy = core.nativeWindowPolicy;
+                if (options.widget_audit_policy != null) @panic("TsUiApp owns widget_audit_policy - remove custom audit wiring");
+                stamped.widget_audit_policy = core.nativeWindowPolicy;
+                if (options.accessibility_policy != null) @panic("TsUiApp owns accessibility_policy - remove custom accessibility wiring");
+                stamped.accessibility_policy = core.nativeWindowPolicy;
+                if (options.widget_routing_policy != null) @panic("TsUiApp owns widget_routing_policy - remove custom routing wiring");
+                stamped.widget_routing_policy = core.nativeWindowPolicy;
+                if (options.widget_change_policy != null) @panic("TsUiApp owns widget_change_policy - remove custom change wiring");
+                stamped.widget_change_policy = core.nativeWindowPolicy;
+                if (options.widget_retention_policy != null) @panic("TsUiApp owns widget_retention_policy - remove custom retention wiring");
+                stamped.widget_retention_policy = core.nativeWindowPolicy;
+                if (options.widget_reconcile_policy != null) @panic("TsUiApp owns widget_reconcile_policy - remove custom reconcile wiring");
+                stamped.widget_reconcile_policy = core.nativeWindowPolicy;
+                if (options.scroll_tree_policy != null) @panic("TsUiApp owns scroll_tree_policy - remove custom scroll tree wiring");
+                stamped.scroll_tree_policy = core.nativeWindowPolicy;
+                if (options.scroll_mutation_policy != null) @panic("TsUiApp owns scroll_mutation_policy - remove custom scroll mutation wiring");
+                stamped.scroll_mutation_policy = core.nativeWindowPolicy;
+                if (options.widget_continuity_policy != null) @panic("TsUiApp owns widget_continuity_policy - remove custom continuity wiring");
+                stamped.widget_continuity_policy = core.nativeWindowPolicy;
+                if (options.staged_rebuild_policy != null) @panic("TsUiApp owns staged_rebuild_policy - remove custom staged rebuild wiring");
+                stamped.staged_rebuild_policy = core.nativeWindowPolicy;
+                if (options.virtual_window_policy != null) @panic("TsUiApp owns virtual_window_policy - remove custom virtual window wiring");
+                stamped.virtual_window_policy = core.nativeWindowPolicy;
+                if (options.context_menu_policy != null) @panic("TsUiApp owns context_menu_policy - remove custom context menu wiring");
+                stamped.context_menu_policy = core.nativeWindowPolicy;
+                if (options.web_pane_policy != null) @panic("TsUiApp owns web_pane_policy - remove custom pane coordination wiring");
+                stamped.web_pane_policy = core.nativeWindowPolicy;
+                if (options.widget_paint_policy != null) @panic("TsUiApp owns widget_paint_policy - remove custom paint wiring");
+                stamped.widget_paint_policy = core.nativeWindowPolicy;
+                if (options.widget_presentation_policy != null) @panic("TsUiApp owns widget_presentation_policy - remove custom presentation wiring");
+                if (options.widget_paint_walk_policy != null) @panic("TsUiApp owns widget_paint_walk_policy - remove custom paint traversal wiring");
+                stamped.widget_presentation_policy = core.nativeWindowPolicy;
+                stamped.widget_paint_walk_policy = core.nativeWindowPolicy;
+                if (options.terminal_paint_policy != null) @panic("TsUiApp owns terminal_paint_policy - remove custom terminal painter wiring");
+                stamped.terminal_paint_policy = core.nativeWindowPolicy;
+                if (options.control_geometry_policy != null) @panic("TsUiApp owns control_geometry_policy - remove custom geometry wiring");
+                stamped.control_geometry_policy = core.nativeWindowPolicy;
+            }
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                if (options.app_dispatch_policy != null) @panic("TsUiApp owns app_dispatch_policy - remove custom dispatch wiring");
+                stamped.app_dispatch_policy = core.nativeEffectPolicy;
+                if (options.host_flow_policy != null) @panic("TsUiApp owns host_flow_policy - remove custom host flow wiring");
+                stamped.host_flow_policy = core.nativeEffectPolicy;
+                if (options.markup_development_policy != null) @panic("TsUiApp owns markup_development_policy - remove custom markup development wiring");
+                stamped.markup_development_policy = core.nativeEffectPolicy;
+                if (options.replay_policy != null) @panic("TsUiApp owns replay_policy - remove custom replay wiring");
+                stamped.replay_policy = core.nativeEffectPolicy;
+                if (options.recording_policy != null) @panic("TsUiApp owns recording_policy - remove custom recording wiring");
+                stamped.recording_policy = core.nativeEffectPolicy;
+                if (options.blob_policy != null) @panic("TsUiApp owns blob_policy - remove custom blob wiring");
+                stamped.blob_policy = core.nativeEffectPolicy;
+                if (options.snapshot_policy != null) @panic("TsUiApp owns snapshot_policy - remove custom snapshot wiring");
+                stamped.snapshot_policy = core.nativeEffectPolicy;
+                if (options.component_policy != null) @panic("TsUiApp owns component_policy - remove custom component wiring");
+                stamped.component_policy = core.nativeEffectPolicy;
+            }
             command_store = stamped.on_command;
             lifecycle_store = stamped.on_lifecycle;
             lifecycle_flush_after_update = false;
             stamped.on_lifecycle = lifecycleAdapter;
             stamped.init_fx = initFx;
             stamped.update_fx = updateFx;
+            if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                if (options.shell_layout_policy != null) @panic("TsUiApp owns shell_layout_policy - remove custom shell layout wiring");
+                stamped.shell_layout_policy = core.nativeWindowPolicy;
+                if (options.view_coordination_policy != null) @panic("TsUiApp owns view_coordination_policy - remove custom view coordination wiring");
+                stamped.view_coordination_policy = core.nativeWindowPolicy;
+                if (options.window_lifecycle_policy != null) @panic("TsUiApp owns window_lifecycle_policy - remove custom window lifecycle wiring");
+                stamped.window_lifecycle_policy = core.nativeWindowPolicy;
+                if (options.image_registry_policy != null) @panic("TsUiApp owns image_registry_policy - remove custom image registry wiring");
+                stamped.image_registry_policy = core.nativeWindowPolicy;
+                if (options.font_registry_policy != null) @panic("TsUiApp owns font_registry_policy - remove custom font registry wiring");
+                stamped.font_registry_policy = core.nativeWindowPolicy;
+                if (options.shell_coordination_policy != null) @panic("TsUiApp owns shell_coordination_policy - remove custom shell coordination wiring");
+                stamped.shell_coordination_policy = core.nativeWindowPolicy;
+                if (options.shell_admission_policy != null) @panic("TsUiApp owns shell_admission_policy - remove custom shell admission wiring");
+                stamped.shell_admission_policy = core.nativeWindowPolicy;
+                if (options.system_admission_policy != null) @panic("TsUiApp owns system_admission_policy - remove custom system admission wiring");
+                stamped.system_admission_policy = core.nativeWindowPolicy;
+                if (options.bridge_descriptor_policy != null) @panic("TsUiApp owns bridge_descriptor_policy - remove custom bridge descriptor wiring");
+                stamped.bridge_descriptor_policy = core.nativeWindowPolicy;
+                if (options.authorization_policy != null) @panic("TsUiApp owns authorization_policy - remove custom authorization wiring");
+                stamped.authorization_policy = core.nativeWindowPolicy;
+                if (options.builtin_coordination_policy != null) @panic("TsUiApp owns builtin_coordination_policy - remove custom builtin coordination wiring");
+                stamped.builtin_coordination_policy = core.nativeWindowPolicy;
+                if (options.automation_command_policy != null) @panic("TsUiApp owns automation_command_policy - remove custom automation command wiring");
+                stamped.automation_command_policy = core.nativeWindowPolicy;
+                if (options.automation_interaction_policy != null) @panic("TsUiApp owns automation_interaction_policy - remove custom automation interaction wiring");
+                stamped.automation_interaction_policy = core.nativeWindowPolicy;
+                if (options.command_policy != null) @panic("TsUiApp owns command_policy - remove custom command wiring");
+                stamped.command_policy = core.nativeWindowPolicy;
+                if (options.text_cache_policy != null) @panic("TsUiApp owns text_cache_policy - remove custom text cache wiring");
+                stamped.text_cache_policy = core.nativeWindowPolicy;
+                if (options.render_cache_policy != null) @panic("TsUiApp owns render_cache_policy - remove custom render cache wiring");
+                stamped.render_cache_policy = core.nativeWindowPolicy;
+                if (options.render_plan_policy != null) @panic("TsUiApp owns render_plan_policy - remove custom render plan wiring");
+                stamped.render_plan_policy = core.nativeWindowPolicy;
+                if (options.render_override_policy != null) @panic("TsUiApp owns render_override_policy - remove custom render override wiring");
+                stamped.render_override_policy = core.nativeWindowPolicy;
+                if (options.render_damage_policy != null) @panic("TsUiApp owns render_damage_policy - remove custom render damage wiring");
+                stamped.render_damage_policy = core.nativeWindowPolicy;
+            }
+            if (comptime @hasDecl(core, "nativeTabFocusPolicy")) {
+                if (options.tab_focus_policy != null) @panic("TsUiApp owns tab_focus_policy - remove custom focus policy wiring");
+                stamped.tab_focus_policy = core.nativeTabFocusPolicy;
+            }
+            if (comptime @hasDecl(core, "nativeSurfaceScopePolicy")) {
+                if (options.surface_scope_policy != null) @panic("TsUiApp owns surface_scope_policy - remove custom surface policy wiring");
+                stamped.surface_scope_policy = core.nativeSurfaceScopePolicy;
+            }
+            if (comptime @hasDecl(core, "nativeFocusReturnPolicy")) {
+                if (options.focus_return_policy != null) @panic("TsUiApp owns focus_return_policy - remove custom focus return wiring");
+                stamped.focus_return_policy = core.nativeFocusReturnPolicy;
+            }
+            if (comptime @hasDecl(core, "nativeTooltipPolicy")) {
+                if (options.tooltip_policy != null) @panic("TsUiApp owns tooltip_policy - remove custom tooltip policy wiring");
+                stamped.tooltip_policy = core.nativeTooltipPolicy;
+            }
+            if (comptime @hasDecl(core, "nativePressHoldPolicy")) {
+                if (options.press_hold_policy != null) @panic("TsUiApp owns press_hold_policy - remove custom hold policy wiring");
+                stamped.press_hold_policy = core.nativePressHoldPolicy;
+            }
             // A TypeScript core can select a built-in pack from ordinary
             // model state without ejecting the generated launcher. The
             // exported single-model helper emits as a Model method, so it
             // is equally visible on direct compiler output and the
             // external-core mirror. The app owns only the pack; UiApp's
             // stock-token path keeps following the OS appearance.
+            if (comptime @hasDecl(core, "nativeThemePolicy")) {
+                if (options.theme_policy != null) @panic("TsUiApp owns theme_policy - remove custom theme policy wiring");
+                stamped.theme_policy = core.nativeThemePolicy;
+            }
             if (comptime @hasDecl(Model, "themePack")) {
                 if (comptime @hasDecl(Model, "themeState")) {
                     @compileError("TsUiApp: export either themePack or themeState, not both");
@@ -432,6 +639,14 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
                 comptime validateThemeStateHelper();
                 stamped.theme_state_fn = themeStateAdapter;
+            }
+            if (comptime @hasDecl(Model, "tokenOverrides")) {
+                if (options.token_overrides_fn != null) @panic("TsUiApp owns token_overrides_fn from tokenOverrides");
+                stamped.token_overrides_fn = tokenOverridesAdapter;
+            }
+            if (comptime @hasDecl(core, "nativeStatusPolicy")) {
+                if (options.status_policy != null) @panic("TsUiApp owns status_policy - remove custom status policy wiring");
+                stamped.status_policy = core.nativeStatusPolicy;
             }
             // A statusItem helper is the TS app's model-derived shell
             // declaration. UiApp installs it on the first frame and
@@ -464,6 +679,39 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
                 comptime validateWindowsHelper();
                 stamped.windows_fn = windowsAdapter;
+                if (comptime @hasDecl(core, "nativeWindowPolicy")) {
+                    if (options.window_policy != null) @panic("TsUiApp wires window_policy from the compiled core");
+                    stamped.window_policy = core.nativeWindowPolicy;
+                }
+            }
+            if (comptime @hasDecl(Model, "webPanes")) {
+                if (options.web_panes != null) @panic("TsUiApp owns web_panes from webPanes - remove custom pane wiring");
+                comptime validateWebPanesHelper();
+                stamped.web_panes = webPanesAdapter;
+            }
+            if (comptime @hasDecl(Model, "layoutTweens")) {
+                if (options.layout_tweens != null) @panic("TsUiApp owns layout_tweens from layoutTweens - remove custom tween wiring");
+                comptime validateLayoutTweensHelper();
+                stamped.layout_tweens = layoutTweensAdapter;
+            }
+            const CanvasHooks = @import("ts_canvas_hooks.zig").Hooks(core, Model, App);
+            if (comptime @hasDecl(Model, "canvasChrome") or @hasDecl(Model, "canvasChromeSuffix")) {
+                if (options.chrome != null) @panic("TsUiApp owns chrome from canvasChrome");
+                stamped.chrome = .{
+                    .prefix_commands = if (@hasDecl(Model, "canvasChrome")) 256 else 0,
+                    .suffix_commands = if (@hasDecl(Model, "canvasChromeSuffix")) 256 else 0,
+                    .variable_prefix = true,
+                    .build = CanvasHooks.chrome,
+                    .build_suffix = if (@hasDecl(Model, "canvasChromeSuffix")) CanvasHooks.suffix else null,
+                };
+            }
+            if (comptime @hasDecl(Model, "canvasAnimations")) {
+                if (options.animations != null) @panic("TsUiApp owns animations from canvasAnimations");
+                stamped.animations = CanvasHooks.animations;
+            }
+            if (comptime @hasDecl(Model, "canvasFrameMsg")) {
+                if (@hasDecl(core, "frameMsg") or options.on_frame != null) @panic("TsUiApp owns on_frame from canvasFrameMsg; remove frameMsg/custom on_frame");
+                stamped.on_frame = CanvasHooks.frame;
             }
             // The core's host-event channels, comptime-detected from its
             // exports (export exists -> wired; every shape mismatch is a
@@ -506,11 +754,21 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
                 stamped.on_chrome = chromeMsgAdapter;
             }
+            if (comptime @hasDecl(Model, "windowContext")) {
+                if (options.on_window_context != null) @panic("TsUiApp owns windowContext wiring");
+                stamped.on_window_context = windowContextAdapter;
+            }
             return stamped;
         }
 
         fn lifecycleAdapter(event: runtime_core.LifecycleEvent) ?Msg {
             const mapped = if (lifecycle_store) |map| map(event) else null;
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFlush(@intCast(@intFromEnum(event)), mapped != null);
+                lifecycle_flush_after_update = plan[0] == 1;
+                if (plan[1] == 1) flushPersistence();
+                return mapped;
+            }
             if (event != .deactivate and event != .stop) return mapped;
             if (mapped != null) {
                 // UiApp dispatches the mapped Msg after this callback returns.
@@ -527,6 +785,20 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             if (persist_options_store) |persist| {
                 persist.binding.send_fn(persist.binding.context, "core.persist.flush", "");
             }
+        }
+
+        fn compiledLifecycle(request: []const u8) [32]u8 {
+            var plan: [32]u8 = undefined;
+            if (core.nativeEffectPolicy(request, &plan) != plan.len)
+                @panic("invalid compiled app lifecycle plan size");
+            return plan;
+        }
+
+        fn compiledFlush(event: u8, mapped: bool) [32]u8 {
+            const plan = compiledLifecycle(&.{ 18, 0, event, @intFromBool(mapped), @intFromBool(lifecycle_flush_after_update), 0 });
+            if (plan[0] > 1 or plan[1] > 1) @panic("invalid compiled lifecycle flush plan");
+            for (plan[2..]) |byte| if (byte != 0) @panic("invalid compiled lifecycle flush reserved byte");
+            return plan;
         }
 
         fn themePackAdapter(model: *const Model) canvas.ThemePack {
@@ -551,6 +823,54 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             }
         }
 
+        fn tokenOverridesAdapter(model: *const Model) canvas.DesignTokenOverrides {
+            const params = @typeInfo(@TypeOf(Model.tokenOverrides)).@"fn".params;
+            const raw = if (comptime params.len == 1) model.tokenOverrides() else model.tokenOverrides(core.rt.frameAllocator());
+            return tokenOverrideValue(canvas.DesignTokenOverrides, raw);
+        }
+
+        /// Copy the complete typed declaration by value before the next core
+        /// call. No text, pointers or behavior can survive as token data.
+        fn tokenOverrideValue(comptime Target: type, raw: anytype) Target {
+            const Raw = @TypeOf(raw);
+            if (comptime @typeInfo(Raw) == .pointer) return tokenOverrideValue(Target, raw.*);
+            switch (@typeInfo(Target)) {
+                .optional => |info| {
+                    if (comptime @typeInfo(Raw) != .optional) @compileError("token override members must be optional");
+                    return if (raw) |value| tokenOverrideValue(info.child, value) else null;
+                },
+                .@"struct" => |info| {
+                    if (comptime @typeInfo(Raw) == .optional) return if (raw) |value| tokenOverrideValue(Target, value) else .{};
+                    if (comptime @typeInfo(Raw) != .@"struct" or @typeInfo(Raw).@"struct".fields.len != info.fields.len) @compileError("token override record must match the complete canonical register");
+                    var result: Target = undefined;
+                    inline for (info.fields) |field| {
+                        if (comptime !@hasField(Raw, field.name)) @compileError("token override record is missing " ++ field.name);
+                        @field(result, field.name) = tokenOverrideValue(field.type, @field(raw, field.name));
+                    }
+                    if (comptime Target == canvas.Color) {
+                        inline for (.{ "r", "g", "b", "a" }) |field| {
+                            const value = @field(result, field);
+                            if (value < 0 or value > 1) @panic("token color channels require normalized RGBA");
+                        }
+                    }
+                    return result;
+                },
+                .float => {
+                    const value: Target = if (comptime @typeInfo(Raw) == .float) @floatCast(raw) else @floatFromInt(raw);
+                    if (!std.math.isFinite(value)) @panic("token override must be finite");
+                    return value;
+                },
+                .int => {
+                    const value: f64 = if (comptime @typeInfo(Raw) == .float) @floatCast(raw) else @floatFromInt(raw);
+                    if (!std.math.isFinite(value) or value != @trunc(value) or value < -9_007_199_254_740_991 or value > 9_007_199_254_740_991 or value < @as(f64, @floatFromInt(std.math.minInt(Target))) or value > @as(f64, @floatFromInt(std.math.maxInt(Target)))) @panic("token override integer is out of range");
+                    return @intFromFloat(value);
+                },
+                .@"enum" => return std.meta.stringToEnum(Target, @tagName(raw)) orelse @panic("invalid token override enum"),
+                .bool => return raw,
+                else => @compileError("unsupported token override ABI field"),
+            }
+        }
+
         fn themeStateAdapter(model: *const Model) App.ThemeState {
             const params = @typeInfo(@TypeOf(Model.themeState)).@"fn".params;
             const raw_state = if (comptime params.len == 1)
@@ -564,6 +884,8 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 .color_scheme = if (state.colorScheme) |scheme| themeColorScheme(scheme) else .system,
                 .accent = accent,
                 .invalid_accent = if (state.accent != null and accent == null) state.accent else null,
+                .high_contrast = if (comptime @hasField(@TypeOf(state), "highContrast")) state.highContrast else null,
+                .reduce_motion = if (comptime @hasField(@TypeOf(state), "reduceMotion")) state.reduceMotion else null,
             };
         }
 
@@ -576,6 +898,14 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         }
 
         fn parseThemeAccent(value: []const u8) ?canvas.Color {
+            if (comptime @hasDecl(core, "nativeThemePolicy")) {
+                const request = core.rt.frameAllocator().alloc(u8, value.len + 1) catch @panic("out of memory preparing theme accent");
+                request[0] = 0;
+                @memcpy(request[1..], value);
+                var result: [4]u8 = undefined;
+                if (core.nativeThemePolicy(request, &result) != result.len or result[0] > 1) @panic("invalid compiled theme accent result");
+                return if (result[0] == 1) canvas.Color.rgb8(result[1], result[2], result[3]) else null;
+            }
             if (value.len != 7 or value[0] != '#') return null;
             const r = themeHexByte(value[1], value[2]) orelse return null;
             const g = themeHexByte(value[3], value[4]) orelse return null;
@@ -616,7 +946,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             const RawState = function.return_type orelse @compileError(teaching);
             const State = statusItemRecordType(RawState, teaching);
             const info = @typeInfo(State).@"struct";
-            if (info.fields.len != 3 or !@hasField(State, "pack") or !@hasField(State, "colorScheme") or !@hasField(State, "accent")) {
+            if ((info.fields.len != 3 and info.fields.len != 5) or !@hasField(State, "pack") or !@hasField(State, "colorScheme") or !@hasField(State, "accent")) {
                 @compileError(teaching);
             }
             if (!optionalEnumType(@FieldType(State, "pack"), &.{ "house", "geist" }) or
@@ -625,6 +955,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             {
                 @compileError(teaching);
             }
+            if (info.fields.len == 5 and (!@hasField(State, "highContrast") or !@hasField(State, "reduceMotion") or @FieldType(State, "highContrast") != ?bool or @FieldType(State, "reduceMotion") != ?bool)) @compileError(teaching);
         }
 
         /// Convert the compiled core's canonical status-item records into
@@ -701,6 +1032,94 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 };
             }
             return scratch.status_items[0..raw_states.len];
+        }
+
+        const PaneStrings = struct {
+            label: [64]u8 = undefined,
+            anchor: [256]u8 = undefined,
+            url: [platform.max_webview_url_bytes]u8 = undefined,
+        };
+        // The helper's frame may expire as soon as the next compiled call
+        // runs. OS reconciliation receives only bounded native-owned bytes.
+        var pane_strings: [@import("ui_app.zig").max_web_panes]PaneStrings = undefined;
+
+        fn paneBytes(out: []u8, source: []const u8) []const u8 {
+            if (source.len > out.len) @panic("TsUiApp: webPanes text exceeds the native pane budget");
+            @memcpy(out[0..source.len], source);
+            return out[0..source.len];
+        }
+
+        fn paneNumber(value: anytype) f64 {
+            return switch (@typeInfo(@TypeOf(value))) {
+                .int => @floatFromInt(value),
+                .float => @floatCast(value),
+                else => unreachable,
+            };
+        }
+
+        fn paneCoordinate(value: anytype) error{InvalidWebPane}!f32 {
+            const number = paneNumber(value);
+            if (!std.math.isFinite(number) or @abs(number) > std.math.floatMax(f32)) return error.InvalidWebPane;
+            return @floatCast(number);
+        }
+
+        fn paneDimension(value: anytype) error{InvalidWebPane}!f32 {
+            const number = try paneCoordinate(value);
+            if (number < 0) return error.InvalidWebPane;
+            return number;
+        }
+
+        fn paneReloadToken(value: anytype) error{InvalidWebPane}!u64 {
+            if (comptime @TypeOf(value) == []const u8) {
+                if (value.len == 0 or value.len > 20) return error.InvalidWebPane;
+                for (value) |byte| if (byte < '0' or byte > '9') return error.InvalidWebPane;
+                return std.fmt.parseInt(u64, value, 10) catch error.InvalidWebPane;
+            }
+            const number = paneNumber(value);
+            if (!std.math.isFinite(number) or number < 0 or number > 9007199254740991 or @floor(number) != number) return error.InvalidWebPane;
+            return @intFromFloat(number);
+        }
+
+        fn webPanesAdapter(model: *const Model, out: []App.WebViewPane) usize {
+            const params = @typeInfo(@TypeOf(Model.webPanes)).@"fn".params;
+            const raw = if (comptime params.len == 1) model.webPanes() else model.webPanes(core.rt.frameAllocator());
+            const count = @min(raw.len, @min(out.len, pane_strings.len));
+            if (raw.len > pane_strings.len) ts_ui_app_log.warn("webPanes declared {d} panes; the budget is {d}; excess panes are ignored", .{ raw.len, count });
+            for (raw[0..count], 0..) |raw_pane, index| {
+                const pane = if (comptime @typeInfo(@TypeOf(raw_pane)) == .pointer) raw_pane.* else raw_pane;
+                const token = paneReloadToken(pane.reloadToken) catch @panic("TsUiApp: webPanes reloadToken must be a nonnegative safe integer or decimal u64 bytes");
+                const width = paneDimension(pane.width) catch @panic("TsUiApp: webPanes dimensions must be nonnegative finite f32 points");
+                const height = paneDimension(pane.height) catch @panic("TsUiApp: webPanes dimensions must be nonnegative finite f32 points");
+                out[index] = .{
+                    .label = paneBytes(&pane_strings[index].label, pane.label),
+                    .anchor = if (pane.anchor) |anchor| paneBytes(&pane_strings[index].anchor, anchor) else null,
+                    .url = paneBytes(&pane_strings[index].url, pane.url),
+                    .frame = @import("geometry").RectF.init(paneCoordinate(pane.x) catch @panic("TsUiApp: invalid pane x"), paneCoordinate(pane.y) catch @panic("TsUiApp: invalid pane y"), width, height),
+                    .reload_token = token,
+                };
+            }
+            return count;
+        }
+
+        fn validateWebPanesHelper() void {
+            const teaching = "TsUiApp: export webPanes(model: Model): readonly WebViewPane[] or readonly ExactWebViewPane[]; import the descriptor from @native-sdk/core/events";
+            const info = @typeInfo(@TypeOf(Model.webPanes));
+            if (info != .@"fn") @compileError(teaching);
+            const function = info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type != *const Model) @compileError(teaching);
+            if (function.params.len == 2 and function.params[1].type != std.mem.Allocator) @compileError(teaching);
+            const returned = @typeInfo(function.return_type orelse @compileError(teaching));
+            if (returned != .pointer or returned.pointer.size != .slice or !returned.pointer.is_const) @compileError(teaching);
+            const Pane = statusItemRecordType(returned.pointer.child, teaching);
+            if (@typeInfo(Pane).@"struct".fields.len != 8) @compileError(teaching);
+            inline for (.{ "label", "url" }) |name| {
+                if (!@hasField(Pane, name) or @FieldType(Pane, name) != []const u8) @compileError(teaching);
+            }
+            if (!@hasField(Pane, "reloadToken") or (!statusItemNumericType(@FieldType(Pane, "reloadToken")) and @FieldType(Pane, "reloadToken") != []const u8)) @compileError(teaching);
+            if (!@hasField(Pane, "anchor") or @FieldType(Pane, "anchor") != ?[]const u8) @compileError(teaching);
+            inline for (.{ "x", "y", "width", "height" }) |name| {
+                if (!@hasField(Pane, name) or !statusItemNumericType(@FieldType(Pane, name))) @compileError(teaching);
+            }
         }
 
         fn windowsAdapter(model: *const Model, scratch: *App.WindowsScratch) []const App.WindowDescriptor {
@@ -1199,6 +1618,11 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// the launch environment overrides as ordinary journaled Msgs,
         /// then refresh the app-held root.
         fn initFx(model: *Model, fx: *Effects) void {
+            @import("ts_canvas_icons.zig").Icons(core, Model).install(model) catch @panic("invalid compiled canvas icon declarations");
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                compiledInitFx(model, fx);
+                return;
+            }
             if (host_call_mux_store) |*mux| {
                 fx.bindHostCalls(mux.binding());
             } else if (host_calls_store) |binding| {
@@ -1206,12 +1630,7 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             } else if (persist_options_store) |persist| {
                 fx.bindHostCalls(persist.binding);
             }
-            for (boot_images_store) |image| {
-                // Registration is synchronous; a failed decode leaves the
-                // views on their fallback (avatar initials) — a bad asset
-                // never breaks presentation (the Zig apps' convention).
-                _ = fx.registerImageBytes(image.id, image.bytes) catch continue;
-            }
+            for (boot_images_store) |image| registerBootImage(fx, image);
             if (persist_options_store) |persist| {
                 if (persist.outcome_handle) |handle| {
                     handle.* = fx.openChannel(.{
@@ -1225,13 +1644,88 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             Host.performBoot(fx);
             if (persist_outcome) |outcome| dispatchPersistOutcome(fx, outcome);
             dispatchEnvValues(fx);
-            model.* = Host.model().*;
+            model.* = Host.runtimeModel().*;
+        }
+
+        fn compiledInitFx(model: *Model, fx: *Effects) void {
+            const plan = compiledLifecycle(&.{ 18, 1, @intFromBool(host_call_mux_store != null), @intFromBool(host_calls_store != null), @intFromBool(persist_options_store != null), @intFromBool(if (persist_options_store) |persist| persist.outcome_handle != null else false) });
+            var outcome: ?persist_store.Outcome = null;
+            for (plan) |action| switch (action) {
+                0 => break,
+                1 => fx.bindHostCalls(host_call_mux_store.?.binding()),
+                2 => fx.bindHostCalls(host_calls_store.?),
+                3 => fx.bindHostCalls(persist_options_store.?.binding),
+                4 => for (boot_images_store) |image| registerBootImage(fx, image),
+                5 => persist_options_store.?.outcome_handle.?.* = fx.openChannel(.{
+                    .key = persist_outcome_channel_key,
+                    .on_event = persistOutcomeMsg,
+                    .max_pending = 8,
+                }),
+                6 => outcome = preparePersistRestore(fx),
+                7 => Host.performBoot(fx),
+                8 => if (outcome) |value| {
+                    dispatchPersistOutcome(fx, value);
+                },
+                9 => dispatchEnvValues(fx),
+                10 => model.* = Host.runtimeModel().*,
+                else => @panic("invalid compiled installation action"),
+            };
+        }
+
+        /// Native decoding and pixel ownership remain in the image registry.
+        /// The compiled core chooses how each complete result affects its
+        /// model, before boot commands and the first view. Registration has
+        /// the same non-journaled semantics as the native init_fx convention.
+        fn registerBootImage(fx: *Effects, image: BootImage) void {
+            var dimensions: runtime_effects.RegisteredImage = .{};
+            var failure: ?anyerror = null;
+            if (fx.registerImageBytes(image.id, image.bytes)) |registered| {
+                dimensions = registered;
+            } else |err| failure = err;
+            if (comptime @hasDecl(Model, "bootImageMsg")) {
+                const params = @typeInfo(@TypeOf(Model.bootImageMsg)).@"fn".params;
+                if (params.len != 2 and params.len != 3)
+                    @compileError("TsUiApp: bootImageMsg must take Model and BootImageResult");
+                const Result = params[1].type.?;
+                if (@typeInfo(Result) != .@"struct" or @typeInfo(Result).@"struct".fields.len != 5 or
+                    !@hasField(Result, "id") or !@hasField(Result, "registered") or !@hasField(Result, "width") or !@hasField(Result, "height") or !@hasField(Result, "errorName"))
+                    @compileError("TsUiApp: bootImageMsg's BootImageResult must carry all five result fields");
+                comptime validateChannelRecord(struct { width: @FieldType(Result, "width"), height: @FieldType(Result, "height") }, &.{ "width", "height" }, "bootImageMsg's dimensions", &.{});
+                if (@FieldType(Result, "id") != []const u8 or @FieldType(Result, "registered") != bool or @FieldType(Result, "errorName") != []const u8)
+                    @compileError("TsUiApp: bootImageMsg must retain decimal identity bytes, registered boolean and complete error bytes");
+                var decimal: [20]u8 = undefined;
+                const result: Result = .{
+                    .id = std.fmt.bufPrint(&decimal, "{d}", .{image.id}) catch unreachable,
+                    .registered = failure == null,
+                    .width = channelNum(@FieldType(Result, "width"), @floatFromInt(dimensions.width)),
+                    .height = channelNum(@FieldType(Result, "height"), @floatFromInt(dimensions.height)),
+                    .errorName = if (failure) |err| @errorName(err) else "",
+                };
+                const model = Host.runtimeModel();
+                const value = (if (comptime params.len == 2) model.bootImageMsg(result) else model.bootImageMsg(result, core.rt.frameAllocator())) orelse return;
+                const message: Msg = switch (value) {
+                    inline else => |payload, tag| blk: {
+                        const Target = @FieldType(Msg, @tagName(tag));
+                        if (comptime @typeInfo(Target) == .@"struct") {
+                            // Separate inline records have distinct native
+                            // types even when their declared fields match.
+                            var forwarded: Target = undefined;
+                            inline for (@typeInfo(Target).@"struct".fields) |field|
+                                @field(forwarded, field.name) = @field(payload, field.name);
+                            break :blk @unionInit(Msg, @tagName(tag), forwarded);
+                        }
+                        break :blk @unionInit(Msg, @tagName(tag), payload);
+                    },
+                };
+                Host.dispatch(fx, message);
+            }
         }
 
         /// Resolve the boot snapshot entirely at the effect boundary. Live
         /// launches journal the runner-provided result; replay consumes the
         /// recorded result and never consults the current app-data directory.
         fn preparePersistRestore(fx: *Effects) ?persist_store.Outcome {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledPreparePersistRestore(fx);
             const persist = persist_options_store orelse return null;
             const restore = if (fx.replay) fx.takeReplayPersist() orelse return null else blk: {
                 if (persist.restore.migration_from_version) |from_version| {
@@ -1256,8 +1750,61 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             return restore.outcome;
         }
 
+        fn compiledPreparePersistRestore(fx: *Effects) ?persist_store.Outcome {
+            const start = compiledLifecycle(&.{ 18, 2, @intFromBool(persist_options_store != null), @intFromBool(fx.replay), @intFromBool(if (persist_options_store) |persist| persist.restore.migration_from_version != null else false) });
+            var migrated: ?[]u8 = null;
+            defer if (migrated) |bytes| std.heap.page_allocator.free(bytes);
+            var source: u8 = 0;
+            var entry: ?runtime_effects.ReplayPersistEntry = null;
+            switch (start[0]) {
+                0 => return null,
+                1 => entry = fx.takeReplayPersist(),
+                2 => {
+                    source = 2;
+                    const persist = persist_options_store.?;
+                    migrated = Host.migrateSnapshot(persist.restore.bytes, persist.restore.migration_from_version.?, std.heap.page_allocator);
+                    entry = .{ .outcome = .ok, .bytes = migrated orelse "" };
+                },
+                3 => {
+                    source = 1;
+                    const restore = persist_options_store.?.restore;
+                    entry = .{ .outcome = restore.outcome, .bytes = restore.bytes };
+                },
+                else => @panic("invalid compiled restore source"),
+            }
+            var request: [16]u8 = @splat(0);
+            request[0..6].* = .{ 18, 3, source, @intFromBool(entry != null), @intFromBool(migrated != null), @intFromEnum(if (entry) |value| value.outcome else persist_store.Outcome.none) };
+            std.mem.writeInt(u64, request[8..16], if (entry) |value| value.bytes.len else 0, .little);
+            const plan = compiledLifecycle(&request);
+            if (plan[0] == 255) return null;
+            const outcome = std.enums.fromInt(persist_store.Outcome, plan[0]) orelse @panic("invalid compiled restore outcome");
+            if (plan[5] > 1) @panic("invalid compiled restore payload source");
+            const bytes = if (plan[5] == 1) entry.?.bytes else "";
+            for (plan[1..5]) |action| switch (action) {
+                0 => break,
+                1 => Host.restoreSnapshot(bytes),
+                2 => {
+                    const binding = persist_options_store.?.binding;
+                    binding.send_fn(binding.context, "core.persist", bytes);
+                },
+                3 => fx.journalPersistRestore(outcome, bytes),
+                else => @panic("invalid compiled restore action"),
+            };
+            return outcome;
+        }
+
         fn dispatchPersistOutcome(fx: *Effects, outcome: persist_store.Outcome) void {
             const routes = persist_options_store.?.routes;
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledLifecycle(&.{ 18, 4, @intFromEnum(outcome) });
+                switch (plan[0]) {
+                    1 => dispatchPersistVoid(fx, routes.ok),
+                    2 => dispatchPersistVoid(fx, routes.none),
+                    3 => dispatchPersistError(fx, routes.err, compiledReason(&plan)),
+                    else => @panic("invalid compiled persistence route"),
+                }
+                return;
+            }
             switch (outcome) {
                 .ok => dispatchPersistVoid(fx, routes.ok),
                 .none => dispatchPersistVoid(fx, routes.none),
@@ -1267,7 +1814,16 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
 
         fn persistOutcomeMsg(event: runtime_effects.EffectChannelEvent) Msg {
             @setEvalBranchQuota(msg_scan_quota);
-            const reason: []const u8 = switch (event.kind) {
+            var plan: [32]u8 = undefined;
+            const reason: []const u8 = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                plan = compiledLifecycle(&.{ 18, 5, @intFromEnum(event.kind) });
+                if (plan[0] == 0) break :blk event.bytes;
+                if (plan[0] != 1) @panic("invalid compiled persistence channel payload");
+                const bytes = compiledReason(&plan);
+                const copy = core.rt.frameAlloc(u8, bytes.len);
+                @memcpy(copy, bytes);
+                break :blk copy;
+            } else switch (event.kind) {
                 .data => event.bytes,
                 .rejected => "rejected",
                 .closed => "io_failed",
@@ -1279,6 +1835,11 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                 }
             }
             @panic("TsUiApp persistence err route does not name a one-Uint8Array-field Msg arm");
+        }
+
+        fn compiledReason(plan: *const [32]u8) []const u8 {
+            if (plan[1] > 30) @panic("invalid compiled persistence reason length");
+            return plan[2..][0..plan[1]];
         }
 
         fn dispatchPersistVoid(fx: *Effects, route: []const u8) void {
@@ -1325,6 +1886,32 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         fn dispatchEnvValues(fx: *Effects) void {
             if (comptime !@hasDecl(core, "envMsgs")) return;
             comptime validateEnvMsgs();
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                var request: [32]u8 = @splat(0);
+                request[0..3].* = .{ 18, 6, @intFromBool(fx.replay) };
+                // Capture the replay count before consuming entries; an empty
+                // older journal uses launch values, but a drained new one does
+                // not switch sources halfway through installation.
+                std.mem.writeInt(u64, request[8..16], fx.replay_env_len, .little);
+                std.mem.writeInt(u64, request[16..24], env_values_store.len, .little);
+                while (true) {
+                    const plan = compiledLifecycle(&request);
+                    if (plan[0] == 0) return;
+                    if (plan[1] > 1) @panic("invalid compiled environment journal flag");
+                    const index = std.mem.readInt(u64, plan[8..16], .little);
+                    const entry: EnvValue = switch (plan[0]) {
+                        1 => env_values_store[@intCast(index)],
+                        2 => blk: {
+                            const recorded = fx.takeReplayEnv() orelse return;
+                            break :blk .{ .msg = recorded.msg, .value = recorded.value };
+                        },
+                        else => @panic("invalid compiled environment source"),
+                    };
+                    if (plan[1] == 1) fx.journalEnvValue(@intCast(index), entry.msg, entry.value);
+                    dispatchOneEnvValue(fx, entry.msg, entry.value);
+                    @memcpy(request[24..32], plan[16..24]);
+                }
+            }
             if (fx.replay and fx.replay_env_len > 0) {
                 while (fx.takeReplayEnv()) |entry| dispatchOneEnvValue(fx, entry.msg, entry.value);
                 return;
@@ -1391,14 +1978,28 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// exactly like a Zig `on_frame` (null while idle keeps the idle
         /// law: no Msg, no rebuild, the frame channel starves on its own).
         fn frameMsgAdapter(model: *const Model, frame: platform.GpuFrame) ?Msg {
-            const params = @typeInfo(@TypeOf(core.frameMsg)).@"fn".params;
+            const channel = if (comptime features.compiled_model and @hasDecl(core, "RuntimeModel")) core.runtimeFrameMsg else core.frameMsg;
+            const params = @typeInfo(@TypeOf(channel)).@"fn".params;
             if (comptime (params.len != 2 or params[0].type != *const Model)) {
                 @compileError("TsUiApp: frameMsg must take (model: Model, frame: FrameEvent) - regenerate the core");
             }
             const FrameArg = params[1].type.?;
-            comptime validateChannelRecord(FrameArg, &.{ "width", "height", "timestampMs", "intervalMs" }, "frameMsg's FrameEvent", &.{});
+            comptime {
+                const fields = @typeInfo(FrameArg).@"struct".fields;
+                if (fields.len != 4 and fields.len != 6) @compileError("TsUiApp: FrameEvent must carry four numbers and optionally exact timestampNs/intervalNs bytes");
+                for (.{ "width", "height", "timestampMs", "intervalMs" }) |name| {
+                    if (!@hasField(FrameArg, name) or !statusItemNumericType(@FieldType(FrameArg, name))) @compileError("TsUiApp: FrameEvent requires width, height, timestampMs and intervalMs numbers");
+                }
+                if (fields.len == 6) for (.{ "timestampNs", "intervalNs" }) |name| {
+                    if (!@hasField(FrameArg, name) or @FieldType(FrameArg, name) != []const u8) @compileError("TsUiApp: exact frame clocks must be Uint8Array bytes");
+                };
+            }
             var arg: FrameArg = undefined;
             inline for (@typeInfo(FrameArg).@"struct".fields) |field| {
+                if (comptime std.mem.eql(u8, field.name, "timestampNs") or std.mem.eql(u8, field.name, "intervalNs")) {
+                    @field(arg, field.name) = exactFrameClock(if (comptime std.mem.eql(u8, field.name, "timestampNs")) frame.timestamp_ns else frame.frame_interval_ns);
+                    continue;
+                }
                 const value: f64 = if (comptime std.mem.eql(u8, field.name, "width"))
                     frame.size.width
                 else if (comptime std.mem.eql(u8, field.name, "height"))
@@ -1409,7 +2010,70 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
                     @as(f64, @floatFromInt(frame.frame_interval_ns)) / std.time.ns_per_ms;
                 @field(arg, field.name) = channelNum(field.type, value);
             }
-            return core.frameMsg(model, arg);
+            return channel(model, arg);
+        }
+
+        fn exactFrameClock(value: u64) []const u8 {
+            var buffer: [20]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable;
+            const owned = core.rt.frameAlloc(u8, text.len);
+            @memcpy(owned, text);
+            return owned;
+        }
+
+        fn layoutTweenWidget(widget: canvas.Widget, label: ?[]const u8, remaining: *usize) ?canvas.Widget {
+            if (widget.kind == .split and (label == null or std.mem.eql(u8, widget.semantics.label, label.?))) {
+                if (remaining.* == 0) return widget;
+                remaining.* -= 1;
+            }
+            for (widget.children) |child| if (layoutTweenWidget(child, label, remaining)) |found| return found;
+            return null;
+        }
+
+        fn layoutTweensAdapter(model: *const Model, tree: *const Ui.Tree, out: []canvas.CanvasWidgetLayoutTween) usize {
+            const params = @typeInfo(@TypeOf(Model.layoutTweens)).@"fn".params;
+            const raw = if (comptime params.len == 1) model.layoutTweens() else model.layoutTweens(core.rt.frameAllocator());
+            var count: usize = 0;
+            for (raw) |raw_tween| {
+                if (count == out.len) break;
+                const tween = if (comptime @typeInfo(@TypeOf(raw_tween)) == .pointer) raw_tween.* else raw_tween;
+                const index = paneNumber(tween.index);
+                const duration = paneNumber(tween.durationMs);
+                const to = paneNumber(tween.to);
+                if (!std.math.isFinite(index) or index < 0 or index > 4294967295 or @trunc(index) != index or
+                    !std.math.isFinite(duration) or duration < 0 or duration > 4294967295 or @trunc(duration) != duration or
+                    !std.math.isFinite(to) or @abs(to) > std.math.floatMax(f32)) continue;
+                var remaining: usize = @intFromFloat(index);
+                const widget = layoutTweenWidget(tree.root, tween.label, &remaining) orelse continue;
+                var duplicate = false;
+                for (out[0..count]) |previous| if (previous.id == widget.id) {
+                    duplicate = true;
+                };
+                if (duplicate) continue;
+                out[count] = .{ .id = widget.id, .to = @floatCast(to), .duration_ms = @intFromFloat(duration), .easing = std.meta.stringToEnum(canvas.Easing, @tagName(tween.easing)) orelse unreachable };
+                count += 1;
+            }
+            return count;
+        }
+
+        fn validateLayoutTweensHelper() void {
+            const teaching = "TsUiApp: export layoutTweens(model: Model): readonly LayoutTween[]; import the descriptor from @native-sdk/core/events";
+            const info = @typeInfo(@TypeOf(Model.layoutTweens));
+            if (info != .@"fn") @compileError(teaching);
+            const function = info.@"fn";
+            if ((function.params.len != 1 and function.params.len != 2) or function.params[0].type != *const Model) @compileError(teaching);
+            if (function.params.len == 2 and function.params[1].type != std.mem.Allocator) @compileError(teaching);
+            const returned = @typeInfo(function.return_type orelse @compileError(teaching));
+            if (returned != .pointer or returned.pointer.size != .slice or !returned.pointer.is_const) @compileError(teaching);
+            const Tween = statusItemRecordType(returned.pointer.child, teaching);
+            if (@typeInfo(Tween).@"struct".fields.len != 5 or !@hasField(Tween, "label") or @FieldType(Tween, "label") != ?[]const u8) @compileError(teaching);
+            inline for (.{ "index", "to", "durationMs" }) |name| {
+                if (!@hasField(Tween, name) or !statusItemNumericType(@FieldType(Tween, name))) @compileError(teaching);
+            }
+            if (!@hasField(Tween, "easing") or @typeInfo(@FieldType(Tween, "easing")) != .@"enum") @compileError(teaching);
+            const easing = @typeInfo(@FieldType(Tween, "easing")).@"enum";
+            if (easing.fields.len != 4) @compileError(teaching);
+            inline for (.{ "linear", "standard", "emphasized", "spring" }) |name| if (!@hasField(@FieldType(Tween, "easing"), name)) @compileError(teaching);
         }
 
         /// `Options.on_key` over the core's `keyMsg(key)` export: the
@@ -1523,12 +2187,21 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
             return core.dropMsg(arg);
         }
 
-        /// `Options.on_appearance` over the core's `appearanceMsg` arm
-        /// export: the appearance record — `colorScheme` (a declared
-        /// light/dark enum, matched by member name), `reduceMotion`,
-        /// `highContrast` — built by field NAME (emitted fields keep
-        /// their TS names), always dispatched (the channel exists so the
-        /// MODEL owns appearance state).
+        /// Reduce the core's source-window context before its input message.
+        fn windowContextAdapter(model: *const Model, label: []const u8) ?Msg {
+            const params = @typeInfo(@TypeOf(Model.windowContext)).@"fn".params;
+            const value = (if (comptime params.len == 3)
+                model.windowContext(label, core.rt.frameAllocator())
+            else
+                model.windowContext(label)) orelse return null;
+            // A dedicated subset union avoids exporting the whole dispatch
+            // union through a helper. Payloads retain their exact root shape.
+            switch (value) {
+                inline else => |payload, tag| return @unionInit(Msg, @tagName(tag), payload),
+            }
+        }
+
+        /// Map the complete host appearance record into the declared Msg arm.
         fn appearanceMsgAdapter(appearance: platform.Appearance) ?Msg {
             const arm_index = comptime channelArmIndex(core.appearanceMsg, "appearanceMsg");
             const arm = @typeInfo(Msg).@"union".fields[arm_index];
@@ -1656,15 +2329,279 @@ pub fn TsUiAppWithFeatures(comptime core: type, comptime features: ui_app.UiAppF
         /// app-held root becomes the new committed value. The incoming
         /// model pointer is the previous root value — the bridge holds
         /// the authoritative one, so it is overwritten, never read.
+        fn syncSliders(model: *Model, layout: canvas.WidgetLayoutTree) void {
+            const params = @typeInfo(@TypeOf(Model.sliderStateMsg)).@"fn".params;
+            const Slice = params[1].type.?;
+            const Sample = @typeInfo(Slice).pointer.child;
+            comptime {
+                if (params.len != 3 or params[0].type != *const Model or params[2].type != std.mem.Allocator or
+                    @typeInfo(Slice).pointer.size != .slice or @typeInfo(Sample).@"struct".fields.len != 3 or
+                    @FieldType(Sample, "id") != []const u8 or @FieldType(Sample, "label") != []const u8 or @FieldType(Sample, "value") != f64)
+                    @compileError("sliderStateMsg must take (model: Model, sliders: readonly SliderState[]) and return Msg | null");
+            }
+            const arena = core.rt.frameAllocator();
+            var count: usize = 0;
+            for (layout.nodes) |node| if (node.widget.kind == .slider) {
+                count += 1;
+            };
+            const samples = arena.alloc(Sample, count) catch @panic("slider state allocation failed");
+            count = 0;
+            for (layout.nodes) |node| {
+                if (node.widget.kind != .slider) continue;
+                samples[count] = .{ .id = exactFrameClock(node.widget.id), .label = node.widget.semantics.label, .value = node.widget.value };
+                count += 1;
+            }
+            const message = model.sliderStateMsg(samples, arena);
+            if (message) |value| {
+                const msg: Msg = switch (value) {
+                    inline else => |payload, tag| blk: {
+                        const Target = @FieldType(Msg, @tagName(tag));
+                        if (comptime @typeInfo(Target) == .@"struct") {
+                            var forwarded: Target = undefined;
+                            inline for (@typeInfo(Target).@"struct".fields) |field|
+                                @field(forwarded, field.name) = @field(payload, field.name);
+                            break :blk @unionInit(Msg, @tagName(tag), forwarded);
+                        }
+                        break :blk @unionInit(Msg, @tagName(tag), payload);
+                    },
+                };
+                Host.syncControls(msg);
+                model.* = Host.runtimeModel().*;
+            }
+        }
+
         fn updateFx(model: *Model, msg: Msg, fx: *Effects) void {
             Host.dispatch(fx, msg);
-            model.* = Host.model().*;
+            model.* = Host.runtimeModel().*;
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFlush(5, false);
+                lifecycle_flush_after_update = plan[0] == 1;
+                if (plan[1] == 1) flushPersistence();
+                return;
+            }
             if (lifecycle_flush_after_update) {
                 lifecycle_flush_after_update = false;
                 flushPersistence();
             }
         }
     };
+}
+
+fn LifecycleProbeCore(comptime identity: u8) type {
+    return struct {
+        pub const Model = struct { count: usize = identity, reason: []const u8 = "" };
+        pub const Msg = union(enum) { ok, none, err: []const u8, env: []const u8, increment };
+        pub const envMsgs = [_]struct { env: []const u8, msg: []const u8 }{.{ .env = "LIFECYCLE_VALUE", .msg = "env" }};
+        pub const rt = struct {
+            var arena: [4096]u8 align(16) = undefined;
+            var at: usize = 0;
+            pub fn resetAll() void {
+                at = 0;
+            }
+            pub fn frameReset() void {
+                at = 0;
+            }
+            pub fn frameAlloc(comptime T: type, count: usize) []T {
+                at = std.mem.alignForward(usize, at, @alignOf(T));
+                const start = at;
+                at += count * @sizeOf(T);
+                std.debug.assert(at <= arena.len);
+                const pointer: [*]T = @ptrCast(@alignCast(arena[start..].ptr));
+                return pointer[0..count];
+            }
+        };
+        var root: Model = .{};
+        var owned: [1024]u8 = undefined;
+        var override_mode: u8 = 255;
+        var forced_plan: [32]u8 = @splat(0);
+        var calls: [8]usize = @splat(0);
+        pub fn nativeEffectPolicy(request: []const u8, output: []u8) usize {
+            std.debug.assert(request[0] == 18 and request[1] < calls.len);
+            calls[request[1]] += 1;
+            const plan = if (request[1] == override_mode and !(override_mode == 6 and calls[6] > 1)) forced_plan else if (override_mode == 6 and request[1] == 6) @as([32]u8, @splat(0)) else @import("lifecycle_policy_test_reference.zig").plan(request);
+            @memcpy(output[0..plan.len], &plan);
+            return plan.len;
+        }
+        pub fn initialModel() *const Model {
+            root = .{};
+            return &root;
+        }
+        pub fn commitModelRoot(value: *const Model) *const Model {
+            return value;
+        }
+        pub const UpdateResult = struct { model: *const Model, cmd: []const u8 };
+        pub fn update(_: *const Model, msg: Msg) UpdateResult {
+            switch (msg) {
+                .ok => root.count += 10,
+                .none => root.count += 20,
+                .increment => root.count += 1,
+                .err, .env => |bytes| {
+                    @memcpy(owned[0..bytes.len], bytes);
+                    root.reason = owned[0..bytes.len];
+                    root.count += 1;
+                },
+            }
+            return .{ .model = &root, .cmd = "" };
+        }
+        pub fn restoreModel(bytes: []const u8) *const Model {
+            root.count = if (bytes.len > 0) bytes[0] else 0;
+            return &root;
+        }
+    };
+}
+
+const LifecycleCarrierProbe = struct {
+    id: u8,
+    log: *std.ArrayList(u8),
+    sends: usize = 0,
+    fn binding(self: *LifecycleCarrierProbe) runtime_effects.HostCallBinding {
+        return .{ .context = self, .send_fn = send, .request_fn = request, .cancel_fn = cancel, .poll_fn = poll, .pending_fn = pending, .bind_services_fn = services, .bind_channels_fn = channels, .shutdown_fn = shutdown };
+    }
+    fn mark(context: *anyopaque) *LifecycleCarrierProbe {
+        const self: *LifecycleCarrierProbe = @ptrCast(@alignCast(context));
+        self.log.append(std.testing.allocator, self.id) catch @panic("test allocation failed");
+        return self;
+    }
+    fn send(context: *anyopaque, _: []const u8, _: []const u8) void {
+        mark(context).sends += 1;
+    }
+    fn request(context: *anyopaque, _: []const u8, _: u64, _: []const u8) void {
+        _ = mark(context);
+    }
+    fn cancel(context: *anyopaque, _: u64) void {
+        _ = mark(context);
+    }
+    fn poll(context: *anyopaque) ?runtime_effects.HostCallCompletion {
+        _ = mark(context);
+        return null;
+    }
+    fn pending(context: *anyopaque) bool {
+        _ = mark(context);
+        return true;
+    }
+    fn services(context: *anyopaque, _: *const platform.PlatformServices) void {
+        _ = mark(context);
+    }
+    fn channels(context: *anyopaque, _: runtime_effects.HostChannelBinding) void {
+        _ = mark(context);
+    }
+    fn shutdown(context: *anyopaque) void {
+        _ = mark(context);
+    }
+};
+
+test "lifecycle host consumes flush plans and retains independent instance state" {
+    const First = LifecycleProbeCore(1);
+    const Second = LifecycleProbeCore(2);
+    const A = TsUiApp(First);
+    const B = TsUiApp(Second);
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    var carrier: LifecycleCarrierProbe = .{ .id = 1, .log = &log };
+    A.applyCoreOptions(.{ .persist = .{ .binding = carrier.binding(), .routes = .{ .ok = "ok", .none = "none", .err = "err" }, .restore = .{ .outcome = .none } } });
+    B.applyCoreOptions(.{});
+    First.override_mode = 0;
+    First.forced_plan = @splat(0);
+    First.forced_plan[0] = 1;
+    // Force an ordinary activation to delay a flush: native must consume it.
+    _ = A.lifecycleAdapter(.activate);
+    try std.testing.expect(A.lifecycle_flush_after_update);
+    try std.testing.expect(!B.lifecycle_flush_after_update);
+    First.forced_plan[0..2].* = .{ 0, 1 };
+    A.Host.boot();
+    var effects = A.Effects.init(std.testing.allocator);
+    defer effects.deinit();
+    var model = A.Host.runtimeModel().*;
+    A.updateFx(&model, .increment, &effects);
+    try std.testing.expectEqual(@as(usize, 2), model.count);
+    try std.testing.expectEqual(@as(usize, 1), carrier.sends);
+    try std.testing.expect(!A.lifecycle_flush_after_update);
+    A.lifecycle_flush_after_update = true;
+    _ = A.stampOptions(.{ .name = "lifecycle-probe", .scene = .{ .windows = &.{} }, .canvas_label = "canvas" });
+    try std.testing.expect(!A.lifecycle_flush_after_update);
+    try std.testing.expect(!B.lifecycle_flush_after_update);
+}
+
+test "lifecycle host consumes installation restore and outcome plans with owned reasons" {
+    const Core = LifecycleProbeCore(3);
+    const Adapter = TsUiApp(Core);
+    Core.override_mode = 1;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0] = 10; // Root refresh only: suppress all boot coordination.
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    var carrier: LifecycleCarrierProbe = .{ .id = 1, .log = &log };
+    Adapter.Host.boot();
+    Adapter.applyCoreOptions(.{ .persist = .{ .binding = carrier.binding(), .routes = .{ .ok = "ok", .none = "none", .err = "err" }, .restore = .{ .outcome = .none } } });
+    var fx = Adapter.Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    var model: Core.Model = .{};
+    Adapter.initFx(&model, &fx);
+    try std.testing.expectEqual(@as(usize, 3), model.count);
+    try std.testing.expectEqual(@as(usize, 0), Core.calls[2]);
+    Core.override_mode = 2;
+    Core.forced_plan = @splat(0); // Refuse an otherwise available restoration.
+    try std.testing.expectEqual(@as(?persist_store.Outcome, null), Adapter.preparePersistRestore(&fx));
+    // Select recorded bytes even though the native live fact is false.
+    try fx.pushReplayPersist(.ok, "*");
+    Core.forced_plan[0] = 1;
+    try std.testing.expectEqual(persist_store.Outcome.ok, Adapter.preparePersistRestore(&fx).?);
+    try std.testing.expectEqual(@as(usize, 42), Adapter.Host.model().count);
+    Core.override_mode = 4;
+    Core.forced_plan[0..2].* = .{ 3, 6 };
+    @memcpy(Core.forced_plan[2..8], "forced");
+    Adapter.dispatchPersistOutcome(&fx, .ok);
+    try std.testing.expectEqualStrings("forced", Adapter.Host.model().reason);
+    Core.override_mode = 5;
+    Core.forced_plan[0] = 1;
+    const msg = Adapter.persistOutcomeMsg(.{ .key = 1, .kind = .data, .bytes = "original" });
+    @memset(Core.forced_plan[2..8], 'x');
+    try std.testing.expectEqualStrings("forced", msg.err);
+    Core.override_mode = 3;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0] = 6; // Live none becomes rejected with no restore.
+    try std.testing.expectEqual(persist_store.Outcome.rejected, Adapter.preparePersistRestore(&fx).?);
+    Adapter.persist_options_store.?.restore.bytes = "*";
+    Core.forced_plan[0..6].* = .{ 0, 1, 2, 3, 0, 1 };
+    try std.testing.expectEqual(persist_store.Outcome.ok, Adapter.preparePersistRestore(&fx).?);
+    try std.testing.expectEqual(@as(usize, 42), Adapter.Host.model().count);
+    try std.testing.expectEqual(@as(usize, 1), carrier.sends);
+}
+
+test "lifecycle host consumes carrier targets ordering and exact environment indices" {
+    const Core = LifecycleProbeCore(4);
+    const Adapter = TsUiApp(Core);
+    Core.override_mode = 7;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0..2].* = .{ 2, 1 };
+    var log: std.ArrayList(u8) = .empty;
+    defer log.deinit(std.testing.allocator);
+    var first: LifecycleCarrierProbe = .{ .id = 1, .log = &log };
+    var second: LifecycleCarrierProbe = .{ .id = 2, .log = &log };
+    var mux: Adapter.HostCallMux = .{ .primary = first.binding(), .persist = second.binding() };
+    const binding = mux.binding();
+    binding.shutdown_fn.?(binding.context);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 1 }, log.items);
+    Core.forced_plan[1] = 0;
+    binding.send_fn(binding.context, "ordinary.service", "bytes");
+    binding.request_fn(binding.context, "ordinary.service", std.math.maxInt(u64), "bytes");
+    binding.cancel_fn.?(binding.context, std.math.maxInt(u64));
+    _ = binding.poll_fn.?(binding.context);
+    try std.testing.expect(binding.pending_fn.?(binding.context));
+    try std.testing.expectEqualSlices(u8, &.{ 2, 1, 2, 2, 2, 2, 2 }, log.items);
+    Core.override_mode = 6;
+    Core.forced_plan = @splat(0);
+    Core.forced_plan[0] = 1;
+    std.mem.writeInt(u64, Core.forced_plan[8..16], 1, .little);
+    std.mem.writeInt(u64, Core.forced_plan[16..24], 2, .little);
+    Adapter.Host.boot();
+    Adapter.applyCoreOptions(.{ .env_values = &.{ .{ .msg = "env", .value = "first" }, .{ .msg = "env", .value = "second" } } });
+    var fx = Adapter.Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    // The probe returns one selected value, then a terminal plan.
+    Core.calls[6] = 0;
+    Adapter.dispatchEnvValues(&fx);
+    try std.testing.expectEqualStrings("second", Adapter.Host.model().reason);
 }
 
 const StatusItemsAdapterTestCore = struct {
@@ -1898,4 +2835,122 @@ test "TypeScript window close commands refuse missing and unmapped command callb
     Adapter.command_store = mappedWindowCloseCommand;
     try std.testing.expectError(error.UnmappedCommand, Adapter.windowCloseMsg("settings.missing"));
     try std.testing.expectEqual(WindowCloseCommandTestCore.Msg.closed, (try Adapter.windowCloseMsg("settings.closed")).?);
+}
+
+const WebPanesAdapterTestCore = struct {
+    const Pane = struct { label: []const u8, anchor: ?[]const u8, url: []const u8, x: f64, y: f64, width: f64, height: f64, reloadToken: f64 };
+    var label = [_]u8{ 'p', 'a', 'n', 'e' };
+    var anchor = [_]u8{ 's', 'l', 'o', 't' };
+    var url = [_]u8{ 'z', 'e', 'r', 'o', ':', '/', '/', 'a', 'p', 'p' };
+    var panes = [_]Pane{.{ .label = &label, .anchor = &anchor, .url = &url, .x = -2.125, .y = 4.5, .width = 100.25, .height = 48.5, .reloadToken = 9007199254740991 }} ** 5;
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        pub fn webPanes(_: *const Model) []const Pane {
+            return &panes;
+        }
+    };
+};
+
+test "TypeScript pane adapter copies result bytes and preserves bounded fractional geometry" {
+    const Adapter = TsUiApp(WebPanesAdapterTestCore);
+    comptime Adapter.validateWebPanesHelper();
+    const model = WebPanesAdapterTestCore.Model{};
+    var panes: [4]Adapter.App.WebViewPane = undefined;
+    try std.testing.expectEqual(@as(usize, 4), Adapter.webPanesAdapter(&model, &panes));
+    const saved = panes[0];
+    WebPanesAdapterTestCore.label[0] = 'x';
+    WebPanesAdapterTestCore.anchor[0] = 'x';
+    WebPanesAdapterTestCore.url[0] = 'x';
+    defer {
+        WebPanesAdapterTestCore.label[0] = 'p';
+        WebPanesAdapterTestCore.anchor[0] = 's';
+        WebPanesAdapterTestCore.url[0] = 'z';
+    }
+    try std.testing.expectEqualStrings("pane", saved.label);
+    try std.testing.expectEqualStrings("slot", saved.anchor.?);
+    try std.testing.expectEqualStrings("zero://app", saved.url);
+    try std.testing.expectEqual(@import("geometry").RectF.init(-2.125, 4.5, 100.25, 48.5), saved.frame);
+    try std.testing.expectEqual(@as(u64, 9007199254740991), saved.reload_token);
+    try std.testing.expectEqual(@as(usize, 1), Adapter.webPanesAdapter(&model, panes[0..1]));
+    WebPanesAdapterTestCore.panes[0].anchor = null;
+    defer WebPanesAdapterTestCore.panes[0].anchor = &WebPanesAdapterTestCore.anchor;
+    _ = Adapter.webPanesAdapter(&model, &panes);
+    try std.testing.expect(panes[0].anchor == null);
+}
+
+test "TypeScript pane boundary rejects invalid coordinates dimensions and reload tokens" {
+    const Adapter = TsUiApp(WebPanesAdapterTestCore);
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 3.5e38 }) |value|
+        try std.testing.expectError(error.InvalidWebPane, Adapter.paneCoordinate(value));
+    try std.testing.expectError(error.InvalidWebPane, Adapter.paneDimension(@as(f64, -0.25)));
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -1, 0.125, 9007199254740992 }) |value|
+        try std.testing.expectError(error.InvalidWebPane, Adapter.paneReloadToken(value));
+    try std.testing.expectEqual(@as(f32, 0), try Adapter.paneDimension(@as(f64, 0)));
+}
+
+test "web pane exact decimal reload tokens retain every u64 and refuse alternate spellings" {
+    const Adapter = TsUiApp(WebPanesAdapterTestCore);
+    try std.testing.expectEqual(@as(u64, 0), try Adapter.paneReloadToken(@as([]const u8, "0")));
+    try std.testing.expectEqual(@as(u64, 9007199254740992), try Adapter.paneReloadToken(@as([]const u8, "9007199254740992")));
+    try std.testing.expectEqual(std.math.maxInt(u64), try Adapter.paneReloadToken(@as([]const u8, "18446744073709551615")));
+    for ([_][]const u8{ "", "+1", "-0", "1.0", "1e2", " 1", "1\x00", "18446744073709551616", "123456789012345678901" }) |text|
+        try std.testing.expectError(error.InvalidWebPane, Adapter.paneReloadToken(text));
+}
+
+const LayoutTweensAdapterTestCore = struct {
+    const Easing = enum { linear, standard, emphasized, spring };
+    const Tween = struct { label: ?[]const u8 = null, index: f64 = 0, to: f64 = 0.25, durationMs: f64 = 180, easing: Easing = .standard };
+    pub const Msg = union(enum) { noop };
+    pub const Model = struct {
+        declarations: []const Tween,
+        pub fn layoutTweens(self: *const Model) []const Tween {
+            return self.declarations;
+        }
+    };
+};
+
+test "TypeScript tween adapter resolves native identities and owns bounded output" {
+    const Adapter = TsUiApp(LayoutTweensAdapterTestCore);
+    comptime Adapter.validateLayoutTweensHelper();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var ui = Adapter.Ui.init(arena.allocator());
+    const tree = try ui.finalize(ui.column(.{}, .{
+        ui.split(.{ .semantics = .{ .label = "one" } }, .{ ui.text(.{}, "A"), ui.text(.{}, "B") }),
+        ui.split(.{ .semantics = .{ .label = "two" } }, .{ ui.text(.{}, "C"), ui.text(.{}, "D") }),
+    }));
+    var declarations = [_]LayoutTweensAdapterTestCore.Tween{
+        .{ .index = 0, .to = 0.125, .durationMs = 0, .easing = .linear },
+        .{ .label = "one", .to = 0.75 }, // First declaration owns the same native id.
+        .{ .label = "two", .to = 0.875, .durationMs = 4294967295, .easing = .spring },
+    };
+    var model = LayoutTweensAdapterTestCore.Model{ .declarations = &declarations };
+    var out: [4]canvas.CanvasWidgetLayoutTween = undefined;
+    try std.testing.expectEqual(@as(usize, 2), Adapter.layoutTweensAdapter(&model, &tree, &out));
+    try std.testing.expectEqual(tree.root.children[0].id, out[0].id);
+    try std.testing.expectEqual(tree.root.children[1].id, out[1].id);
+    try std.testing.expectEqual(@as(f32, 0.125), out[0].to);
+    try std.testing.expectEqual(@as(u32, 0), out[0].duration_ms);
+    try std.testing.expectEqual(canvas.Easing.linear, out[0].easing);
+    try std.testing.expectEqual(std.math.maxInt(u32), out[1].duration_ms);
+    try std.testing.expectEqual(canvas.Easing.spring, out[1].easing);
+    const saved = out;
+    declarations[0].to = 0.5;
+    try std.testing.expectEqual(@as(f32, 0.125), saved[0].to);
+    try std.testing.expectEqual(@as(usize, 1), Adapter.layoutTweensAdapter(&model, &tree, out[0..1]));
+    try std.testing.expectEqual(@as(usize, 0), Adapter.layoutTweensAdapter(&model, &tree, out[0..0]));
+    var missing = [_]LayoutTweensAdapterTestCore.Tween{ .{ .label = "missing" }, .{ .index = 2 }, .{ .label = "two", .index = 1 } };
+    model.declarations = &missing;
+    try std.testing.expectEqual(@as(usize, 0), Adapter.layoutTweensAdapter(&model, &tree, &out));
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), -1, 0.5, 4294967296 }) |value| {
+        var bad = [_]LayoutTweensAdapterTestCore.Tween{ .{ .index = value }, .{ .durationMs = value }, .{ .index = 1 } };
+        model.declarations = &bad;
+        try std.testing.expectEqual(@as(usize, 1), Adapter.layoutTweensAdapter(&model, &tree, &out));
+        try std.testing.expectEqual(tree.root.children[1].id, out[0].id);
+    }
+    for ([_]f64{ std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 3.5e38 }) |value| {
+        var bad = [_]LayoutTweensAdapterTestCore.Tween{.{ .to = value }};
+        model.declarations = &bad;
+        try std.testing.expectEqual(@as(usize, 0), Adapter.layoutTweensAdapter(&model, &tree, &out));
+    }
 }

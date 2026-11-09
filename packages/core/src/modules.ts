@@ -153,7 +153,7 @@ export function resolveModuleGraph(
       if (fileClass === "service" && serviceBuiltins.has(spec)) continue;
       if (fileClass === "service" && allowedServicePackages.has(spec)) continue;
 
-      if (spec === "@native-sdk/core") continue;
+      if (spec === "@native-sdk/core" || spec === "@native-sdk/core/bytes") continue;
       if (fileClass === "core" && spec === "@native-sdk/services") continue;
       if (sdkLibraryModules.has(spec)) {
         const target = path.resolve(sdkLibraryModules.get(spec)!);

@@ -226,6 +226,7 @@ export async function Code({ children, lang = "typescript", filename }: CodeProp
     // RSC boundary as one opaque node, so the DOM attribute is the only
     // channel that survives to tell the TypeScript fence from the Zig one.
     <div
+      data-native-home-code=""
       data-language={lang}
       className="my-4 rounded-lg border border-neutral-200 bg-neutral-50 text-[13px] font-mono overflow-hidden dark:border-neutral-800 dark:bg-neutral-900"
     >

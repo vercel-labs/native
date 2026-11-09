@@ -1,7 +1,0 @@
-<!-- The process-count sparkline: a filled line against the chart's auto
-     domain (the window's own min..max). Counts have no natural ceiling
-     and barely move, so an absolute scale would draw a featureless
-     block; the window band reads like a scope trace instead. -->
-<chart width="239" height="32" label="Processes history">
-  <series kind="area" values="{procSpark}" />
-</chart>

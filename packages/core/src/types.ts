@@ -332,6 +332,8 @@ export class TypeTable {
   }
 
   private isCanonicalOptionalSdkRecord(decl: ts.TypeAliasDeclaration): boolean {
+    const theme = sdkLibraryModules.get("@native-sdk/core/theme");
+    if (theme !== undefined && path.resolve(decl.getSourceFile().fileName) === path.resolve(theme)) return true;
     const events = sdkLibraryModules.get("@native-sdk/core/events");
     return (decl.name.text === "ThemeState" || decl.name.text === "StatusItemPresentation" || decl.name.text === "StatusItemMenuItem") && events !== undefined &&
       path.resolve(decl.getSourceFile().fileName) === path.resolve(events);
@@ -426,11 +428,11 @@ export class TypeTable {
     return info !== undefined && !info.promoted;
   }
 
-  /// Exported single-Model-parameter helpers with a mapped return type:
+  /// Exported Model-first helpers with fixed, explicitly typed parameters:
   /// each also emits as a forwarding declaration on the Model struct (the
   /// markup fn-backed-scalar shape), under its own TS name — markup binds
   /// `doneCount` as `{doneCount}`. The reserved entry points
-  /// (update/initialModel/subscriptions) never forward. Shared by the
+  /// (lifecycle and host-message channel functions) never forward. Shared by the
   /// checker (NS1031/NS1032) and the emitter.
   ///
   /// ENTRY-ONLY on purpose: under node the app's module object is the
@@ -460,11 +462,11 @@ export class TypeTable {
     return out;
   }
 
-  /// The single-Model-parameter derived-value shape, under the name the
+  /// The Model-first query shape, under the name the
   /// helper is exported as (the reserved entry points never forward).
   private isModelHelperShape(stmt: ts.FunctionDeclaration, exportedName: string): boolean {
-    if (exportedName === "update" || exportedName === "initialModel" || exportedName === "subscriptions") return false;
-    if (stmt.parameters.length !== 1) return false;
+    if (["update", "initialModel", "subscriptions", "migrate", "commandMsg", "frameMsg", "keyMsg", "pinchMsg", "dropMsg"].includes(exportedName)) return false;
+    if (stmt.parameters.length < 1 || stmt.parameters.some(p => !p.type || p.questionToken || p.dotDotDotToken || p.initializer)) return false;
     const p = stmt.parameters[0];
     if (!p.type || !stmt.type) return false;
     const pt = this.resolveTypeNode(p.type);

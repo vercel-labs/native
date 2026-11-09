@@ -275,6 +275,122 @@ const JournalBuffer = struct {
     }
 };
 
+test "synchronous native window callbacks record after creation and replay close and reopen" {
+    const WindowApp = struct {
+        created: u32 = 0,
+        current: platform.WindowId = 0,
+        user_closes: u32 = 0,
+        fn app(self: *@This()) core.App {
+            return .{ .context = self, .name = "causal-windows", .scene_fn = scene, .event_fn = event };
+        }
+        fn scene(_: *anyopaque) !app_manifest.ShellConfig {
+            return session_scene;
+        }
+        fn event(context: *anyopaque, runtime: *core.Runtime, incoming: core.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (incoming == .window_closed) self.user_closes += 1;
+            if (incoming != .command) return;
+            if (std.mem.eql(u8, incoming.command.name, "child.open")) {
+                const info = try runtime.createSourcelessShellWindow(.{ .label = "child", .width = 200, .height = 100 });
+                self.current = info.id;
+                self.created += 1;
+            } else if (std.mem.eql(u8, incoming.command.name, "child.close")) try runtime.closeWindow(self.current);
+        }
+    };
+    const Host = struct {
+        null_platform: platform.NullPlatform,
+        base: platform.Platform = undefined,
+        handler: platform.EventHandler = undefined,
+        handler_context: *anyopaque = undefined,
+        fn value(self: *@This()) platform.Platform {
+            self.base = self.null_platform.platform();
+            var result = self.base;
+            result.context = self;
+            result.run_fn = run;
+            result.services.create_window_fn = create;
+            result.services.close_window_fn = close;
+            return result;
+        }
+        fn run(context: *anyopaque, handler: platform.EventHandler, handler_context: *anyopaque) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.handler = handler;
+            self.handler_context = handler_context;
+            try handler(handler_context, .app_start);
+            for ([_][]const u8{ "child.open", "child.close", "child.open", "child.close" }) |command| {
+                try handler(handler_context, .{ .menu_command = .{ .name = command } });
+                try handler(handler_context, .frame_requested);
+            }
+            try handler(handler_context, .app_shutdown);
+        }
+        fn changed(self: *@This(), info: platform.WindowInfo, open: bool) !void {
+            // Both strings are host-owned borrowed payloads. Reuse their
+            // buffers immediately after the callback, just like a native
+            // delegate returning to its window operation.
+            var label: [platform.max_window_label_bytes]u8 = undefined;
+            var title: [platform.max_window_title_bytes]u8 = undefined;
+            @memcpy(label[0..info.label.len], info.label);
+            @memcpy(title[0..info.title.len], info.title);
+            try self.handler(self.handler_context, .{ .window_frame_changed = .{
+                .id = info.id,
+                .label = label[0..info.label.len],
+                .title = title[0..info.title.len],
+                .frame = info.frame,
+                .scale_factor = info.scale_factor,
+                .open = open,
+                .focused = open and info.focused,
+            } });
+            @memset(&label, 'x');
+            @memset(&title, 'x');
+        }
+        fn create(context: ?*anyopaque, options: platform.WindowOptions) !platform.WindowInfo {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            const self: *@This() = @fieldParentPtr("null_platform", null_platform);
+            const info = try self.base.services.createWindow(options);
+            try self.changed(info, true);
+            return info;
+        }
+        fn close(context: ?*anyopaque, id: platform.WindowId) !void {
+            const null_platform: *platform.NullPlatform = @ptrCast(@alignCast(context.?));
+            const self: *@This() = @fieldParentPtr("null_platform", null_platform);
+            const info = for (self.null_platform.windows[0..self.null_platform.window_count]) |window| {
+                if (window.id == id) break window;
+            } else return error.WindowNotFound;
+            try self.base.services.closeWindow(id);
+            try self.changed(info, false);
+        }
+    };
+    const gpa = std.testing.allocator;
+    const bytes = try gpa.create(JournalBuffer);
+    defer gpa.destroy(bytes);
+    bytes.* = .{};
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(bytes.sink());
+    recorder.begin(.{ .app_name = "causal-windows", .platform_name = "null" });
+    const host = try gpa.create(Host);
+    defer gpa.destroy(host);
+    host.* = .{ .null_platform = platform.NullPlatform.init(.{}) };
+    host.null_platform.gpu_surfaces = true;
+    defer host.null_platform.deinit();
+    const runtime = try gpa.create(core.Runtime);
+    defer gpa.destroy(runtime);
+    core.Runtime.initAt(runtime, .{ .platform = host.value(), .allocator = gpa, .session_recorder = recorder });
+    defer runtime.deinit();
+    var recorded: WindowApp = .{};
+    try runtime.run(recorded.app());
+    try std.testing.expect(recorder.finished and !recorder.failed);
+    try std.testing.expectEqual(@as(u32, 2), recorded.created);
+    try std.testing.expectEqual(@as(u32, 0), recorded.user_closes);
+    const harness = try core.TestHarness().create(gpa, .{});
+    defer harness.destroy(gpa);
+    harness.null_platform.gpu_surfaces = true;
+    var replayed: WindowApp = .{};
+    const report = try session_replay.replaySession(&harness.runtime, replayed.app(), bytes.journalBytes(), .{ .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqualDeep(recorded, replayed);
+    try std.testing.expectEqual(runtime.sessionStateFingerprint(), harness.runtime.sessionStateFingerprint());
+}
+
 const RecordedSession = struct {
     model: SessionModel,
     fingerprint: u64,
@@ -3273,4 +3389,440 @@ test "image effect records round-trip the blob address through the journal codec
     try std.testing.expectEqual(@as(u64, 480), decoded.image_height);
     try std.testing.expectEqualSlices(u8, &hash, &decoded.image_blob_hash);
     try std.testing.expectEqual(@as(u64, 12_345), decoded.image_blob_len);
+}
+
+const ChromeReplayModel = struct { chrome: platform.WindowChrome = .{}, count: u32 = 0 };
+const ChromeReplayMsg = union(enum) { chrome: platform.WindowChrome, increment };
+const ChromeReplayApp = ui_app_mod.UiApp(ChromeReplayModel, ChromeReplayMsg);
+fn chromeReplayUpdate(model: *ChromeReplayModel, msg: ChromeReplayMsg) void {
+    switch (msg) {
+        .chrome => |chrome| model.chrome = chrome,
+        .increment => model.count += 1,
+    }
+}
+fn chromeReplayMap(chrome: platform.WindowChrome) ?ChromeReplayMsg {
+    return .{ .chrome = chrome };
+}
+fn chromeReplayView(ui: *ChromeReplayApp.Ui, model: *const ChromeReplayModel) ChromeReplayApp.Ui.Node {
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = @max(model.chrome.insets.top, 52) }, .{
+            ui.el(.stack, .{ .width = model.chrome.insets.left }, .{}),
+            ui.button(.{ .on_press = .increment, .context_menu = &.{
+                .{ .label = "Increment", .msg = .increment },
+                .{ .separator = true },
+                .{ .label = "Disabled", .msg = .increment, .enabled = false },
+            } }, ui.fmt("Count {d}", .{model.count})),
+        }),
+        ui.text(.{}, ui.fmt("{s} tabs {any}", .{ @tagName(model.chrome.form_factor), model.chrome.tabs_projected })),
+    });
+}
+fn chromeReplayOptions() ChromeReplayApp.Options {
+    return .{ .name = "chrome-session", .scene = session_scene, .canvas_label = canvas_label, .update = chromeReplayUpdate, .view = chromeReplayView, .on_chrome = chromeReplayMap };
+}
+fn recordChromePixels(runtime: *core.Runtime, recorder: *session_record.SessionRecorder) !void {
+    const allocator = std.testing.allocator;
+    const size = try runtime.canvasScreenshotPixelSize(1, canvas_label, 1);
+    const pixels = try allocator.alloc(u8, size.byte_len);
+    defer allocator.free(pixels);
+    const scratch = try allocator.alloc(u8, size.byte_len);
+    defer allocator.free(scratch);
+    const screenshot = try runtime.renderCanvasScreenshot(1, canvas_label, 1, pixels, scratch);
+    var writer = try std.Io.Writer.Allocating.initCapacity(allocator, try canvas.png.encodedRgba8ByteLen(screenshot.width, screenshot.height));
+    defer writer.deinit();
+    try canvas.png.writeRgba8(&writer.writer, screenshot.width, screenshot.height, screenshot.rgba8);
+    recorder.recordScreenshot(canvas_label, 1, std.hash.Wyhash.hash(0, writer.written()), writer.written().len);
+}
+
+test "OS chrome results replay complete snapshots and pixels through resize fullscreen accessibility and context menus" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-session" });
+    const recorded = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer recorded.destroy(gpa);
+    recorded.null_platform.gpu_surfaces = true;
+    recorded.runtime.options.session_recorder = recorder;
+    const state = try gpa.create(ChromeReplayApp);
+    defer gpa.destroy(state);
+    state.* = ChromeReplayApp.init(std.heap.page_allocator, .{}, chromeReplayOptions());
+    defer state.deinit();
+    const app = state.app();
+    try recorded.start(app);
+    const facts = [_]platform.WindowChrome{
+        .{ .insets = .{ .top = 66, .left = 98 }, .buttons = .init(20, 26, 68, 14), .form_factor = .compact, .tabs_projected = true },
+        .{ .insets = .{ .top = 52, .right = 88, .bottom = 3 }, .buttons = .init(280, 19, 72, 14), .form_factor = .regular },
+        .{}, // Fullscreen removes the overlay.
+    };
+    for (facts, 0..) |chrome, index| {
+        recorded.null_platform.window_chrome = chrome;
+        if (index == 0) {
+            try recorded.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = .init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000 } });
+        } else {
+            try recorded.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_resized = .{ .window_id = 1, .label = canvas_label, .frame = .init(0, 0, 400, 300), .scale_factor = 1 } });
+        }
+        try std.testing.expectEqualDeep(chrome, state.model.chrome);
+        var button_id: u64 = 0;
+        for ((try recorded.runtime.canvasWidgetLayout(1, canvas_label)).nodes) |node| if (node.widget.kind == .button) {
+            button_id = node.widget.id;
+        };
+        try std.testing.expect(button_id != 0);
+        try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_accessibility_action = .{ .window_id = 1, .label = canvas_label, .id = button_id, .action = .press } });
+        const invocation = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} 0", .{ canvas_label, button_id });
+        defer gpa.free(invocation);
+        try recorded.runtime.dispatchAutomationCommand(app, invocation);
+        try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
+        try recordChromePixels(&recorded.runtime, recorder);
+    }
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    try std.testing.expect(recorder.window_chrome_count > 3);
+    try std.testing.expectEqual(@as(u32, 6), state.model.count);
+    var reader = try journal.Reader.init(buffer.journalBytes());
+    var invocations: usize = 0;
+    while (try reader.next()) |record| if (record == .event) {
+        // Selections without their pending request cannot replay. The
+        // complete invocation owns the nested selection and chrome facts.
+        try std.testing.expect(record.event != .context_menu_action);
+        if (record.event == .widget_context_menu_action) invocations += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), invocations);
+    const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer replayed.destroy(gpa);
+    replayed.null_platform.gpu_surfaces = true;
+    replayed.null_platform.window_chrome = .{ .insets = .{ .top = 999, .left = 999 }, .tabs_projected = true };
+    const fresh = try gpa.create(ChromeReplayApp);
+    defer gpa.destroy(fresh);
+    fresh.* = ChromeReplayApp.init(std.heap.page_allocator, .{}, chromeReplayOptions());
+    defer fresh.deinit();
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), buffer.journalBytes(), .{ .verify = true, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(report.checkpoints_verified >= 3);
+    try std.testing.expectEqual(@as(u64, 3), report.screenshots_verified);
+    try std.testing.expectEqualDeep(state.model, fresh.model);
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+}
+
+test "rejected widget menu commands leave the journal clean and degraded platform invocations replay" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-session" });
+    const recorded = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer recorded.destroy(gpa);
+    recorded.null_platform.gpu_surfaces = true;
+    recorded.runtime.options.session_recorder = recorder;
+    recorded.runtime.dispatch_error_policy = .degrade;
+    const state = try ChromeReplayApp.create(std.heap.page_allocator, chromeReplayOptions());
+    defer state.destroy();
+    const app = state.app();
+    try recorded.start(app);
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = .init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000 } });
+    var button_id: u64 = 0;
+    var plain_id: u64 = 0;
+    for ((try recorded.runtime.canvasWidgetLayout(1, canvas_label)).nodes) |node| {
+        if (node.widget.kind == .button) button_id = node.widget.id;
+        if (node.widget.kind == .text) plain_id = node.widget.id;
+    }
+    try std.testing.expect(button_id != 0 and plain_id != 0);
+    const event_count = recorder.event_count;
+    const errors = [_]anyerror{ error.ContextMenuItemSeparator, error.ContextMenuItemDisabled, error.ContextMenuItemOutOfRange };
+    for (errors, 1..) |expected, index| {
+        const command = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} {d}", .{ canvas_label, button_id, index });
+        defer gpa.free(command);
+        try std.testing.expectError(expected, recorded.runtime.dispatchAutomationCommand(app, command));
+    }
+    const undeclared = try std.fmt.allocPrint(gpa, "widget-context-menu {s} {d} 0", .{ canvas_label, plain_id });
+    defer gpa.free(undeclared);
+    try std.testing.expectError(error.ContextMenuUndeclared, recorded.runtime.dispatchAutomationCommand(app, undeclared));
+    try std.testing.expectEqual(event_count, recorder.event_count);
+    try std.testing.expect(recorded.runtime.canvas_widget_context_menu_pending == null);
+    // A platform invocation is already journaled. Its refusal follows
+    // the interactive dispatch policy and must replay without exiting.
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_context_menu_action = .{ .label = canvas_label, .id = button_id, .item_index = 1 } });
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .widget_context_menu_action = .{ .label = canvas_label, .id = button_id, .item_index = 0 } });
+    try std.testing.expectEqual(@as(u32, 1), state.model.count);
+    try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
+    try recordChromePixels(&recorded.runtime, recorder);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer replayed.destroy(gpa);
+    replayed.null_platform.gpu_surfaces = true;
+    replayed.runtime.dispatch_error_policy = .degrade;
+    const fresh = try ChromeReplayApp.create(std.heap.page_allocator, chromeReplayOptions());
+    defer fresh.destroy();
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), buffer.journalBytes(), .{ .verify = true, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(u64, 1), report.screenshots_verified);
+    try std.testing.expectEqualDeep(state.model, fresh.model);
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+}
+
+const ChromeQueryProbe = struct {
+    targets: []const u64,
+    swallow: bool = false,
+    observed: platform.WindowChrome = .{},
+    fn start(context: *anyopaque, runtime: *core.Runtime) !void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        for (self.targets) |target| {
+            self.observed = runtime.windowChrome(target) catch |err| {
+                if (self.swallow) continue;
+                return err;
+            };
+        }
+    }
+    fn app(self: *@This()) core.App {
+        return .{ .context = self, .name = "chrome-query", .start_fn = start };
+    }
+};
+
+test "replay refuses missing extra and reordered OS queries even without verification or with swallowed errors" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-query" });
+    const original = try core.TestHarness().create(gpa, .{});
+    defer original.destroy(gpa);
+    original.runtime.options.session_recorder = recorder;
+    var probe: ChromeQueryProbe = .{ .targets = &.{ 1, 2 } };
+    try original.runtime.dispatchPlatformEvent(probe.app(), .app_start);
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    for ([_][]const u64{ &.{1}, &.{ 1, 2, 3 }, &.{ 2, 1 } }) |targets| {
+        const fresh = try core.TestHarness().create(gpa, .{});
+        defer fresh.destroy(gpa);
+        var wrong: ChromeQueryProbe = .{ .targets = targets, .swallow = true };
+        try std.testing.expectError(error.ReplayChromeDivergence, session_replay.replaySession(&fresh.runtime, wrong.app(), buffer.journalBytes(), .{ .verify = false, .require_same_platform = false }));
+        try std.testing.expect(!fresh.runtime.replay_window_chrome_active);
+    }
+    // A complete sequence still succeeds and releases replay-owned facts.
+    const fresh = try core.TestHarness().create(gpa, .{});
+    defer fresh.destroy(gpa);
+    const report = try session_replay.replaySession(&fresh.runtime, probe.app(), buffer.journalBytes(), .{ .verify = false, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expect(!fresh.runtime.replay_window_chrome_active);
+}
+
+test "a logic-only journal declares absent chrome and never queries the replay host" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-query", .window_chrome_source = .unavailable });
+    recorder.stageEvent(.app_start);
+    recorder.commitEvent();
+    recorder.finish();
+    const fresh = try core.TestHarness().create(gpa, .{});
+    defer fresh.destroy(gpa);
+    fresh.null_platform.window_chrome = .{ .insets = .{ .top = 999, .left = 999 } };
+    var probe: ChromeQueryProbe = .{ .targets = &.{ 1, 2 } };
+    const report = try session_replay.replaySession(&fresh.runtime, probe.app(), buffer.journalBytes(), .{ .verify = false, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqualDeep(platform.WindowChrome{}, probe.observed);
+    // Absence cannot be combined with fabricated native query results.
+    buffer.len = 0;
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "chrome-query", .window_chrome_source = .unavailable });
+    recorder.stageEvent(.app_start);
+    recorder.recordWindowChrome(.{ .window_id = 1, .chrome = .{} });
+    recorder.finish();
+    try std.testing.expect(recorder.failed and !recorder.finished);
+}
+
+const AudioChromeModel = struct { last: ?effects_mod.EffectAudio = null, count: u32 = 0 };
+const AudioChromeMsg = union(enum) { audio_event: effects_mod.EffectAudio };
+const AudioChromeApp = ui_app_mod.UiApp(AudioChromeModel, AudioChromeMsg);
+fn audioChromeInit(_: *AudioChromeModel, fx: *AudioChromeApp.Effects) void {
+    fx.playAudio(.{ .key = 41, .path = "assets/session-track.mp3", .on_event = AudioChromeApp.Effects.audioMsg(.audio_event) });
+}
+fn audioChromeUpdate(model: *AudioChromeModel, msg: AudioChromeMsg) void {
+    model.last = msg.audio_event;
+    model.count += 1;
+}
+fn audioChromeView(ui: *AudioChromeApp.Ui, model: *const AudioChromeModel) AudioChromeApp.Ui.Node {
+    return ui.column(.{}, .{
+        ui.row(.{ .window_drag = true, .height = 52 }, .{ui.text(.{}, ui.fmt("Audio {d}", .{model.count}))}),
+        ui.text(.{}, if (model.last) |event| @tagName(event.kind) else "waiting"),
+    });
+}
+fn audioChromeOptions() AudioChromeApp.Options {
+    return .{ .name = "audio-chrome-session", .scene = session_scene, .canvas_label = canvas_label, .update = audioChromeUpdate, .view = audioChromeView, .init_fx = audioChromeInit };
+}
+
+test "native audio callbacks replay in their owning event with complete chrome snapshots and pixels" {
+    const gpa = std.testing.allocator;
+    const buffer = try gpa.create(JournalBuffer);
+    defer gpa.destroy(buffer);
+    buffer.len = 0;
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(buffer.sink());
+    recorder.begin(.{ .platform_name = "test", .app_name = "audio-chrome-session" });
+    const recorded = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer recorded.destroy(gpa);
+    recorded.null_platform.gpu_surfaces = true;
+    recorded.null_platform.window_chrome = .{ .insets = .{ .top = 52, .left = 98 }, .buttons = .init(20, 26, 68, 14) };
+    recorded.runtime.options.session_recorder = recorder;
+    const state = try gpa.create(AudioChromeApp);
+    defer gpa.destroy(state);
+    state.* = AudioChromeApp.init(std.heap.page_allocator, .{}, audioChromeOptions());
+    defer state.deinit();
+    state.effects.executor = .fake;
+    const app = state.app();
+    try recorded.start(app);
+    try recorded.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = .init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000 } });
+    const events = [_]platform.AudioEvent{
+        .{ .kind = .loaded, .duration_ms = 30_000, .playing = true },
+        .{ .kind = .position, .position_ms = 750, .duration_ms = 30_000, .playing = true, .buffering = true },
+        .{ .kind = .spectrum, .position_ms = 750, .duration_ms = 30_000, .playing = false, .buffering = true, .bands = @splat(17) },
+        .{ .kind = .position, .position_ms = 900, .duration_ms = 30_000, .playing = false },
+        .{ .kind = .completed, .position_ms = 999, .duration_ms = 30_000, .playing = true, .buffering = true },
+        .{ .kind = .failed, .position_ms = 12, .duration_ms = 30_000, .playing = true, .buffering = true },
+    };
+    for (events, 0..) |event, index| {
+        try recorded.runtime.dispatchPlatformEvent(app, .{ .audio = event });
+        try std.testing.expectEqual(@as(u32, @intCast(index + 1)), state.model.count);
+        try recorded.runtime.dispatchPlatformEvent(app, .frame_requested);
+        try recordChromePixels(&recorded.runtime, recorder);
+    }
+    recorder.finish();
+    try std.testing.expect(!recorder.failed);
+    try std.testing.expect(recorder.window_chrome_count >= events.len);
+    const replayed = try core.TestHarness().create(gpa, .{ .size = .init(400, 300) });
+    defer replayed.destroy(gpa);
+    replayed.null_platform.gpu_surfaces = true;
+    replayed.null_platform.window_chrome = .{ .buttons = .init(999, 999, 99, 99) };
+    const fresh = try gpa.create(AudioChromeApp);
+    defer gpa.destroy(fresh);
+    fresh.* = AudioChromeApp.init(std.heap.page_allocator, .{}, audioChromeOptions());
+    defer fresh.deinit();
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), buffer.journalBytes(), .{ .verify = true, .require_same_platform = false });
+    try std.testing.expect(report.ok());
+    try std.testing.expectEqual(@as(u64, events.len), report.effects_fed);
+    try std.testing.expectEqual(@as(u64, events.len), report.screenshots_verified);
+    try std.testing.expectEqualDeep(state.model, fresh.model);
+    try std.testing.expectEqualDeep(state.effects.audioSnapshot(), fresh.effects.audioSnapshot());
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+}
+
+test "synchronous recorded audio leaves wrapped deferred rejections in their original order" {
+    const fx = try std.testing.allocator.create(SessionApp.Effects);
+    defer std.testing.allocator.destroy(fx);
+    fx.* = SessionApp.Effects.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.armReplay();
+    // Advance the ring head before retaining two deferred rejection Msgs.
+    for (0..effects_mod.max_effect_pending_exits - 1) |_| {
+        fx.playAudio(.{ .key = 7, .path = "", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+        try std.testing.expect(fx.takeMsg() != null);
+    }
+    for ([_]u64{ 7, 8 }) |key| fx.playAudio(.{ .key = key, .path = "", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+    fx.playAudio(.{ .key = 41, .path = "assets/session-track.mp3", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+    const event: effects_mod.EffectAudio = .{ .key = 41, .kind = .loaded, .duration_ms = 30_000, .playing = true };
+    try fx.feedAudioRecord(event);
+    const synchronous = fx.takeAudioMsg(.{ .kind = .loaded, .duration_ms = 30_000, .playing = true }).?;
+    try std.testing.expectEqualDeep(event, synchronous.audio_event);
+    for ([_]u64{ 7, 8 }) |key| {
+        const deferred = fx.takeMsg().?.audio_event;
+        try std.testing.expectEqual(key, deferred.key);
+        try std.testing.expectEqual(effects_mod.EffectAudioEventKind.rejected, deferred.kind);
+    }
+    try std.testing.expect(fx.takeMsg() == null);
+    try fx.finishReplay();
+}
+
+test "recorded audio rejects altered missing unconsumed and wrongly owned deliveries" {
+    for (0..4) |scenario| {
+        const fx = try std.testing.allocator.create(SessionApp.Effects);
+        defer std.testing.allocator.destroy(fx);
+        fx.* = SessionApp.Effects.init(std.testing.allocator);
+        defer fx.deinit();
+        fx.armReplay();
+        fx.playAudio(.{ .key = 41, .path = "assets/session-track.mp3", .on_event = SessionApp.Effects.audioMsg(.audio_event) });
+        var event: effects_mod.EffectAudio = .{ .key = 41, .kind = .loaded, .duration_ms = 30_000, .playing = true };
+        if (scenario == 3) {
+            event.key = 42;
+            try std.testing.expectError(error.EffectNotFound, fx.feedAudioRecord(event));
+            continue;
+        }
+        if (scenario != 1) try fx.feedAudioRecord(event);
+        if (scenario != 2) try std.testing.expect(fx.takeAudioMsg(.{ .kind = .loaded, .duration_ms = if (scenario == 0) 31_000 else 30_000, .playing = true }) == null);
+        try std.testing.expectError(error.ReplayAudioDivergence, fx.finishReplay());
+    }
+}
+
+test "replay closes an adopted startup window before its native notification" {
+    const ClosingApp = struct {
+        closed: bool = false,
+        fn app(self: *@This()) core.App {
+            return .{ .context = self, .name = "adopted-close", .event_fn = event };
+        }
+        fn event(context: *anyopaque, runtime: *core.Runtime, incoming: core.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (incoming == .command) {
+                try runtime.closeWindow(incoming.command.window_id);
+                self.closed = true;
+            }
+        }
+    };
+    const gpa = std.testing.allocator;
+    const bytes = try gpa.create(JournalBuffer);
+    defer gpa.destroy(bytes);
+    bytes.* = .{};
+    const recorder = try gpa.create(session_record.SessionRecorder);
+    defer gpa.destroy(recorder);
+    recorder.* = session_record.SessionRecorder.init(bytes.sink());
+    recorder.begin(.{ .app_name = "adopted-close", .platform_name = "null" });
+    const recorded = try core.TestHarness().create(gpa, .{});
+    defer recorded.destroy(gpa);
+    recorded.runtime.options.session_recorder = recorder;
+    const native_window = try recorded.null_platform.platform().services.createWindow(.{ .id = 1, .label = "main", .title = "Main" });
+    var original: ClosingApp = .{};
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .app_start);
+    const notification: platform.WindowState = .{ .id = 1, .label = "main", .title = "Main", .frame = native_window.frame, .scale_factor = 1, .open = true, .focused = true };
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .{ .window_frame_changed = notification });
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .frame_requested);
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .{ .menu_command = .{ .name = "close", .window_id = 1 } });
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .frame_requested);
+    var closed_notification = notification;
+    closed_notification.open = false;
+    closed_notification.focused = false;
+    try recorded.runtime.dispatchPlatformEvent(original.app(), .{ .window_frame_changed = closed_notification });
+    recorder.finish();
+    try std.testing.expect(original.closed and recorder.finished and !recorder.failed);
+    const replayed = try core.TestHarness().create(gpa, .{});
+    defer replayed.destroy(gpa);
+    var fresh: ClosingApp = .{};
+    const report = try session_replay.replaySession(&replayed.runtime, fresh.app(), bytes.journalBytes(), .{ .require_same_platform = false });
+    try std.testing.expect(report.ok() and fresh.closed);
+    try std.testing.expect(report.checkpoints_verified >= 2);
+    try std.testing.expectEqual(recorded.runtime.sessionStateFingerprint(), replayed.runtime.sessionStateFingerprint());
+    // Missing native ownership remains an error outside replay, and unrelated
+    // native failures preserve all runtime flags even during replay.
+    for ([_]bool{ false, true }) |replay| {
+        const failed = try core.TestHarness().create(gpa, .{});
+        defer failed.destroy(gpa);
+        try failed.runtime.dispatchPlatformEvent(fresh.app(), .{ .window_frame_changed = notification });
+        failed.runtime.replay_window_chrome_active = replay;
+        if (replay) failed.null_platform.fail_next_close_window = true;
+        try std.testing.expectError(if (replay) error.CloseFailed else error.WindowNotFound, failed.runtime.closeWindow(1));
+        var windows: [platform.max_windows]platform.WindowInfo = undefined;
+        const window = failed.runtime.listWindows(&windows)[0];
+        try std.testing.expect(window.open and window.focused and !window.hidden);
+    }
 }

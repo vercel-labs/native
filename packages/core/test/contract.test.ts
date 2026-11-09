@@ -62,7 +62,7 @@ export function update(model: Model, msg: Msg): Model {
 test("a small core's contract carries types, arms, slots, and channels", () => {
   const doc = contractOf(smallCore);
   assert.equal(doc.format, 1);
-  assert.equal(doc.wire_version, 7);
+  assert.equal(doc.wire_version, 10);
   assert.equal(doc.abi_version, 2);
   assert.equal(doc.entry, "src/core.ts");
   assert.equal(doc.model, "Model");
@@ -234,6 +234,8 @@ export function themeState(model: Model): ThemeState {
     { name: "pack", type: { kind: "optional", inner: { kind: "enum", name: "ThemeStatePack" } } },
     { name: "colorScheme", type: { kind: "optional", inner: { kind: "enum", name: "ThemeStateColorScheme" } } },
     { name: "accent", type: { kind: "optional", inner: { kind: "bytes" } } },
+    { name: "highContrast", type: { kind: "optional", inner: { kind: "bool" } } },
+    { name: "reduceMotion", type: { kind: "optional", inner: { kind: "bool" } } },
   ]);
 });
 
@@ -376,4 +378,104 @@ test("wyhash matches the reference test vectors", () => {
     assert.equal(wyhash(seed, enc.encode(input)), expected, input);
   }
   assert.equal(wyhashHex(0n, enc.encode("")), "0409638ee2bde459");
+});
+
+
+test("webPanes emits canonical f64 descriptors and an unbound shell helper", () => {
+  const doc = contractOf(`
+import { asciiBytes } from "@native-sdk/core";
+import type { WebViewPane } from "@native-sdk/core/events";
+export interface Model { readonly docs: boolean; }
+export type Msg = { readonly kind: "show" } | { readonly kind: "hide" };
+export function initialModel(): Model { return { docs: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function webPanes(model: Model): readonly WebViewPane[] {
+  return [{ label: asciiBytes("preview"), anchor: null, url: asciiBytes("zero://app"), x: 0, y: 0, width: 400, height: 300, reloadToken: 0 }];
+}
+`);
+  assert.deepEqual(doc.model_unbound, ["webPanes"]);
+  const pane = (doc.types as { structs: { name: string; fields: { name: string; type: { kind: string } }[] }[] }).structs.find(record => record.name === "WebViewPane")!;
+  for (const name of ["x", "y", "width", "height", "reloadToken"])
+    assert.equal(pane.fields.find(field => field.name === name)!.type.kind, "f64", name);
+});
+
+test("complete capability routes require every metadata field and every enum state", () => {
+  const source = fs.readFileSync(new URL("../../../examples/effects-probe/src/core.ts", import.meta.url), "utf8");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-capability-contract-"));
+  try {
+    const entry = path.join(dir, "core.ts");
+    const check = (text: string) => {
+      fs.writeFileSync(entry, text);
+      return checkFile(entry);
+    };
+    const checked = check(source);
+    assert.equal(checked.ok, true, [...checked.typeErrors, ...checked.diagnostics.map(d => d.message)].join("\n"));
+    for (const invalid of [
+      source.replace('readonly droppedBefore: number', 'readonly missingDrops: number'),
+      source.replace('"cancelled" | "rejected" | "spawn_failed"', '"rejected" | "spawn_failed"'),
+      source.replace('readonly stderrTruncated: boolean', 'readonly stderrTruncated: number'),
+    ]) assert.equal(check(invalid).ok, false, "incomplete capability route passed the frontend");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("command channels distinguish strings from byte input and refuse ambiguous parameters", () => {
+  for (const type of ["string", "Uint8Array"]) {
+    const doc = contractOf(smallCore + `\nexport function commandMsg(name: ${type}): Msg | null { return { kind: "bump" }; }\n`);
+    const channels = doc.channels as { command_msg: boolean; command_bytes?: boolean };
+    assert.equal(channels.command_msg, true);
+    assert.equal(channels.command_bytes === true, type === "Uint8Array");
+    assert.ok((doc.abi as { exports: string[] }).exports.includes("command_msg"));
+  }
+  assert.throws(() => contractOf(smallCore + '\nexport function commandMsg(name: number): Msg | null { return null; }\n'), /commandMsg requires one string or Uint8Array/i);
+  assert.throws(() => contractOf(smallCore + '\nexport function commandMsg(name: Uint8Array, extra: number): Msg | null { return null; }\n'), /commandMsg requires one string or Uint8Array/i);
+});
+
+test("fixed Model-first helper arguments retain external nested numeric records optionals and slices", () => {
+  const c: any = contractOf(`
+export interface Model { count: number; }
+export interface Bounds { first: number; last: number; offset: number; }
+export interface Tag { id: number; score: number; }
+export interface Detail { nested: Tag; }
+export type Msg = { kind: "bump" };
+export function initialModel(): Model { return { count: 0 }; }
+export function update(model: Model, msg: Msg): Model { return { count: model.count + 1 }; }
+export function query(model: Model, range: Bounds, tags: readonly Tag[], detail: Detail | null): readonly Tag[] {
+  const rows: Tag[] = [];
+  for (let i = range.first; i < range.last; i++) {
+    const row = tags[i];
+    if (row !== undefined) rows.push({ id: row.id & 255, score: row.score + range.offset + (detail === null ? 0 : detail.nested.score) });
+  }
+  return rows;
+}
+`);
+  const helper = c.model_helpers.find((h: any) => h.name === "query");
+  assert.equal(helper.params.length, 3);
+  assert.equal(helper.params[1].kind, "slice");
+  assert.equal(helper.params[2].kind, "optional");
+  const fields = (name: string) => Object.fromEntries(c.types.structs.find((r: any) => r.name === name).fields.map((f: any) => [f.name, f.type.kind]));
+  assert.deepEqual(fields("Bounds"), { first: "i64", last: "i64", offset: "f64" });
+  assert.deepEqual(fields("Tag"), { id: "i64", score: "f64" });
+  assert.ok(c.integer_slots.some((s: any) => s.slot === "Bounds.first"));
+  assert.ok(!c.integer_slots.some((s: any) => s.slot === "Bounds.offset" || s.slot === "Tag.score"));
+});
+
+test("Model-first host frame channels stay outside the generic helper surface", () => {
+  const value = contractOf(`
+    import { type FrameEvent } from "@native-sdk/core/events";
+    export interface Model { readonly count: number }
+    export type Msg = { readonly kind: "resize"; readonly size: number } | { readonly kind: "reset" };
+    export function initialModel(): Model { return { count: 0 }; }
+    export function update(model: Model, msg: Msg): Model { switch(msg.kind) { case "resize": return { count: msg.size }; case "reset": return { count: 0 }; } }
+    export function frameMsg(model: Model, frame: FrameEvent): Msg | null { return frame.width !== model.count ? { kind: "resize", size: frame.width } : null; }
+    export function query(model: Model, amount: number): number { return model.count + amount; }
+  `);
+  assert.deepEqual((value.model_helpers as { name: string }[]).map(helper => helper.name), ["query"]);
+  assert.equal((value.channels as { frame_msg: boolean }).frame_msg, true);
+  assert.ok((value.abi as { exports: string[] }).exports.includes("frame_msg_ns"));
+  assert.ok(!(value.types as { unions: { name: string }[] }).unions.some(type => type.name === "Msg"));
+  const slots = (value.integer_slots as { slot: string }[]).map(slot => slot.slot);
+  assert.ok(!slots.includes("Model.count") && !slots.includes("Msg.resize"));
+  assert.ok(!slots.includes("helpers.query.amount") && !slots.includes("helpers.query.return"));
 });

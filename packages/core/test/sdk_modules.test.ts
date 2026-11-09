@@ -23,7 +23,7 @@ test("every shipped SDK library module is registered", () => {
     .readdirSync(sdkDir)
     // .d.ts files are ambient type surface (bytes_text_methods.d.ts joins
     // every core's program as a root), never importable library modules.
-    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts") && f !== "core.ts")
+    .filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts") && f !== "core.ts" && f !== "bytes.ts")
     .map((f) => path.join(sdkDir, f))
     .sort();
   const registered = [...sdkLibraryModules.values()].map((p) => path.resolve(p)).sort();

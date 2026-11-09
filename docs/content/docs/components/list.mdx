@@ -1,0 +1,84 @@
+---
+title: "List"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+
+Use `list` to arrange `list-item` rows vertically. Each row accepts a text label, leading `icon`, model-bound `selected` state, `disabled`, and an `on-press` message. For a long list with fixed-height rows, enable `virtualized` and set `virtual-item-extent` to limit layout and painting to visible rows.
+
+<ComponentPreview name="list" alt="A list with icons, a selected row, and a disabled row rendered by the engine" caption="icon rows with one selected and one disabled item" />
+
+## Markup
+
+```html
+<list width="340" gap="2">
+  <list-item icon="file-text" selected="{doc == 'report'}" on-press="open_report">Quarterly report.md</list-item>
+  <list-item icon="file-text" selected="{doc == 'checklist'}" on-press="open_checklist">Launch checklist.md</list-item>
+  <list-item icon="folder" on-press="open_archive">Archive</list-item>
+  <list-item icon="music" disabled="true">demo-track.wav</list-item>
+</list>
+```
+
+## Selection and activation
+
+A single click dispatches `on-press`. To separate selection from activation, handle selection there and bind an action such as opening a record to `on-double-press` and `on-submit`:
+
+```html
+<list-item
+  selected="{selected_id == track.id}"
+  on-press="select_track:{track.id}"
+  on-double-press="play_track:{track.id}"
+  on-submit="play_track:{track.id}"
+>{track.title}</list-item>
+```
+
+The Zig builder spells the same channels with underscores:
+
+```zig
+ui.listItem(.{
+    .selected = model.selected == track.id,
+    .on_press = Msg{ .select_track = track.id },      // click, and Space on a ring-focused row
+    .on_double_press = Msg{ .play_track = track.id }, // double click: the primary action
+    .on_submit = Msg{ .play_track = track.id },       // plain Enter: the same primary action
+}, track.title)
+```
+
+The first click dispatches selection immediately; the second click dispatches the double-press action. With `on-submit` bound, Enter activates the row and Space selects it. Without it, Enter selects.
+
+The arrows stay app-owned after clicking around: pointer focus on a plain list row is quiet (no ring), and a quietly focused row routes no keys — arrows and Enter fall through to the app-level key fallback, where a selection-owning app moves its own selection. Tab onto a row draws the ring and restores the row's full keymap (arrows walk the rows, Space selects, Enter submits), and rows carrying `role="treeitem"` keep the [tree](/docs/components/tree)'s roving keymap under either register. The full routing order is in [Native UI § Keyboard routing](/docs/native-ui#keyboard-routing-focus-registers-quiet-list-rows-and-the-app-level-fallback); `examples/soundboard`'s track lists are the live reference for the whole pattern.
+
+## Virtualization
+
+Enable `virtualized` and set `virtual-item-extent` for fixed-height rows. Use a keyed `for` loop to build rows from model data. All rows are still built; virtualization limits layout and painting. To build only the visible window, use the Zig builder’s [virtual list](/docs/components/virtual-list).
+
+```html
+<list virtualized="true" virtual-item-extent="28" grow="1">
+  <for each="rows" as="row" key="id">
+    <list-item on-press="open_row:{row.id}">{row.title}</list-item>
+  </for>
+</list>
+```
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.list(.{ .width = 340, .gap = 2 }, .{
+    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .report, .on_press = .open_report }, "Quarterly report.md"),
+    ui.listItem(.{ .icon = "file-text", .selected = model.doc == .checklist, .on_press = .open_checklist }, "Launch checklist.md"),
+    ui.listItem(.{ .icon = "folder", .on_press = .open_archive }, "Archive"),
+    ui.listItem(.{ .icon = "music", .disabled = true }, "demo-track.wav"),
+})
+```
+
+## Attributes
+
+List:
+
+<AttrTable attrs={["virtualized", "virtual-item-extent", "gap"]} />
+
+List-item:
+
+<AttrTable attrs={["text", "icon", "selected", "disabled", "on-press", "on-double-press", "on-submit"]} />

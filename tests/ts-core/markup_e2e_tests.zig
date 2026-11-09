@@ -466,7 +466,7 @@ test "automation set_text drives a compiled-core text field (select-all sentinel
     // sentinel, and the declared-union translation must SATURATE it into
     // the core's i64 field class — @intCast here panicked "integer does
     // not fit in destination type" on every compiled-core text field
-    // (the live-GUI smoke's soundboard-ts search crash).
+    // (the live-GUI smoke's soundboard search crash).
     var buffer: [96]u8 = undefined;
     const command = try std.fmt.bufPrint(&buffer, "widget-action {s} {d} set-text yo", .{ canvas_label, field });
     try h.harness.runtime.dispatchAutomationCommand(h.app, command);

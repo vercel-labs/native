@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -61,6 +62,11 @@ pub const RenderPathGeometryPlan = struct {
         var planner = RenderPathGeometryCachePlanner.init(entries, actions);
         return planner.build(self, previous, frame_index);
     }
+    pub fn cachePlanWithWorkspace(self: RenderPathGeometryPlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderPathGeometryCacheEntry, frame_index: u64, entries: []RenderPathGeometryCacheEntry, actions: []RenderPathGeometryCacheAction) Error!RenderPathGeometryCachePlan {
+        var planner = RenderPathGeometryCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
+        return planner.build(self, previous, frame_index);
+    }
 };
 
 pub const RenderPathGeometryPlanner = struct {
@@ -81,6 +87,10 @@ pub const RenderPathGeometryPlanner = struct {
             try self.consume(command, index);
         }
         return .{ .geometries = self.geometries[0..self.len] };
+    }
+
+    pub fn buildCompiled(self: *RenderPathGeometryPlanner, plan: anytype, policy: compiled_cache.Policy) Error!RenderPathGeometryPlan {
+        return @import("vector_effect_policy.zig").paths(self, plan, policy);
     }
 
     fn consume(self: *RenderPathGeometryPlanner, command: anytype, index: usize) Error!void {
@@ -287,6 +297,10 @@ pub const RenderPathGeometryCachePlanner = struct {
     pub fn reset(self: *RenderPathGeometryCachePlanner) void {
         self.entry_len = 0;
         self.action_len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderPathGeometryCachePlanner, plan: RenderPathGeometryPlan, previous: []const RenderPathGeometryCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderPathGeometryCachePlan {
+        return compiled_cache.build(.path, RenderPathGeometryCachePlan, self, plan.geometries, previous, frame_index, workspace, renderPathGeometryKey, null, error.PathGeometryCacheListFull);
     }
 
     pub fn build(self: *RenderPathGeometryCachePlanner, geometry_plan: RenderPathGeometryPlan, previous: []const RenderPathGeometryCacheEntry, frame_index: u64) Error!RenderPathGeometryCachePlan {

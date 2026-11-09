@@ -1,0 +1,197 @@
+---
+title: "Chart"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
+
+Use `chart` to display line, area, or bar series over evenly spaced samples. Colors follow the active theme. The chart reports a series summary to accessibility and automation tools. Data is copied into the view-build arena and downsampled to the per-series point limit using index buckets that preserve minima and maxima. Axis labels and hover details are optional. Charts do not handle presses.
+
+<ComponentPreview name="chart" alt="A line chart rendered by the engine" caption="two line series over monthly categories with gridlines and muted axis tick labels — hover the live preview for per-sample details" />
+
+## Markup
+
+A `chart` contains one or more `series` elements. `values` binds to a model iterable of numbers (`f32` in a Zig core): a field, declaration, or function. Axis bounds accept literals or scalar bindings. This example displays two line series with category labels, numeric ticks, and gridlines.
+
+```html
+<chart height="180" grid-lines="3" x-labels="{months}" y-labels="true" hover-details="true" label="Request latency">
+  <series kind="line" values="{p95_ms}" label="p95" />
+  <series kind="line" values="{p50_ms}" color="text_muted" label="p50" />
+</chart>
+```
+
+The series set is static in markup; values change through bindings. `NaN` samples are not drawn. To align a short history to the right of a fixed window, pad its leading samples with `NaN`.
+
+<CodeToggle>
+
+```ts
+/// The 60-sample window, NaN-padded at the front while samples accumulate.
+export function cpuSpark(model: Model): readonly number[] {
+  const out: number[] = [];
+  for (let i = model.cpuHistory.length; i < 60; i++) out.push(NaN);
+  for (const sample of model.cpuHistory) out.push(sample);
+  return out;
+}
+```
+
+```zig
+/// The 60-sample window, NaN-padded at the front while samples accumulate.
+pub fn cpuSpark(model: *const Model, arena: std.mem.Allocator) []const f32 {
+    const out = arena.alloc(f32, 60) catch return &.{};
+    @memset(out, std.math.nan(f32));
+    @memcpy(out[60 - model.cpu_len ..], model.cpuHistory());
+    return out;
+}
+```
+
+</CodeToggle>
+
+Unlabeled charts get a generated series summary (`chart: line cpu 60 pts last 0.42`) as their accessible name, so automation can assert on the data without pixels; `label` replaces it.
+
+## Bar
+
+`kind="bar"` draws one column per sample. A derived y domain includes zero. Set `baseline="true"` to draw the baseline, and provide an x label for each sample. The renderer thins labels when they would overlap.
+
+<ComponentPreview name="chart-bar" alt="A bar chart rendered by the engine" caption="a bar series over weekday categories with a zero-baseline hairline — hover the live preview for the day's count" />
+
+```html
+<chart height="180" baseline="true" x-labels="{weekdays}" hover-details="true" label="Builds per day">
+  <series kind="bar" values="{daily_builds}" label="builds" />
+</chart>
+```
+
+## Area
+
+`kind="area"` fills a line to the baseline. Set `y-min` and `y-max` to keep the scale fixed as values change. This example uses a 0–1 range without category labels; hover details identify samples by index.
+
+<ComponentPreview name="chart-area" alt="An area chart rendered by the engine" caption="a line series filled to the baseline on a pinned 0..1 domain — hover the live preview for the sample's value" />
+
+```html
+<chart height="160" y-min="0" y-max="1" grid-lines="3" hover-details="true" label="Memory">
+  <series kind="area" values="{memorySpark}" label="memory" />
+</chart>
+```
+
+## Axis labels
+
+`x-labels` binds to an iterable of strings, with one label per sample in sample order. Labels render below the plot and are thinned to fit. Downsampling removes category labels because bucket indices no longer correspond to the original samples. `y-labels="true"` adds numeric ticks to the left using steps of 1, 2, or 5 times a power of ten. Gridlines use the same tick positions.
+
+## Hover details
+
+`hover-details="true"` makes the plot hoverable: the pointer snaps to the nearest sample, a hairline cursor marks it (line series get a dot on the hovered point), and a floating card shows the sample's category label with every series' name and value. The card prefers the right side of the cursor and flips left at the window edge. This is interaction-only chrome — static renders never show it — and presses still fall through to whatever is around the chart. Every live preview on this page has it on: hover any of the three.
+
+## Attributes
+
+<AttrTable element="chart" attrs={["y-min", "y-max", "grid-lines", "baseline", "x-labels", "y-labels", "hover-details", "stroke-width", "width", "height", "grow", "padding", "key", "global-key", "label"]} />
+
+### Series
+
+`values` is required on every series.
+
+<AttrTable element="series" attrs={["kind", "values", "color", "label"]} />
+
+## Programmatic construction (Zig)
+
+Use the Zig builder for `.band` series with paired lower and upper values, or for a series set constructed at view time. `ui.chart` takes `ChartOptions` and a slice of `canvas.ChartSeries`. Supported kinds are `.line`, `.bar`, and `.band`; `fill` on a line corresponds to markup’s `kind="area"`.
+
+```zig
+ui.chart(.{
+    .width = 420,
+    .height = 180,
+    .grid_lines = 3,
+    .baseline = true,
+    .x_labels = &month_labels,
+    .y_labels = true,
+    .hover_details = true,
+}, &.{
+    .{ .kind = .line, .fill = true, .label = "cpu", .values = model.cpu_samples },
+    .{ .kind = .bar, .color = .text_muted, .label = "jobs", .values = model.job_counts },
+})
+```
+
+## Options
+
+`ChartOptions` fields (the builder-side equivalent of the attributes table):
+
+<table>
+<thead>
+    <tr>
+
+<th>Option</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+    <tr>
+
+<td><code>width</code></td>
+<td>Definite plot width (same contract as <code>ElementOptions.width</code>); 0 keeps the intrinsic sparkline-sized default (160x48).</td>
+</tr>
+    <tr>
+
+<td><code>height</code></td>
+<td>Definite plot height (same contract as <code>ElementOptions.height</code>); 0 keeps the intrinsic sparkline-sized default.</td>
+</tr>
+    <tr>
+
+<td><code>grow</code></td>
+<td>Flex grow factor; flexes the plot instead of a definite size.</td>
+</tr>
+    <tr>
+
+<td><code>padding</code></td>
+<td>Uniform padding (plain number).</td>
+</tr>
+    <tr>
+
+<td><code>y_min</code></td>
+<td>Explicit y-domain minimum; null derives it from the data (bar series force 0 into a derived domain — bars always have a zero baseline).</td>
+</tr>
+    <tr>
+
+<td><code>y_max</code></td>
+<td>Explicit y-domain maximum; null derives it from the data.</td>
+</tr>
+    <tr>
+
+<td><code>grid_lines</code></td>
+<td>Horizontal token-hairline gridlines (0 = none; gridlines are opt-in, never default). At even divisions of the plot — or on the y-label tick lattice when <code>y_labels</code> is on, so grid and labels share positions.</td>
+</tr>
+    <tr>
+
+<td><code>baseline</code></td>
+<td>Hairline at the baseline (zero clamped into the domain).</td>
+</tr>
+    <tr>
+
+<td><code>x_labels</code></td>
+<td>Category labels for the x axis, one per sample index (empty = no x axis). Muted, in a reserved gutter, thinned to fit; dropped when a series downsamples.</td>
+</tr>
+    <tr>
+
+<td><code>y_labels</code></td>
+<td>Numeric y tick labels on the nice-step lattice, in a measured gutter left of the plot.</td>
+</tr>
+    <tr>
+
+<td><code>hover_details</code></td>
+<td>Pointer-hover point details: snap cursor, per-point dots on line series, and a floating card with the sample's label and every series' value. Interaction-only; presses still fall through.</td>
+</tr>
+    <tr>
+
+<td><code>stroke_width</code></td>
+<td>Line stroke width override (default 1.5).</td>
+</tr>
+    <tr>
+
+<td><code>key</code> / <code>global_key</code></td>
+<td>Widget identity, as on any element.</td>
+</tr>
+    <tr>
+
+<td><code>semantics</code></td>
+<td>Widget semantics; the role defaults to <code>chart</code>, an empty label gets a generated series summary, and the accessibility value reports the first series' latest point.</td>
+</tr>
+</tbody>
+</table>

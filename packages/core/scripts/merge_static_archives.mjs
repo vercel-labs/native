@@ -62,7 +62,12 @@ try {
     for (const name of fs.readdirSync(dir)) {
       const member = path.join(dir, name);
       if (name.endsWith(".a")) extract(member);
-      else objects.push(member);
+      else {
+        // Zig's Mach-O archive members can extract with mode 000. The
+        // Darwin re-archive must be able to read each object.
+        fs.chmodSync(member, 0o644);
+        objects.push(member);
+      }
     }
   };
   for (const input of args.in) extract(input);

@@ -17,7 +17,7 @@ The markup compiles to the same widget tree a hand-written `canvas.Ui(Msg)` buil
 
 Editors highlight `.native` markup well in HTML mode — the default scaffold writes no editor config, so add `.vscode/settings.json` with `"files.associations": {"*.native": "html"}` yourself, or scaffold with `native init --full`, which writes it.
 
-Start a new app with `native init` (zero-config: `app.zon` + `src/core.ts` + `src/app.native` + assets; the CLI generates the build graph). Use `examples/chatbot`, `examples/soundboard-ts`, and `examples/system-monitor-ts` as substantial TypeScript references. The `native check|dev|test|build` verbs drive any app directory shaped this way.
+Start a new app with `native init` (zero-config: `app.zon` + `src/core.ts` + `src/app.native` + assets; the CLI generates the build graph). Use `examples/chatbot`, `examples/soundboard`, and `examples/system-monitor` as substantial TypeScript references. The `native check|dev|test|build` verbs drive any app directory shaped this way.
 
 ## Menu-bar status items (TypeScript default)
 
@@ -64,8 +64,8 @@ pub fn main(init: std.process.Init) !void {
         .canvas_label = "habits-canvas",  // must match the ShellView label
         .update = update,
         .markup = .{
-            .source = @embedFile("habits.native"),
-            .watch_path = "src/habits.native", // dev hot reload; omit in release
+            .source = @embedFile("app.native"),
+            .watch_path = "src/app.native", // dev hot reload; omit in release
             .io = init.io,
         },
     });
@@ -84,15 +84,25 @@ The runtime owns the loop: install on first GPU frame, presentation, resize, poi
 ```zig
 const dev = @import("builtin").mode == .Debug;
 const App = native_sdk.UiAppWithFeatures(Model, Msg, .{ .runtime_markup = dev });
-const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("habits.native"));
+const CompiledView = canvas.CompiledMarkupView(Model, Msg, @embedFile("app.native"));
 // options:
 .view = CompiledView.build,
-.markup = if (dev) .{ .source = ..., .watch_path = "src/habits.native", .io = init.io } else null,
+.markup = if (dev) .{ .source = ..., .watch_path = "src/app.native", .io = init.io } else null,
 ```
 
-With both set (dev), the compiled view renders until the watched file first changes, then the interpreter hot-reloads it. See `examples/habits` for the full pattern.
+With both set (dev), the compiled view renders until the watched file first changes, then the interpreter hot-reloads it. See the native reference fixture in `tests/ts-core/habits_reference.zig` for this Zig wiring pattern.
 
 ### Webview panes: canvas + live web content in one window
+
+For TypeScript apps, export `webPanes(model: Model): readonly WebViewPane[]` from `core.ts`. Import the descriptor from `@native-sdk/core/events`; return `label`, nullable `anchor`, `url`, `x`, `y`, `width`, `height`, and `reloadToken`. The label identifies an existing manifest WebView; the anchor identifies a widget label such as `<panel label="preview-pane" grow="1"/>`. See `examples/canvas-preview` for pane, frame, and tray coordination in one compiled core. The native adapter copies bytes and validates finite geometry and safe integer tokens; the OS owns WebView hosting and navigation policy.
+
+For all u64 reload states, return `readonly ExactWebViewPane[]` instead. Its `reloadToken` is decimal ASCII bytes; the host validates the full u64 range without rounding. `WebViewPane` retains its existing safe-number token.
+
+### TypeScript terminal panes
+
+Bind `<terminal pty="{shellKey}" scrollback="{scrollback}" on-terminal="terminalChanged" label="Shell" autofocus="true" grow="1"/>` to a `Uint8Array` helper or field naming the same key as `Cmd.ptySpawn`. Import `TerminalState` from `@native-sdk/core/events` for the message payload. The native host resolves the name to its PTY capability; engine identities never cross through a JavaScript number. Both view backends preserve the complete four-field state report. A bound slot remains reserved through exit until app teardown, keeping the ended screen stable across rebuilds. Restarting the same name reuses its slot; the existing four-slot budget applies. Keep `.terminal_sessions = true` and the lazy Ghostty pin in the app's owned build, as in `examples/workbench`. Native integer PTY bindings remain supported.
+
+For Zig cores and extensions:
 
 Declare the webview in the scene next to the gpu_surface (parent it to the canvas view), reserve its region with an empty panel carrying a semantics label, and let `Options.web_panes` snap the webview to that widget's layout frame while the model drives navigation:
 
@@ -143,6 +153,25 @@ fn statusItem(model: *const Model, scratch: *App.StatusItemScratch) App.StatusIt
 
 Title updates retitle the live `NSStatusItem` button without re-creating it; platforms without a tray-title seam keep menu updates and log the title gap once.
 
+### Windowed lists in markup
+
+Use `<virtual-window>` to resolve one retained range before rendering, then `<virtual-list>` to request only its rendered rows. The window declares a stable literal `id`, an `as` range name, an `item-count`, and either `item-extent` or an exported Model-first `extent-estimate` helper. Optional `gap`, `overscan`, `viewport-fallback`, `index-base`, and `anchor="leading|trailing"` describe the complete content geometry.
+
+```html
+<virtual-window id="records" as="range" item-count="{loaded}" item-extent="48" overscan="4">
+  <column>
+    <virtual-list window="range" each="rows" as="row" grow="1" label="Records">
+      <list-item key="{row.id}" focusable="true" on-press="select:{row.id}">{row.title}</list-item>
+    </virtual-list>
+    <status-bar>{range.first_visible_index}–{range.last_visible_index}</status-bar>
+  </column>
+</virtual-window>
+```
+
+In a TypeScript core, `rows(model: Model, range: VirtualListRange): readonly Row[]` takes the complete SDK range from `@native-sdk/core/events` and returns exactly `range.end_index - range.start_index` rows in rendered-index order. An extent estimator has shape `rowExtent(model: Model, index: number): number`; its retained identity survives rebuilds. Each row has one keyed root. Ordinary scroll styling, `on-scroll`, and reach-start/end messages belong on `virtual-list`.
+
+Each window has one root and exactly one consuming list; windows cannot nest. A range can pass through a template argument, and secondary window views have their own retained descriptors. The full range exposes visible and rendered bounds, content extent, row extent, and offset; use it for footer text without copying scroll state into the model. See `examples/feed` for variable-height estimates, stable row queries, and retained selection.
+
 ### Native scrolling (macOS)
 
 Zero app code: on macOS every non-virtualized `scroll` region — and every windowed virtual list (`ui.virtualList`), whose driver content size is the full virtual extent — is driven by an invisible `NSScrollView` — OS momentum and the system overlay scrollbar — while the engine renders the content. `widget.value` stays the offset of record, so the rebuild reconcile rule ("user offset survives rebuilds until the source offset changes"), automation snapshot offsets (`scroll=[offset=..]`), and `Options.sync` all work exactly as before; the engine-drawn scrollbar simply stops painting for natively driven regions. Programmatic scrolls still work: change the source offset (or scroll via keyboard/automation) and the runtime pushes it into the native scroller. GTK/Win32 and mobile embeds keep the engine's wheel physics unchanged. Nested-scroll saturation handoff (inner region exhausted, outer continues) is per-region native today: the inner region stops at its edge like a standalone scroller.
@@ -171,6 +200,8 @@ Markup declares the menu as a `<context-menu>` element — a DIRECT child of the
 </list-item>
 ```
 
+The compiled TypeScript view supports one direct menu with at most 32 labeled `menu-item` leaves and bare separators. Items require `on-press` and may bind `disabled`; structure tags inside menus currently remain on the native markup backend. The menu is copied into the native tree arena before the compiled result expires.
+
 The Zig builder's mirror is `ElementOptions.context_menu` — per-widget items in the chrome-menu shape with typed messages:
 
 ```zig
@@ -186,7 +217,7 @@ ui.listItem(.{
 
 The deepest declaring widget on the hit route wins; disabled items and separators are fine (`enabled = false`, `.separator = true`). Zero-code defaults need no declaration: editable text fields present the standard Cut / Copy / Paste / Select All menu wired to the existing clipboard actions, and a selected static text presents Copy (these defaults are presenter-only — without an OS menu they degrade to the keyboard clipboard paths). Touch long-press is design-noted for the mobile embeds: the iOS host's under-slop `Pending` touch state is the timer seam, pending a secondary-button leg in the embed ABI and `UIEditMenuInteraction` presentation.
 
-Automation drives the native path honestly: snapshots list every widget's declared items in invocation order (`context_menu=["Rename","Delete"]`, separators keep their slots, disabled items say so), `widget-context-press <view> <id>` performs the real secondary click (presenting the menu), and `widget-context-menu <view> <id> <item-index>` invokes an item — the selection dispatches as the same `context_menu_action` platform event a real pick produces (so it journals and replays), because the OS menu's tracking loop cannot be driven programmatically. Dead invocations fail by name (undeclared menu, index out of range, separator slot, disabled item). `examples/notes` row menus and `examples/gpu-dashboard` nav rows carry live menus; `zig build test-example-notes`, `test-example-gpu-dashboard`, and the runtime context-menu suite verify dispatch, the fallback surface, and the verb.
+Automation drives the native path honestly: snapshots list every widget's declared items in invocation order (`context_menu=["Rename","Delete"]`, separators keep their slots, disabled items say so), `widget-context-press <view> <id>` performs the real secondary click (presenting the menu), and `widget-context-menu <view> <id> <item-index>` invokes an item — the selection dispatches as the same `context_menu_action` platform event a real pick produces; the journal records the complete widget invocation so replay reconstructs its pending request before selection, because the OS menu's tracking loop cannot be driven programmatically. Dead invocations fail by name (undeclared menu, index out of range, separator slot, disabled item). `examples/notes` row menus and `examples/gpu-dashboard` nav rows carry live menus; `zig build test-example-notes`, `test-example-gpu-dashboard`, and the runtime context-menu suite verify dispatch, the fallback surface, and the verb.
 
 ## Elements
 
@@ -278,10 +309,10 @@ How the pieces fit, all model-owned (TEA):
 - **`anchor` floats the menu.** The dropdown positions against its PARENT's frame (the `stack`, sized by the trigger): below it by default, flipping above when it doesn't fit and the other side has more room, height clamped to the chosen side, x clamped into the window. It consumes NO space in the flow (siblings never reflow), paints in a late z-pass above the whole tree, and escapes every ancestor scroll/clip region — window-clipped, not pane-clipped. `anchor-alignment="stretch"` widens it to at least the trigger's width (the select look).
 - **`on-dismiss` closes it model-side.** Escape and a click outside the menu dismiss the surface and dispatch the Msg; `close_repo_picker` clears the bool. Escape works even when the trigger took no focus (a plain-text crumb): with no relevant focus chain it dismisses the topmost mounted anchored surface. The engine hides the surface immediately (the optimistic echo), and the next rebuild's source tree is truth — a model that keeps `open` true gets it back. Clicking the TRIGGER while open never double-fires: the anchor region owns its surface's toggling, so only `toggle_repo_picker` dispatches.
 - **Items close on pick.** `pick_repo` sets the value AND clears the open flag — a click inside the surface never dismisses.
-- **Keyboard**: once focus is in the menu (tab into it), tab wraps inside the surface (the floating focus scope) and Enter/Space activate items; Escape dismisses from the trigger or the menu.
+- **Keyboard**: ArrowDown/Up on a trigger with a mounted menu enters its selected visible row, or the first/last eligible row. Arrows move without wrapping; Home/End choose the visible edges. Enter/Space activate items. Tab/Shift+Tab dismiss without committing and return focus to the trigger; the next Tab continues through ordinary controls. Escape also dismisses from the trigger or menu and returns focus.
 - **Automation sees everything**: the floating menu and its items appear in widget snapshots at their real frames and `widget-click <item-id>` works while it is open.
 
-`combobox` composes the same way (the model filters the `for` source as the user types via `on-input`). The Zig mirror is `ElementOptions.anchor`/`anchor_alignment`/`anchor_offset` + `on_dismiss` on a `dropdown_menu` (or `popover`/`menu_surface`, which stay Zig-only) built with `ui.eachCtx` for the options. Budget: at most 16 anchored surfaces may be mounted per view (`max_canvas_widget_anchored_per_view`, loud `error.WidgetAnchoredSurfaceLimitReached`) — an `anchor` inside a `<for>` body is almost always a mistake.
+`combobox` composes the same way (the model filters the `for` source as the user types via `on-input`). Markup also supports `<popover>` and `<menu-surface>` with the same anchor and dismissal attributes. The Zig mirror is `ElementOptions.anchor`/`anchor_alignment`/`anchor_offset` + `on_dismiss` on `dropdown_menu`, `popover`, or `menu_surface`, built with `ui.eachCtx` for the options. Budget: at most 16 anchored surfaces may be mounted per view (`max_canvas_widget_anchored_per_view`, loud `error.WidgetAnchoredSurfaceLimitReached`) — an `anchor` inside a `<for>` body is almost always a mistake.
 
 ### Splitters: split panes with a model-owned fraction
 
@@ -398,7 +429,7 @@ Color and radius come from the design tokens, referenced by token NAME — liter
 </row>
 ```
 
-References resolve against the app's LIVE tokens on every rebuild (`finalizeWithTokens`), so a themed app (`tokens`/`tokens_fn`) re-resolves them when the theme changes — dark mode flips `surface` automatically. The DEFAULT theme follows the system appearance: an app that sets neither `tokens` nor `tokens_fn` derives the stock tokens from the OS light/dark setting (plus high-contrast and reduce-motion) and re-themes live when the user flips it. A TypeScript core may export `themeState(model: Model): ThemeState` (from `@native-sdk/core/events`) to derive optional `pack`, `colorScheme` (`light`/`dark`/`system`), and `accent` (`#rrggbb`) from model state. Omitted fields inherit app.zon, and omitted/system scheme follows the OS; high contrast still suppresses accents. `themePack(model)` remains supported for pack-only apps, but never export both. Pass explicit `tokens` for a fixed look, or `tokens_fn` for a fully model-owned custom palette; those complete-token paths take precedence over themeState. Forced scheme is canvas-token scope in v1 — native title bars and WebViews continue following the OS. An explicit `style` value set in Zig always wins over a token ref on the same field. Unknown token names and malformed model accents are validation errors.
+References resolve against the app's LIVE tokens on every rebuild (`finalizeWithTokens`), so a themed app (`tokens`/`tokens_fn`) re-resolves them when the theme changes — dark mode flips `surface` automatically. The DEFAULT theme follows the system appearance: an app that sets neither `tokens` nor `tokens_fn` derives the stock tokens from the OS light/dark setting (plus high-contrast and reduce-motion) and re-themes live when the user flips it. A TypeScript core may export `themeState(model: Model): ThemeState` (from `@native-sdk/core/events`) to derive optional `pack`, `colorScheme` (`light`/`dark`/`system`), `accent` (`#rrggbb`), `highContrast`, and `reduceMotion` from model state. Omitted fields inherit app.zon, and omitted/system scheme follows the OS. Omitted accessibility flags follow the OS; explicit flags retain model appearance during replay. Effective high contrast suppresses accents. `themePack(model)` remains supported for pack-only apps, but never export both. Pass explicit `tokens` for a fixed look, or `tokens_fn` for a fully model-owned custom palette; those complete-token paths take precedence over themeState. On macOS, the requested scheme also applies to native window chrome and child controls, including secondary windows. `system` clears the window override and resumes OS appearance. WebView content remains responsible for its own styling. An explicit `style` value set in Zig always wins over a token ref on the same field. Unknown token names and malformed model accents are validation errors.
 
 One Zig-only style knob rides beside the tokens: `ElementOptions.style = .{ .quiet_hover = true }` silences a pressable surface's pointer HOVER wash only — press and selection fills, the focus ring, cursor intent, and hit testing stay — for image-forward content tiles (cover art, photo cards) where the pointer rests on content rather than a control register. Acting controls (list rows, menu items, buttons, tab triggers) keep their washes: there the hover fill IS the affordance.
 
@@ -937,7 +968,7 @@ export type Msg = /* ... */ | {
 export const chromeMsg = "chrome_changed";
 ```
 
-Handle that arm by storing `msg.insets.left` and `Math.max(headerNaturalHeight, msg.insets.top)` in fields such as `chromeLeading`/`headerHeight`; markup binds those exact TypeScript spellings (`<spacer width="{chromeLeading}" />`). `examples/system-monitor-ts` is the complete reference. In a Zig core, the equivalent hook is `Options.on_chrome: fn (platform.WindowChrome) ?Msg`, with snake-case bindings such as `{chrome_leading}` when the Zig model uses those names.
+Handle that arm by storing `msg.insets.left` and `Math.max(headerNaturalHeight, msg.insets.top)` in fields such as `chromeLeading`/`headerHeight`; markup binds those exact TypeScript spellings (`<spacer width="{chromeLeading}" />`). `examples/system-monitor` is the complete reference. In a Zig core, the equivalent hook is `Options.on_chrome: fn (platform.WindowChrome) ?Msg`, with snake-case bindings such as `{chrome_leading}` when the Zig model uses those names.
 
 macOS-first like `resizable = false`: GTK/Win32 keep standard chrome and the whole channel is harmless there. Full retrofit: `examples/markdown-viewer` (tall band; toolbar row is the drag region and tracks the band height). Tests: the null platform records `startWindowDrag` calls (`window_drag_starts`), per-window `window_titlebar`, and serves settable `window_chrome` (insets + buttons frame).
 
@@ -979,6 +1010,16 @@ The view binds that model-owned id in either tier; `0` is the no-image sentinel 
 <image image="{cover}" width="120" height="80" label="Cover art" />
 <avatar image="{avatar}" label="Octocat">OC</avatar>
 ```
+
+Compiled TypeScript views also accept canonical unsigned decimal `Uint8Array`
+identity bytes, through max-u64. Keep exact restored/native identities in that
+representation instead of converting them to `number`. The view validates the
+bytes and sends two exact u32 words to native storage. An image leaf accepts
+`fit="stretch|contain|cover"`; the default is stretch and avatars use cover.
+Compiled views support per-side `padding-top`, `padding-bottom`, `padding-left`
+and `padding-right` over the uniform `padding` value. Color-token and radius
+attributes may bind a closed string-literal union of their supported tokens;
+the compiler rejects arbitrary text and unsupported members.
 
 One registered image can be a texture atlas. The source rectangle uses
 decoded-image pixel coordinates; declare all four markup attributes, or set
@@ -1141,7 +1182,7 @@ Three composites for pipeline/run UIs — pure compositions of existing widgets 
 
 ## Charts
 
-`<chart>` is the data-visualization composite: `<series>` children bind model `[]const f32` iterables and draw through the vector path pipeline with token colors — charts retheme with the palette, repaint exactly when their data changes (value equality, not identity), and report series semantics to automation. Both engines lower it through `ui.chart`, so markup charts and Zig charts are pixel- and semantics-identical.
+`<chart>` is the data-visualization composite: `<series>` children bind model `[]const f32` iterables and draw through the vector path pipeline with token colors — charts retheme with the palette, repaint exactly when their data changes (value equality, not identity), and report series semantics to automation. The interpreted, native-compiled and scriptc-compiled markup paths preserve the same chart data, pixels and semantics as `ui.chart`.
 
 ```html
 <!-- Star-history: cumulative stars per repo. 10k-point series are fine —
@@ -1241,7 +1282,7 @@ Tests that touch files or clocks get their `Io` from `std.testing.io`. The full 
 
 `native markup check src/view.native` — instant grammar/structure validation with `file:line:column` errors, including the font-coverage tofu guard: literal text with a codepoint outside the bundled face (⌘, ✓, ⑂, dingbats, CJK) is a teaching error naming the character, because it renders as a tofu box on the reference/screenshot and mobile paths — register a font that covers it (`UiApp.Options.fonts`) and bind the text from the model (the guard skips `{bindings}`), or use a vector icon (`icon=` / `<icon name>`) or plain words. Dynamic strings get the same lesson as a Debug-build `zero_canvas_ui` diagnostic when the view builds. The accessibility lint rides the same pass: unnamed interactive controls and role misuse are errors, unnamed images and redundant labels are warnings (`--strict` promotes).
 
-The model side checks at check time too: the model-contract step (refreshed by `native test`, or run directly as `zig build model-contract` in an app that owns its build) reflects Model/Msg into `zig-out/model-contract.zon`, and `native check` (or `markup check` run in the app directory) then verifies every binding path, iterable, `key` field, message tag, payload type, and expression type against the app's real surface — did-you-mean over your actual field names, and type errors naming the core's type. It also WARNS on model state and Msg tags no view uses; a TypeScript core exports `viewUnbound = ["name"] as const`, while a Zig core declares `pub const view_unbound = .{ "name" };` (`--strict` turns the warnings into failures). State consumed only by a Zig-built view needs `view_unbound` too, because the markup checker cannot see Zig view reads. A stale artifact degrades to grammar-only checking with a loud note ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks"); binding paths and message tags are always re-enforced when the app builds (and on hot reload).
+The model side checks at check time too. For a TypeScript core (`src/core.ts`), `native check` compiles `src/app.native` and `src/windows/*.native` against the core's contract with the build's own view compiler, so every binding path, iterable, `key` field, message tag, payload type, and expression type is checked against the current core with no artifact to refresh. For a Zig core, the model-contract step (refreshed by `native test`, or run directly as `zig build model-contract` in an app that owns its build) reflects Model/Msg into `zig-out/model-contract.zon`, and `native check` (or `markup check` run in the app directory) verifies the same things against it, with did-you-mean over your actual field names and type errors naming the core's type. Both WARN on model state and Msg tags no view uses; a TypeScript core exports `viewUnbound = ["name"] as const`, while a Zig core declares `pub const view_unbound = .{ "name" };` (`--strict` turns the warnings into failures). State consumed only by a Zig-built view needs `view_unbound` too, because the markup checker cannot see Zig view reads. A stale Zig artifact degrades to grammar-only checking with a loud note ("model contract: not yet built - bindings checked structurally only; run `native test` to enable typed checks"); binding paths and message tags are always re-enforced when the app builds (and on hot reload).
 
 ## Testing pattern (Zig cores)
 
@@ -1286,3 +1327,20 @@ For scripted checks (and the CI workflow `native init --full` scaffolds), replac
 native automate assert 'gpu_nonblank=true' 'role=button name="Reset"' 'count: 0'
 native automate assert --absent 'error event='
 ```
+
+## Compiled inline typography
+
+A text paragraph can contain ordered `span` leaves. Each leaf supports `weight="regular|medium|bold"`, `mono`, `italic`, `underline`, a positive `scale`, and a foreground color token. Use `text-alignment="start|center|end"` on the paragraph. Layout, keys, semantics, and events belong on the enclosing text element. The compiler preserves one separating space between whitespace-separated runs and keeps punctuation adjacent. Spans cannot contain nested elements or several comment-separated text runs.
+
+```xml
+<text size="display" text-alignment="end" label="{readout}">
+  <span mono="true" weight="medium">{readout}</span>
+</text>
+```
+
+Text-entry controls also accept `border-color` tokens, including `background` for a field that blends into the surrounding surface.
+
+
+## Compiled playback views
+
+TypeScript apps support `<video src="{opened}" controls="true" grow="1" label="Clip"/>` for house transport chrome and `<media-surface surface="{surface}" grow="1" label="Frames"/>` for app-owned controls. The scriptc view receives explicit playback state for each build, including secondary windows; it composes the transport widgets without mutable global view context. Native code supplies decoded textures and the current playback capability. Dynamic icons bind a closed string-literal union such as `"play" | "pause"`. The Video Player example demonstrates both playback styles.

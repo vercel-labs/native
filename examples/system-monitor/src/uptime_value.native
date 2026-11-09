@@ -1,7 +1,0 @@
-<!-- The uptime tile's hero stat: a markup SPAN PARAGRAPH — the bold value
-     run inside one heading-size paragraph — compiled at comptime
-     (canvas.CompiledMarkupView) like the spark fragments and placed as an
-     ordinary child of the Zig tile. The 239 width is the tile plot
-     geometry (view.zig's spark_width constant); the label mirrors the
-     visible value so assistive tech announces the stat by name. -->
-<text size="heading" width="239" label="{uptimeValue}"><span weight="bold">{uptimeValue}</span></text>

@@ -18,6 +18,47 @@ const fixture = @import("ui_markup_view_tests.zig");
 
 const testing = std.testing;
 
+test "windowed markup preserves complete ranges keyed rows and retained declarations in both engines" {
+    const Row = struct { id: usize, label: []const u8 };
+    const Model = struct {
+        loaded: usize = 6,
+        pub const records = [_]Row{ .{ .id = 0, .label = "zero" }, .{ .id = 1, .label = "one" }, .{ .id = 2, .label = "two" }, .{ .id = 3, .label = "three" }, .{ .id = 4, .label = "four" }, .{ .id = 5, .label = "five" } };
+        pub fn rows(_: *const @This(), range: canvas.VirtualListRange) []const Row {
+            return records[range.start_index..range.end_index];
+        }
+    };
+    const Msg = union(enum) { more, choose: usize };
+    const Ui = canvas.Ui(Msg);
+    const source =
+        \\<virtual-window id="records" as="window" item-count="{loaded}" item-extent="20" gap="2" overscan="1" viewport-fallback="40">
+        \\  <column>
+        \\    <virtual-list window="window" each="rows" as="entry" grow="1" label="Records" on-reach-end="more">
+        \\      <list-item key="{entry.id}" on-press="choose:{entry.id}">{entry.label}</list-item>
+        \\    </virtual-list>
+        \\    <status-bar>{window.first_visible_index}–{window.last_visible_index} / {window.content_extent}</status-bar>
+        \\  </column>
+        \\</virtual-window>
+    ;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var model = Model{};
+    var interpreted = try canvas.MarkupView(Model, Msg).init(allocator, source);
+    const Compiled = canvas.CompiledMarkupView(Model, Msg, source);
+    var native_ui = Ui.init(allocator);
+    var compiled_ui = Ui.init(allocator);
+    const expected = try native_ui.finalize(try interpreted.build(&native_ui, &model));
+    const actual = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+    try expectSameTree(Msg, expected, actual);
+    try testing.expectEqualDeep(native_ui.virtualWindows(), compiled_ui.virtualWindows());
+    try testing.expectEqual(@as(usize, 1), native_ui.virtualWindows().len);
+    try testing.expectEqual(@as(usize, 6), native_ui.virtualWindows()[0].item_count);
+    try testing.expect(native_ui.virtualWindows()[0].end_index < model.loaded);
+    try testing.expectEqualStrings(expected.root.children[1].text, actual.root.children[1].text);
+    const contract = comptime @import("ui_markup_contract.zig").describe(Model, Msg, .{ .TextInputEvent = canvas.TextInputEvent, .ScrollState = canvas.ScrollState, .TerminalState = canvas.TerminalState });
+    try testing.expectEqual(@as(?@import("ui_markup.zig").MarkupErrorInfo, null), try @import("ui_markup_contract.zig").checkDocument(allocator, interpreted.document, &contract, null));
+}
+
 // ------------------------------------------------------ shared assertions
 
 /// Identical trees: same structural ids node for node and the same handler
@@ -79,6 +120,7 @@ fn expectSameMsg(comptime MsgT: type, expected: MsgT, actual: MsgT) !void {
 fn expectSameTexts(expected: canvas.Widget, actual: canvas.Widget) !void {
     try testing.expectEqual(expected.kind, actual.kind);
     try testing.expectEqualStrings(expected.text, actual.text);
+    try testing.expectEqualStrings(expected.command, actual.command);
     try testing.expectEqual(expected.state.selected, actual.state.selected);
     try testing.expectEqual(expected.children.len, actual.children.len);
     for (expected.children, actual.children) |expected_child, actual_child| {
@@ -2495,4 +2537,102 @@ test "compiled split on-resize binds a declared float arm identically to the int
         interpreted.msgForResize(interpreted.root.id, 0.25).?,
         compiled.msgForResize(compiled.root.id, 0.25).?,
     );
+}
+
+test "compiled and interpreted command strings remain widget data beside message handlers" {
+    const ModelT = struct { command: []const u8 };
+    const MsgT = union(enum) { pressed: void };
+    const Ui = canvas.Ui(MsgT);
+    const source = "<column><button command=\"run.café\" on-press=\"pressed\">Run</button><select label=\"Picker\" command=\"{command}\"/><text command=\"ignored\">Inert</text></column>";
+    const Compiled = canvas.CompiledMarkupView(ModelT, MsgT, source);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var interpreter = try markup_view.MarkupView(ModelT, MsgT).init(arena, source);
+    for ([_][]const u8{ "choose.日本", "" }) |command| {
+        const model: ModelT = .{ .command = command };
+        var interpreted_ui = Ui.init(arena);
+        const interpreted = try interpreted_ui.finalize(try interpreter.build(&interpreted_ui, &model));
+        var compiled_ui = Ui.init(arena);
+        const compiled = try compiled_ui.finalize(Compiled.build(&compiled_ui, &model));
+        try expectSameTree(MsgT, interpreted, compiled);
+        try testing.expectEqualStrings("run.café", compiled.root.children[0].command);
+        try testing.expectEqualStrings(command, compiled.root.children[1].command);
+        try testing.expectEqualStrings("ignored", compiled.root.children[2].command);
+    }
+}
+
+test "named terminal bindings resolve in the host identically through both markup engines" {
+    const Model = struct { shell: []const u8 = "sh\xff\x00", offset: u32 = 12 };
+    const Msg = union(enum) { state: canvas.TerminalState };
+    const Ui = canvas.Ui(Msg);
+    const source = "<terminal pty=\"{shell}\" scrollback=\"{offset}\" on-terminal=\"state\" label=\"Shell\"/>";
+    const Resolver = struct {
+        fn resolve(name: []const u8) u64 {
+            return if (std.mem.eql(u8, name, "sh\xff\x00")) 0xFFFFFFFFFFFFFFFF else 0;
+        }
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const model: Model = .{};
+    var interpreter = try markup_view.MarkupView(Model, Msg).init(arena.allocator(), source);
+    var a = Ui.init(arena.allocator());
+    a.pty_key_resolver = Resolver.resolve;
+    const interpreted = try a.finalize(try interpreter.build(&a, &model));
+    var b = Ui.init(arena.allocator());
+    b.pty_key_resolver = Resolver.resolve;
+    const compiled = try b.finalize(canvas.CompiledMarkupView(Model, Msg, source).build(&b, &model));
+    try expectSameTree(Msg, interpreted, compiled);
+    try testing.expectEqual(std.math.maxInt(u64), compiled.root.terminal.pty);
+    try testing.expectEqual(@as(u32, 12), compiled.root.terminal.scrollback);
+    var unbound = Ui.init(arena.allocator());
+    const tree = try unbound.finalize(canvas.CompiledMarkupView(Model, Msg, source).build(&unbound, &model));
+    try testing.expectEqual(@as(u64, 0), tree.root.terminal.pty);
+}
+
+const VirtualFixture = struct {
+    const Row = struct { id: usize, label: []const u8 };
+    const Model = struct {
+        loaded: usize = 6,
+        pub fn rows(_: *const @This(), range: canvas.VirtualListRange, arena: std.mem.Allocator) []const Row {
+            const rows_out = arena.alloc(Row, range.itemCount()) catch unreachable;
+            for (rows_out, range.start_index..) |*row, index| row.* = .{ .id = index, .label = std.fmt.allocPrint(arena, "row {d}", .{index}) catch unreachable };
+            return rows_out;
+        }
+    };
+    const Msg = union(enum) { more, choose: usize };
+    const list = "<virtual-list window=\"range\" each=\"rows\" as=\"entry\" label=\"Rows\" on-reach-start=\"more\"><list-item key=\"{entry.id}\" focusable=\"true\">{entry.label}</list-item></virtual-list>";
+};
+
+test "windowed templates forward one consumption token and arena-owned complete row records" {
+    const F = VirtualFixture;
+    const source = "<template name=\"list-view\" args=\"range\"><column>" ++ F.list ++ "<status-bar>{range.content_extent}</status-bar></column></template><virtual-window id=\"rows\" as=\"window\" item-count=\"{loaded}\" item-extent=\"20\" viewport-fallback=\"40\"><use template=\"list-view\" range=\"{window}\"/></virtual-window>";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const model = F.Model{};
+    var interpreter = try canvas.MarkupView(F.Model, F.Msg).init(arena.allocator(), source);
+    var a = canvas.Ui(F.Msg).init(arena.allocator());
+    var b = canvas.Ui(F.Msg).init(arena.allocator());
+    const expected = try a.finalize(try interpreter.build(&a, &model));
+    const actual = try b.finalize(canvas.CompiledMarkupView(F.Model, F.Msg, source).build(&b, &model));
+    try expectSameTree(F.Msg, expected, actual);
+    try testing.expectEqualDeep(a.virtualWindows(), b.virtualWindows());
+    try testing.expectEqualStrings("row 0", actual.root.children[0].children[0].text);
+    try testing.expect(actual.root.children[0].children[0].semantics.focusable);
+}
+
+test "windowed missing duplicate and dynamically invalid declarations fail before finalization" {
+    const F = VirtualFixture;
+    const prefix = "<virtual-window id=\"rows\" as=\"range\" item-count=\"{loaded}\" item-extent=\"20\">";
+    inline for (.{ prefix ++ "<text>missing</text></virtual-window>", prefix ++ "<column>" ++ F.list ++ F.list ++ "</column></virtual-window>", "<column>" ++ prefix ++ F.list ++ "</virtual-window>" ++ prefix ++ F.list ++ "</virtual-window></column>" }) |source| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var interpreter = try canvas.MarkupView(F.Model, F.Msg).init(arena.allocator(), source);
+        var a = canvas.Ui(F.Msg).init(arena.allocator());
+        var b = canvas.Ui(F.Msg).init(arena.allocator());
+        const model = F.Model{};
+        try testing.expectError(error.MarkupBuild, interpreter.build(&a, &model));
+        _ = canvas.CompiledMarkupView(F.Model, F.Msg, source).build(&b, &model);
+        try testing.expect(b.failed);
+    }
 }

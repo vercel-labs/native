@@ -284,7 +284,7 @@ test "channel entries hold the bytes-envelope laws" {
     // produce nothing (the archive's entry returns the two-byte
     // nothing-produced envelope, which the mirror gates to null).
     try testing.expect(shim_core.keyMsg(.{ .key = "space", .shift = false, .control = true, .alt = false, .super = false }) == null);
-    try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16 }) == null);
+    try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 0, .height = 600, .timestampMs = 16, .intervalMs = 16, .timestampNs = "16000000", .intervalNs = "16000000" }) == null);
     try testing.expect(shim_core.pinchMsg(.{ .windowId = 7, .label = "ts-markup-canvas", .phase = .begin, .scale = 0, .x = 1, .y = 2 }) == null);
     const ignored_paths = [_][]const u8{"/tmp/ignored.txt"};
     try testing.expect(shim_core.dropMsg(.{ .windowId = 1, .viewLabel = "ts-markup-canvas", .point = null, .paths = &ignored_paths }) == null);
@@ -293,9 +293,9 @@ test "channel entries hold the bytes-envelope laws" {
     // and the dispatched cycle updates the model so the same frame then
     // gates (the idle law, proven across the round trip).
     {
-        const msg = shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 16, .intervalMs = 16 }) orelse return error.TestUnexpectedResult;
+        const msg = shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 16, .intervalMs = 16, .timestampNs = "16000000", .intervalNs = "16000000" }) orelse return error.TestUnexpectedResult;
         shim_model = try singleCycle(arena, shim_model, msg);
-        try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 32, .intervalMs = 16 }) == null);
+        try testing.expect(shim_core.frameMsg(shim_model, .{ .width = 800, .height = 600, .timestampMs = 32, .intervalMs = 16, .timestampNs = "32000000", .intervalNs = "16000000" }) == null);
         // The raw archive entry receives f64 logical points before the
         // generated mirror narrows its classed width. Compare after
         // truncation so a fractional presentation at the committed
@@ -333,4 +333,33 @@ test "channel entries hold the bytes-envelope laws" {
         shim_model = try singleCycle(arena, shim_model, msg);
         try testing.expectEqualStrings("/tmp/first.txt", shim_model.banner);
     }
+}
+
+test "borrowed byte inputs survive caller reuse, frame resets, and collection" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    shim_core.rt.resetAll();
+    var model = shim_core.commitModelRoot(shim_core.initialModel());
+    defer shim_core.rt.resetAll();
+    shim_core.rt.frameReset();
+
+    // Real dispatch_bytes through the library-compiled, byte-bearing sidecar.
+    // The caller owns this storage and may reuse it as soon as dispatch returns.
+    var input = [_]u8{ 'a', 0, 255, 128, 'z' };
+    const expected = input;
+    const out = shim_core.update(model, .{ .banner_set = &input });
+    model = shim_core.commitModelRoot(out.model);
+    @memset(&input, 42);
+    shim_core.rt.frameReset();
+    abi.collect();
+    try testing.expectEqualSlices(u8, &expected, model.banner);
+    try expectSnapshotFidelity(model, arena);
+
+    // An unrelated update must retain the owned bytes too. This catches a
+    // borrowed dispatch buffer being retained in the compiler's model heap.
+    model = try singleCycle(arena, model, .add);
+    abi.collect();
+    try testing.expectEqualSlices(u8, &expected, model.banner);
+    try expectSnapshotFidelity(model, arena);
 }

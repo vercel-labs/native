@@ -1,3 +1,4 @@
+const compiled_cache = @import("render_cache_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("root.zig");
 const drawing_model = @import("drawing.zig");
@@ -59,6 +60,11 @@ pub const RenderLayerPlan = struct {
         var planner = RenderLayerCachePlanner.init(entries, actions);
         return planner.build(self, previous, frame_index);
     }
+    pub fn cachePlanWithWorkspace(self: RenderLayerPlan, workspace: ?*compiled_cache.Workspace, previous: []const RenderLayerCacheEntry, frame_index: u64, entries: []RenderLayerCacheEntry, actions: []RenderLayerCacheAction) Error!RenderLayerCachePlan {
+        var planner = RenderLayerCachePlanner.init(entries, actions);
+        if (workspace) |owner| return planner.buildCompiled(self, previous, frame_index, owner);
+        return planner.build(self, previous, frame_index);
+    }
 };
 
 pub const RenderLayerPlanner = struct {
@@ -71,6 +77,10 @@ pub const RenderLayerPlanner = struct {
 
     pub fn reset(self: *RenderLayerPlanner) void {
         self.len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderLayerPlanner, plan: anytype, policy: @import("render_resource_policy.zig").Policy) Error!RenderLayerPlan {
+        return @import("render_resource_policy.zig").layers(self, plan, policy);
     }
 
     pub fn build(self: *RenderLayerPlanner, render_plan: anytype) Error!RenderLayerPlan {
@@ -178,6 +188,10 @@ pub const RenderLayerCachePlanner = struct {
     pub fn reset(self: *RenderLayerCachePlanner) void {
         self.entry_len = 0;
         self.action_len = 0;
+    }
+
+    pub fn buildCompiled(self: *RenderLayerCachePlanner, plan: RenderLayerPlan, previous: []const RenderLayerCacheEntry, frame_index: u64, workspace: *compiled_cache.Workspace) Error!RenderLayerCachePlan {
+        return compiled_cache.build(.layer, RenderLayerCachePlan, self, plan.layers, previous, frame_index, workspace, renderLayerKey, null, error.LayerCacheListFull);
     }
 
     pub fn build(self: *RenderLayerCachePlanner, layer_plan: RenderLayerPlan, previous: []const RenderLayerCacheEntry, frame_index: u64) Error!RenderLayerCachePlan {

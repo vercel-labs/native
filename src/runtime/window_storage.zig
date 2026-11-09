@@ -1,4 +1,5 @@
 const std = @import("std");
+const lifecycle = @import("window_lifecycle_policy.zig");
 const geometry = @import("geometry");
 const validation = @import("validation.zig");
 const shell_layout = @import("shell_layout.zig");
@@ -7,7 +8,6 @@ const runtime_canvas_widget_events = @import("canvas_widget_events.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
 
-const validateWindowFrame = validation.validateWindowFrame;
 const WindowSourcePolicy = runtime_state.WindowSourcePolicy;
 const copySourceInto = runtime_state.copySourceInto;
 const RuntimeShellLayout = shell_layout.RuntimeShellLayout;
@@ -45,6 +45,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         }
 
         pub fn focusWindow(self: *Runtime, window_id: platform.WindowId) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| return @import("window_views.zig").RuntimeWindowViews(Runtime).executeWindowCapability(self, policy, .focus, window_id);
             const index = Self.findWindowIndexById(self, window_id) orelse return error.WindowNotFound;
             // Liveness before the platform call, like showWindow: a
             // closed window keeps its table slot until the id or label
@@ -95,7 +96,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
                 }
             }
             const id = if (options.id != 0) options.id else Self.allocateWindowId(self);
-            try validateWindowFrame(options.default_frame);
+            try @import("shell_admission_policy.zig").frame(self.shell_admission_policy, 1, options.default_frame);
             // `.hide` needs a host that can keep a closed-by-the-user
             // window alive and re-show it; refusing here is the loud
             // teaching (GTK: no status item exists to bring the window
@@ -177,6 +178,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var cursor = index;
             while (cursor + 1 < self.window_count) : (cursor += 1) {
                 self.windows[cursor] = self.windows[cursor + 1];
+                self.windows[cursor].rebindStorage();
             }
             self.window_count -= 1;
         }
@@ -192,8 +194,18 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         pub fn applyNativeInfo(self: *Runtime, index: usize, native_info: platform.WindowInfo) anyerror!void {
             self.windows[index].info.frame = native_info.frame;
             self.windows[index].info.scale_factor = native_info.scale_factor;
-            self.windows[index].info.open = native_info.open;
-            self.windows[index].info.hidden = native_info.hidden;
+            if (self.window_lifecycle_policy == null) {
+                self.windows[index].info.open = native_info.open;
+                self.windows[index].info.hidden = native_info.hidden;
+            }
+            if (self.window_lifecycle_policy) |policy| {
+                const program = lifecycle.plan(policy, self, .host, .{ .cursor = index, .saved = @as(u32, @intFromBool(native_info.open)) | (@as(u32, @intFromBool(native_info.focused)) << 1) | (@as(u32, @intFromBool(native_info.hidden)) << 2), .frame = native_info.frame });
+                program.apply(&self.windows[index].info);
+                if (program.has(128)) self.windows[index].main_frame = program.frame;
+                if (program.has(4)) try Self.setFocusedIndex(self, index);
+                if (program.has(16)) try Self.setWindowFocused(self, index, false);
+                return;
+            }
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, native_info.frame.width, native_info.frame.height);
             }
@@ -208,8 +220,18 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             const index = existing_index orelse try Self.reserveWindow(self, state.id, state.label, state.title, null, true, .allow_source_less);
             self.windows[index].info.frame = state.frame;
             self.windows[index].info.scale_factor = state.scale_factor;
-            self.windows[index].info.open = state.open;
-            self.windows[index].info.hidden = state.hidden;
+            if (self.window_lifecycle_policy == null) {
+                self.windows[index].info.open = state.open;
+                self.windows[index].info.hidden = state.hidden;
+            }
+            if (self.window_lifecycle_policy) |policy| {
+                const program = lifecycle.plan(policy, self, .host, .{ .cursor = index, .saved = @as(u32, @intFromBool(state.open)) | (@as(u32, @intFromBool(state.focused)) << 1) | (@as(u32, @intFromBool(state.hidden)) << 2), .frame = state.frame });
+                program.apply(&self.windows[index].info);
+                if (program.has(128)) self.windows[index].main_frame = program.frame;
+                if (program.has(4)) try Self.setFocusedIndex(self, index);
+                if (program.has(16)) try Self.setWindowFocused(self, index, false);
+                return;
+            }
             if (!self.windows[index].main_frame_set) {
                 self.windows[index].main_frame = geometry.RectF.init(0, 0, state.frame.width, state.frame.height);
             }
@@ -255,6 +277,20 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         }
 
         pub fn bindShellViews(self: *Runtime, window_id: platform.WindowId, views: []const app_manifest.ShellView) !void {
+            if (self.shell_coordination_policy) |policy| {
+                const c = @import("shell_coordination_policy.zig");
+                var request: [64 + 16 * 8]u8 = @splat(0);
+                request[0..64].* = c.request(.bind, 0, @intCast(self.shell_layout_count), 0);
+                std.mem.writeInt(u64, request[16..24], window_id, .little);
+                for (self.shell_layouts[0..self.shell_layout_count], 0..) |layout, i| std.mem.writeInt(u64, request[64 + i * 8 ..][0..8], layout.window_id, .little);
+                const program = c.plan(policy, request[0 .. 64 + self.shell_layout_count * 8]);
+                try program.admit();
+                const slot = program.selected.?;
+                if (program.decisions != 0) self.shell_layouts[slot].window_id = window_id;
+                try self.shell_layouts[slot].copyViews(views);
+                if (program.decisions != 0) self.shell_layout_count += 1;
+                return;
+            }
             if (Self.findShellLayoutIndex(self, window_id)) |index| {
                 try self.shell_layouts[index].copyViews(views);
                 return;
@@ -282,6 +318,7 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             var cursor = index;
             while (cursor + 1 < self.shell_layout_count) : (cursor += 1) {
                 self.shell_layouts[cursor] = self.shell_layouts[cursor + 1];
+                self.shell_layouts[cursor].rebindStorage();
             }
             self.shell_layout_count -= 1;
         }
@@ -301,7 +338,8 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         pub fn setFocusedIndex(self: *Runtime, focused_index: usize) anyerror!void {
             var first_error: ?anyerror = null;
             for (0..self.window_count) |index| {
-                Self.setWindowFocused(self, index, index == focused_index) catch |err| {
+                const focused = if (self.window_lifecycle_policy) |policy| lifecycle.plan(policy, self, .focused_index, .{ .cursor = index, .target = focused_index }).active else index == focused_index;
+                Self.setWindowFocused(self, index, focused) catch |err| {
                     if (first_error == null) first_error = err;
                 };
             }
@@ -330,6 +368,23 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         /// left to reset, and its rollback on platform failure must
         /// not have fired one).
         pub fn setWindowFocused(self: *Runtime, index: usize, focused: bool) anyerror!void {
+            if (self.window_lifecycle_policy) |policy| {
+                const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
+                const program = lifecycle.plan(policy, self, .focus, .{ .cursor = index, .value = focused });
+                program.apply(&self.windows[index].info);
+                var first_error: ?anyerror = null;
+                for (self.views[0..self.view_count], 0..) |_, view_index| {
+                    const keyboard = lifecycle.plan(policy, self, .keyboard, .{ .cursor = view_index, .target = index, .value = focused });
+                    if (keyboard.has(1)) Self.applyKeyboardActive(self, view_index, keyboard.active) catch |err| {
+                        if (first_error == null) first_error = err;
+                    };
+                }
+                if (program.has(32)) CanvasWidgetEventMethods.resetCanvasTooltipIntentForWindowKeyLoss(self, self.windows[index].info.id) catch |err| {
+                    if (first_error == null) first_error = err;
+                };
+                if (first_error) |err| return err;
+                return;
+            }
             const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
             const window = &self.windows[index];
             const was_focused = window.info.focused;
@@ -357,6 +412,13 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
             self.app_active = active;
             var first_error: ?anyerror = null;
             for (self.views[0..self.view_count], 0..) |*view, view_index| {
+                if (self.window_lifecycle_policy) |policy| {
+                    const program = lifecycle.plan(policy, self, .keyboard, .{ .cursor = view_index, .variant = 1, .app_active = active });
+                    if (program.has(1)) Self.applyKeyboardActive(self, view_index, program.active) catch |err| {
+                        if (first_error == null) first_error = err;
+                    };
+                    continue;
+                }
                 const window_index = Self.findWindowIndexById(self, view.window_id);
                 const window_focused = if (window_index) |index| self.windows[index].info.focused else false;
                 Self.setViewKeyboardActive(self, view_index, active and window_focused) catch |err| {
@@ -367,9 +429,13 @@ pub fn RuntimeWindowStorage(comptime Runtime: type) type {
         }
 
         fn setViewKeyboardActive(self: *Runtime, view_index: usize, active: bool) anyerror!void {
+            if (self.views[view_index].keyboard_active == active) return;
+            try Self.applyKeyboardActive(self, view_index, active);
+        }
+
+        fn applyKeyboardActive(self: *Runtime, view_index: usize, active: bool) anyerror!void {
             const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
             const view = &self.views[view_index];
-            if (view.keyboard_active == active) return;
             const previous_state = view.canvasWidgetRenderState();
             view.keyboard_active = active;
             const next_state = view.canvasWidgetRenderState();

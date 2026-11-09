@@ -1,4 +1,14 @@
+pub const ComponentCompositionPolicy = @import("component_composition_policy.zig");
+pub const CodeContentPolicy = @import("code_content_policy.zig");
+pub const MarkdownContentPolicy = @import("markdown_content_policy.zig");
+pub const ComponentConstructionPolicy = @import("component_construction_policy.zig");
+pub const ControlAppearancePolicy = @import("control_appearance_policy.zig");
+pub const WidgetAppearance = @import("widget_render_style.zig");
+pub const RenderDamagePolicy = @import("render_damage_policy.zig");
 const std = @import("std");
+pub const RenderOverridePolicy = @import("render_override_policy.zig");
+pub const renderNumericFlags = @import("numeric_capabilities.zig").numericFlags;
+pub const RenderCacheWorkspace = @import("render_cache_policy.zig").Workspace;
 const command_model = @import("commands.zig");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
@@ -98,10 +108,9 @@ pub const mediaSurfacePlaceholderColor = @import("widget_render.zig").mediaSurfa
 pub const default_sans_font_id: FontId = 1;
 pub const default_mono_font_id: FontId = 2;
 // Reserved sans variant ids for inline span styling. The deterministic
-// estimator applies per-variant width factors; hosts that have not mapped
-// these ids to real faces fall back to the regular sans face, and because
-// the measurement seam carries the same id, measured text always matches
-// drawn text.
+// estimator and software renderer use matching bundled regular, medium
+// and bold faces. Italic ids preserve weight with upright outlines in
+// software; platform text providers may resolve real italic faces.
 pub const default_sans_medium_font_id: FontId = 3;
 pub const default_sans_bold_font_id: FontId = 4;
 pub const default_sans_italic_font_id: FontId = 5;
@@ -151,6 +160,7 @@ pub const GlyphAtlasKey = text_model.GlyphAtlasKey;
 pub const GlyphAtlasEntry = text_model.GlyphAtlasEntry;
 pub const GlyphAtlasPlan = text_model.GlyphAtlasPlan;
 pub const GlyphAtlasPlanner = text_model.GlyphAtlasPlanner;
+pub const glyph_atlas_policy = @import("glyph_atlas_policy.zig");
 pub const GlyphAtlasCacheEntry = text_model.GlyphAtlasCacheEntry;
 pub const GlyphAtlasCacheActionKind = text_model.GlyphAtlasCacheActionKind;
 pub const GlyphAtlasCacheAction = text_model.GlyphAtlasCacheAction;
@@ -164,6 +174,14 @@ pub const text_ellipsis = text_model.text_ellipsis;
 pub const textEllipsisAdvance = text_model.textEllipsisAdvance;
 pub const textLayoutKeysEqual = text_model.textLayoutKeysEqual;
 pub const TextLayoutOptions = text_model.TextLayoutOptions;
+pub const TextLineIterator = text_model.TextLineIterator;
+pub const textLineCaretX = text_model.textLineCaretX;
+pub const text_run_policy = @import("text_run_policy.zig");
+pub const text_query_policy = @import("text_query_policy.zig");
+pub const text_measurement_policy = @import("text_measurement_policy.zig");
+pub const text_document_policy = @import("text_document_policy.zig");
+pub const text_measure_cache = @import("text_measure_cache.zig");
+pub const text_span_query_policy = @import("text_span_query_policy.zig");
 pub const TextMeasureProvider = text_model.TextMeasureProvider;
 pub const TextInkMetrics = text_model.TextInkMetrics;
 /// Batched-measurement invalidation seam (see text_measure_cache.zig):
@@ -386,6 +404,8 @@ pub const VirtualListRange = token_model.VirtualListRange;
 pub const virtualListRange = token_model.virtualListRange;
 pub const virtual_extents = @import("virtual_extents.zig");
 pub const VirtualExtentEstimateFn = virtual_extents.VirtualExtentEstimateFn;
+pub const virtual_extent_policy = @import("virtual_extent_policy.zig");
+pub const VirtualExtentMeasurement = @import("virtual_extents.zig").VirtualExtentMeasurement;
 pub const VirtualExtentTable = virtual_extents.VirtualExtentTable;
 pub const VirtualExtentSyncArgs = virtual_extents.VirtualExtentSyncArgs;
 pub const VirtualExtentSyncInfo = virtual_extents.VirtualExtentSyncInfo;
@@ -496,6 +516,8 @@ pub const max_text_span_lines_per_paragraph = text_spans.max_text_span_lines_per
 // painter (real text runs, geometric box drawing, selection, cursor,
 // scrollback indicator) — lives in `terminal_grid.zig`; the box-drawing
 // geometry in `terminal_box.zig`.
+pub const TerminalPaintPolicy = @import("terminal_paint_policy.zig");
+pub const TerminalGridReference = @import("terminal_grid_reference.zig");
 pub const terminal_grid = @import("terminal_grid.zig");
 pub const terminal_box = @import("terminal_box.zig");
 pub const TerminalGrid = terminal_grid.TerminalGrid;
@@ -517,6 +539,7 @@ pub const max_terminal_cells = terminal_grid.max_cells;
 // Chart plot data for the `.chart` widget kind (series, downsampling,
 // domain) lives in `chart.zig`.
 pub const chart = @import("chart.zig");
+pub const ChartContentPolicy = @import("chart_content_policy.zig");
 pub const ChartSeries = chart.ChartSeries;
 pub const ChartSeriesKind = chart.ChartSeriesKind;
 pub const ChartSeriesColor = chart.ChartSeriesColor;
@@ -557,6 +580,9 @@ pub const lazy_tls = @import("lazy_tls.zig");
 // `ui_markup_compiled.zig` (comptime parse: the release engine, no parser in
 // the binary).
 pub const ui_markup = @import("ui_markup.zig");
+pub const ui_markup_shapes = @import("ui_markup_shapes.zig");
+/// Structural event shapes shared by markup backends and native consumers.
+pub const ui_markup_reflect = @import("ui_markup_reflect.zig");
 /// Widget provenance (write-back's read half): structural id -> authored
 /// markup, plus the minimal-diff edit ops tooling applies to it.
 pub const ui_provenance = @import("ui_provenance.zig");
@@ -644,11 +670,20 @@ pub const WidgetInvalidationKind = event_model.WidgetInvalidationKind;
 pub const WidgetInvalidation = event_model.WidgetInvalidation;
 pub const WidgetClipboardAction = event_model.WidgetClipboardAction;
 pub const widgetKeyboardClipboardAction = event_model.widgetKeyboardClipboardAction;
+pub const widgetKeyboardClipboardActionForWidget = event_model.widgetKeyboardClipboardActionForWidget;
+pub const WidgetTextHistoryAction = event_model.WidgetTextHistoryAction;
+pub const widgetKeyboardTextHistoryAction = event_model.widgetKeyboardTextHistoryAction;
+pub const WidgetTextBoundaryIntent = event_model.WidgetTextBoundaryIntent;
+pub const widgetKeyboardTextBoundaryIntent = event_model.widgetKeyboardTextBoundaryIntent;
 pub const widgetKeyboardNewlineTextEditEvent = event_model.widgetKeyboardNewlineTextEditEvent;
 pub const widgetCodeTabTextEditEvent = event_model.widgetCodeTabTextEditEvent;
 pub const widgetKeyboardTextEditEventForWidget = event_model.widgetKeyboardTextEditEventForWidget;
+pub const widgetKeyboardTextSubmit = event_model.widgetKeyboardTextSubmit;
 pub const widgetKindSingleLineTextEntry = event_model.widgetKindSingleLineTextEntry;
 pub const sanitizedSingleLineTextInputEvent = event_model.sanitizedSingleLineTextInputEvent;
+pub const sanitizedTextInputEventForWidget = event_model.sanitizedTextInputEventForWidget;
+pub const TextInputPreparation = event_model.TextInputPreparation;
+pub const widgetCompiledTextInput = event_model.widgetCompiledTextInput;
 pub const widgetKeyboardControlIntent = event_model.widgetKeyboardControlIntent;
 pub const semanticActions = event_model.semanticActions;
 pub const widgetSemanticControlIntent = event_model.widgetSemanticControlIntent;
@@ -657,6 +692,7 @@ pub const isWidgetActivationKey = event_model.isWidgetActivationKey;
 pub const isWidgetTextEntry = event_model.isWidgetTextEntry;
 pub const isWidgetMenuOpenArrowKey = event_model.isWidgetMenuOpenArrowKey;
 pub const widgetSliderKeyboardValue = event_model.widgetSliderKeyboardValue;
+pub const widgetCompiledSliderValue = event_model.widgetCompiledSliderValue;
 pub const widgetScrollKeyboardIntent = event_model.widgetScrollKeyboardIntent;
 pub const widgetScrollKeyboardDelta = event_model.widgetScrollKeyboardDelta;
 
@@ -694,6 +730,26 @@ pub const textWordSelectionAtOffset = text_model.textWordSelectionAtOffset;
 pub const textLineSelectionAtOffset = text_model.textLineSelectionAtOffset;
 pub const textLineStartOffset = text_model.textLineStartOffset;
 pub const textLineEndOffset = text_model.textLineEndOffset;
+pub const widgetCompiledTextPointerSelection = event_model.widgetCompiledTextPointerSelection;
+pub const TextClipboardPolicyResult = event_model.TextClipboardPolicyResult;
+pub const widgetTextClipboardState = event_model.widgetTextClipboardState;
+pub const widgetCompiledTextEdit = event_model.widgetCompiledTextEdit;
+pub const TextReconcilePolicyState = event_model.TextReconcilePolicyState;
+pub const TextReconcilePolicyResult = event_model.TextReconcilePolicyResult;
+pub const widgetCompiledTextReconcile = event_model.widgetCompiledTextReconcile;
+pub const TextHistoryReplayState = event_model.TextHistoryReplayState;
+pub const TextHistoryReplayResult = event_model.TextHistoryReplayResult;
+pub const widgetCompiledTextHistoryReplay = event_model.widgetCompiledTextHistoryReplay;
+pub const TextHistoryDelta = event_model.TextHistoryDelta;
+pub const TextHistoryRecordResult = event_model.TextHistoryRecordResult;
+pub const widgetCompiledTextHistoryDelta = event_model.widgetCompiledTextHistoryDelta;
+pub const TextCompositionHistoryState = event_model.TextCompositionHistoryState;
+pub const TextCompositionHistoryResult = event_model.TextCompositionHistoryResult;
+pub const widgetCompiledTextCompositionHistory = event_model.widgetCompiledTextCompositionHistory;
+pub const max_text_history_timeline_entries = event_model.max_text_history_timeline_entries;
+pub const TextHistoryTimelineEntry = event_model.TextHistoryTimelineEntry;
+pub const TextHistoryTimelineResult = event_model.TextHistoryTimelineResult;
+pub const widgetCompiledTextHistoryTimeline = event_model.widgetCompiledTextHistoryTimeline;
 
 pub const sampleCanvasRenderAnimations = render_model.sampleCanvasRenderAnimations;
 
@@ -809,7 +865,9 @@ pub const relayoutAnchoredChildren = @import("widget_layout.zig").relayoutAnchor
 pub const relayoutAnchoredChildrenWithRootBounds = @import("widget_layout.zig").relayoutAnchoredChildrenWithRootBounds;
 pub const relayoutAnchoredChildrenAtDepth = @import("widget_layout.zig").relayoutAnchoredChildrenAtDepth;
 pub const anchoredNestingDepth = @import("widget_layout.zig").anchoredNestingDepth;
+pub const anchoredNestingDepthWithTokens = @import("widget_layout.zig").anchoredNestingDepthWithTokens;
 pub const maxAnchoredNestingDepth = @import("widget_layout.zig").maxAnchoredNestingDepth;
+pub const maxAnchoredNestingDepthWithTokens = @import("widget_layout.zig").maxAnchoredNestingDepthWithTokens;
 pub const widgetLayoutRootBounds = @import("widget_render.zig").widgetLayoutRootBounds;
 /// Window-control reservation trigger (widget_layout.zig): true when a
 /// laid-out tree left drag-header CONTENT under the OS window-control
@@ -823,8 +881,15 @@ pub const windowDragContentUnderWindowControls = @import("widget_layout.zig").wi
 pub const splitDividerExtent = @import("widget_layout.zig").splitDividerExtent;
 pub const splitFractionBounds = @import("widget_layout.zig").splitFractionBounds;
 pub const splitEffectiveFraction = @import("widget_layout.zig").splitEffectiveFraction;
+pub const widgetSplitEffectiveFraction = @import("widget_layout.zig").widgetSplitEffectiveFraction;
+pub const widgetCompiledSplitValue = @import("events.zig").widgetCompiledSplitValue;
+pub const widgetCompiledResizableWidth = @import("events.zig").widgetCompiledResizableWidth;
+pub const ScrollPolicyRequest = @import("events.zig").ScrollPolicyRequest;
+pub const widgetCompiledScrollResult = @import("events.zig").widgetCompiledScrollResult;
+pub const SplitPolicyRequest = @import("events.zig").SplitPolicyRequest;
 pub const relayoutSplitChildren = @import("widget_layout.zig").relayoutSplitChildren;
 pub const slideSplitChildren = @import("widget_layout.zig").slideSplitChildren;
+pub const slideSplitChildrenWithTokens = @import("widget_layout.zig").slideSplitChildrenWithTokens;
 /// The layout audit (layout_audit.zig): a machine pass over a laid-out
 /// tree that reports clipped/overflowing text, overlapping flow siblings,
 /// content escaping its clip scope, and undersized pointer targets — plus
@@ -849,6 +914,26 @@ pub const pseudo_locale_text_expansion = @import("layout_audit.zig").pseudo_loca
 /// (the markup lint in ui_markup.zig is the source-level half). The
 /// sweep helper (`canvas.a11y.expectA11yAuditSweepClean`, re-exported
 /// below) is adopted by the example suites like the layout audit's.
+pub const widget_routing_policy = @import("widget_routing_policy.zig");
+pub const widget_change_policy = @import("widget_change_policy.zig");
+pub const widget_paint_policy = @import("widget_paint_policy.zig");
+pub const widget_presentation_policy = @import("widget_presentation_policy.zig");
+pub const widget_paint_walk_policy = @import("widget_paint_walk_policy.zig");
+pub const control_geometry_policy = @import("control_geometry_policy.zig");
+pub const control_content_policy = @import("control_content_policy.zig");
+pub const surface_recipe_policy = @import("surface_recipe_policy.zig");
+pub const widget_metric_policy = @import("widget_metric_policy.zig");
+pub const intrinsic_measure_policy = @import("intrinsic_measure_policy.zig");
+pub const measurement_coordination_policy = @import("measurement_coordination_policy.zig");
+pub const flow_measurement_policy = @import("flow_measurement_policy.zig");
+pub const layout_coordination_policy = @import("layout_coordination_policy.zig");
+pub const render_coordination_policy = @import("render_coordination_policy.zig");
+pub const control_command_policy = @import("control_command_policy.zig");
+pub const control_payload_policy = @import("control_payload_policy.zig");
+pub const control_primitive_policy = @import("control_primitive_policy.zig");
+/// Draw caller-owned vector paths using the configured portable primitive owner.
+pub const emitVectorIcon = @import("widget_render_controls.zig").emitVectorIconWithTokens;
+pub const widget_audit_policy = @import("widget_audit_policy.zig");
 pub const a11y = @import("a11y_audit.zig");
 pub const expectA11yAuditSweepClean = a11y.expectA11yAuditSweepClean;
 /// Minimum pointer hit-target register (tokens.zig): the floor the layout
@@ -863,6 +948,9 @@ pub const writeCanvasGpuPacketJson = serialization.writeCanvasGpuPacketJson;
 pub const writeCanvasGpuPacketBinary = serialization.writeCanvasGpuPacketBinary;
 pub const writeCanvasGpuPacketBinaryHeader = serialization.writeCanvasGpuPacketBinaryHeader;
 pub const writeCanvasGpuCommandBinaryKeyed = serialization.writeCanvasGpuCommandBinaryKeyed;
+pub const GpuPacketPreparationPolicy = @import("gpu_packet_preparation_policy.zig");
+pub const GpuPresentationPolicy = @import("gpu_presentation_policy.zig");
+pub const CanvasFrameCoordinationPolicy = @import("canvas_frame_coordination_policy.zig");
 pub const canvasGpuCommandFingerprint = serialization.canvasGpuCommandFingerprint;
 pub const canvasGpuPacketCommandKey = serialization.canvasGpuPacketCommandKey;
 pub const binary_packet_magic = serialization.binary_packet_magic;
@@ -871,4 +959,19 @@ pub const binary_packet_load_action_patch = serialization.binary_packet_load_act
 
 test {
     _ = @import("tests.zig");
+    _ = @import("decision_reuse.zig");
 }
+
+/// Copied portable leaf command and geometry plans.
+pub const leaf_plan_policy = @import("leaf_plan_policy.zig");
+pub const chart_plan_policy = @import("chart_plan_policy.zig");
+pub const indicator_plan_policy = @import("indicator_plan_policy.zig");
+pub const effect_plan_policy = @import("effect_plan_policy.zig");
+
+pub const text_scalar_policy = @import("text_scalar_policy.zig");
+/// Exact reuse of decisions from policies that answer from their request bytes alone.
+pub const decision_reuse = @import("decision_reuse.zig");
+pub const registered_font_policy = @import("registered_font_policy.zig");
+
+pub const GpuPlanningPolicy = @import("gpu_planning_policy.zig");
+pub const VectorRasterPolicy = @import("vector_raster_policy.zig");

@@ -1,0 +1,29 @@
+<column padding="28" gap="18">
+  <text size="heading">Gesture Lab</text>
+  <text foreground="text_muted">Press to count. Hold for a note. One gesture, one action.</text>
+  <row gap="12">
+    <badge>Presses {presses}</badge>
+    <badge>Holds {holds}</badge>
+  </row>
+  <if test="{visible}">
+    <button global-key="hold-card" height="100" disabled="{disabled}" on-press="pressed" on-hold="held:{message}">Press or hold this card</button>
+  </if>
+  <else><panel height="100"><text foreground="text_muted">Card removed</text></panel></else>
+  <panel padding="18">
+    <column gap="8">
+      <text>LAST NOTE</text>
+      <text size="heading">{last}</text>
+      <text foreground="text_muted">Next hold: {message}</text>
+    </column>
+  </panel>
+  <row gap="8">
+    <button on-press="change_message">Change note</button>
+    <button on-press="toggle_disabled">Toggle disabled</button>
+    <button on-press="toggle_visible">Toggle card</button>
+  </row>
+  <row gap="8">
+    <button on-press="pressed">Press only</button>
+    <button on-press="stamp">Stamp</button>
+  </row>
+  <text foreground="text_muted">Clock {stampedMs}</text>
+</column>

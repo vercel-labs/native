@@ -72,14 +72,15 @@ const builtin = @import("builtin");
 const canvas = @import("canvas");
 const canvas_limits = @import("canvas_limits.zig");
 const platform = @import("../platform/root.zig");
-const validation = @import("validation.zig");
 const runtime_clock = @import("clock.zig");
 const persist_store = @import("persist_store.zig");
 const record_store = @import("record_store.zig");
 const relational_store = @import("relational_store.zig");
 const credentials_store = @import("credentials_store.zig");
+const keyboard_input = @import("keyboard_input.zig");
 const file_access = @import("file_access.zig");
 const pty_transport = @import("pty.zig");
+const global_shortcuts_mod = @import("global_shortcuts.zig");
 
 /// Maximum in-flight effects (spawn slots / worker threads).
 pub const max_effects: usize = 16;
@@ -374,6 +375,9 @@ pub const WindowActionBinding = struct {
     minimize_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     hide_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
     show_fn: *const fn (context: *anyopaque, window_label: []const u8) bool,
+    /// Replay the synchronous show bookkeeping without an OS call. The
+    /// later native frame event must not delay keyboard-focus loss.
+    replay_show_fn: ?*const fn (context: *anyopaque, window_label: []const u8) void = null,
     dock_presence_fn: *const fn (context: *anyopaque, visible: bool) bool,
     quit_fn: *const fn (context: *anyopaque) bool,
 };
@@ -387,6 +391,11 @@ pub const SystemServiceBinding = struct {
     open_external_url_fn: *const fn (context: *anyopaque, url: []const u8) anyerror!void,
     reveal_path_fn: *const fn (context: *anyopaque, path: []const u8) anyerror!void,
     format_local_time_fn: *const fn (context: *anyopaque, timestamp_ms: i64, style: platform.LocalTimeStyle, buffer: []u8) anyerror![]const u8,
+    execute_capability_fn: ?*const fn (context: *anyopaque, name: []const u8, payload: []const u8, output: []u8) anyerror![]const u8 = null,
+    /// Restore only runtime window bookkeeping from a journaled successful
+    /// capability, without invoking native window focus or close services.
+    replay_window_result_fn: ?*const fn (context: *anyopaque, label: []const u8, closed: bool) void = null,
+    keyboard_input: ?keyboard_input.Binding = null,
 };
 
 /// Type-erased handle to the embedding host's named-command services,
@@ -432,6 +441,21 @@ pub const HostChannelBinding = struct {
     context: *anyopaque,
     acquire_fn: *const fn (context: *anyopaque, key: u64) ?ChannelHandle,
 };
+
+/// Loop-thread startup only. Implementations copy arguments before returning
+/// and may retain the generation-safe handle; they must not reenter the UI.
+pub const HostChannelSourceBinding = struct {
+    context: *anyopaque,
+    start_fn: *const fn (context: *anyopaque, name: []const u8, payload: []const u8, handle: ChannelHandle) anyerror!void,
+};
+pub const EffectChannelSourceState = enum(u8) { skipped, started, failed };
+pub const EffectChannelSourceResult = struct {
+    key: u64,
+    state: EffectChannelSourceState,
+    bytes: []const u8 = "",
+};
+pub const max_channel_source_payload = 4096;
+const max_channel_source_request = 1 + max_effect_host_name_bytes + 4 + max_channel_source_payload;
 
 pub const HostCallCompletion = struct {
     key: u64,
@@ -1266,6 +1290,9 @@ pub const EffectAudioCaptureEvent = struct {
 const audio_capture_packet_header_bytes: usize = 24;
 const audio_capture_packet_magic = "AC01";
 
+pub const EffectGlobalShortcutEventKind = global_shortcuts_mod.EffectGlobalShortcutEventKind;
+pub const EffectGlobalShortcutEvent = global_shortcuts_mod.EffectGlobalShortcutEvent;
+
 /// Convert the channel envelope used internally by capture into its public
 /// typed event. Also useful to native integrations that intentionally route
 /// capture through a generic `channelMsg` handler.
@@ -2030,6 +2057,12 @@ pub const EffectResultKind = enum(u8) {
     /// salted digest and length; replay synthesizes same-length placeholder
     /// bytes and never consults an OS keychain.
     credentials = 18,
+    /// Successful native window bookkeeping, at execution rather than Msg
+    /// delivery. `code` is 0 for focus and 1 for close; the complete copied
+    /// request and correlated reply ride `payload` and `stderr_tail`.
+    window_execution = 19,
+    /// Immediate external producer startup; request rides payload, error rides stderr_tail.
+    channel_source = 20,
 };
 
 /// Journaled wall-clock reads buffered for replay (`Effects.wallMs`).
@@ -2952,6 +2985,15 @@ pub fn Effects(comptime Msg: type) type {
             }.make;
         }
 
+        /// Msg constructor for `setGlobalShortcuts` reports.
+        pub fn globalShortcutMsg(comptime tag: std.meta.Tag(Msg)) ChannelMsgFn {
+            return struct {
+                fn make(event: EffectChannelEvent) Msg {
+                    return @unionInit(Msg, @tagName(tag), global_shortcuts_mod.decodeChannelEvent(event));
+                }
+            }.make;
+        }
+
         /// Comptime Msg constructor for `on_event` of pty effects:
         /// `ptyMsg(.shell)` builds `Msg{ .shell = event }` — the
         /// variant's payload type must be `native_sdk.EffectPtyEvent`.
@@ -3042,6 +3084,8 @@ pub fn Effects(comptime Msg: type) type {
         /// valid until the fetch's response is drained.
         pub const FetchRequest = struct {
             key: u64,
+            generation: u64 = 0,
+            timeout_ms: u32 = 0,
             method: std.http.Method,
             url: []const u8,
             headers: []const std.http.Header,
@@ -3083,9 +3127,10 @@ pub fn Effects(comptime Msg: type) type {
         /// valid until the result is fed and drained.
         pub const FileRequest = struct {
             key: u64,
+            generation: u64 = 0,
             op: EffectFileOp,
             path: []const u8,
-            /// The bytes a `writeFile` would write; `""` for reads.
+            /// The bytes a `writeFile` or `appendFile` would write; `""` for reads.
             bytes: []const u8 = "",
         };
 
@@ -3158,6 +3203,7 @@ pub fn Effects(comptime Msg: type) type {
         /// stays valid until the result is fed and drained.
         pub const ClipboardRequest = struct {
             key: u64,
+            generation: u64 = 0,
             op: EffectClipboardOp,
             /// The text a `writeClipboard` would write; `""` for reads.
             text: []const u8 = "",
@@ -3434,6 +3480,12 @@ pub fn Effects(comptime Msg: type) type {
             /// Use `Effects.audioCaptureMsg(.tag)` for a typed payload.
             on_event: ChannelMsgFn,
             max_pending: u32 = max_effect_channel_pending,
+        };
+
+        pub const SetGlobalShortcutsOptions = struct {
+            key: u64,
+            shortcuts: []const platform.Shortcut,
+            on_event: ChannelMsgFn,
         };
 
         pub const PtySpawnOptions = struct {
@@ -4480,6 +4532,24 @@ pub fn Effects(comptime Msg: type) type {
             }
         };
 
+        const ReplayChannelSource = struct {
+            key: u64,
+            state: EffectChannelSourceState,
+            request_len: usize,
+            request: [max_channel_source_request]u8,
+            failure_len: u8,
+            failure: [255]u8,
+        };
+
+        const ReplayWindowExecution = struct {
+            key: u64,
+            closed: bool,
+            request_len: u16,
+            request: [293]u8,
+            reply_len: u8,
+            reply: [38]u8,
+        };
+
         const Slot = struct {
             state: std.atomic.Value(SlotState) = std.atomic.Value(SlotState).init(.idle),
             generation: u32 = 0,
@@ -4596,6 +4666,11 @@ pub fn Effects(comptime Msg: type) type {
             /// credential slots or letting an older set finish last.
             credentials_waiting: bool = false,
             credentials_sequence: u64 = 0,
+            // Desktop calls can enter AppKit or remove runtime views. UiApp
+            // executes them only after its current rebuild has settled.
+            desktop_waiting: bool = false,
+            replay_window_reply_len: u8 = 0,
+            replay_window_reply: [38]u8 = undefined,
             // ---- image-only fields (kind == .image) ----
             on_image: ?ImageMsgFn = null,
             /// The local source path (the URL rides `url_storage`, a
@@ -4864,6 +4939,11 @@ pub fn Effects(comptime Msg: type) type {
         /// requests reject loudly in real mode, and the fake executor
         /// parks requests for `feedHostResult` regardless.
         host_calls: ?HostCallBinding = null,
+        channel_sources: ?HostChannelSourceBinding = null,
+        replay_channel_sources: [64]ReplayChannelSource = undefined,
+        replay_channel_source_len: usize = 0,
+        replay_channel_source_diverged: bool = false,
+        channel_source_reply: [255]u8 = undefined,
         /// Capability-installed record-store service. Store commands are
         /// SDK-reserved routed requests, so their results reuse the request
         /// journal/replay path while the database handle stays host-owned.
@@ -4969,6 +5049,9 @@ pub fn Effects(comptime Msg: type) type {
         fetch_start_rejections: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
         next_generation: u32 = 1,
         next_credentials_sequence: u64 = 1,
+        defer_desktop_capabilities: bool = false,
+        flushing_desktop_capabilities: bool = false,
+        system_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
         /// The channel family's OWN generation counter — u64 and
         /// monotonic for the process's lifetime, never the shared u32
         /// `next_generation` above: channel handles live on app-owned
@@ -5008,6 +5091,7 @@ pub fn Effects(comptime Msg: type) type {
         /// channel table; this tiny loop-side mirror exists to quiesce native
         /// audio callbacks before closing/reusing their channel occupancy.
         audio_capture_slots: [2]AudioCaptureSlot = [_]AudioCaptureSlot{.{}} ** 2,
+        global_shortcuts: global_shortcuts_mod.Session = .{},
         /// Monotonic post-order stamp shared by every channel's staging
         /// FIFO and the close markers: the cross-channel delivery order
         /// and the drain boundary's causality cut (posts stamped at or
@@ -5106,6 +5190,9 @@ pub fn Effects(comptime Msg: type) type {
         /// after (freed when the queue empties, and at `deinit`) — the
         /// pending stages' storage discipline.
         replay_video_sources: [max_effect_replay_video_source_entries]ReplayVideoSource = undefined,
+        replay_window_executions: [64]ReplayWindowExecution = undefined,
+        replay_window_execution_len: usize = 0,
+        replay_window_diverged: bool = false,
         replay_video_source_spill: []ReplayVideoSource = &.{},
         replay_video_source_len: usize = 0,
         /// A journaled cascade resolution paired against a different
@@ -5113,6 +5200,7 @@ pub fn Effects(comptime Msg: type) type {
         /// for `finishReplay`, which turns it into the divergence
         /// refusal the void-returning `loadVideo` cannot raise itself.
         replay_video_diverged: bool = false,
+        replay_audio_diverged: bool = false,
         /// Drain-pass counter (incremented in `drainBoundary`): the
         /// retired-video sweep's clock. Loop-thread only.
         drain_pass_seq: u64 = 0,
@@ -5251,6 +5339,10 @@ pub fn Effects(comptime Msg: type) type {
                 }
                 capture.* = .{};
             }
+            if (self.global_shortcuts.platform_configured) {
+                if (self.services) |services| services.configureGlobalShortcuts(&.{}, .{}, &.{}) catch {};
+            }
+            self.global_shortcuts = .{};
             // Silence the platform audio player (best effort) and clear
             // the channel.
             if (self.audio.active and !self.audio.fake) {
@@ -6337,12 +6429,21 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         /// End-of-journal consistency check (the `.finish` replay
-        /// control): every journaled video cascade resolution must have
+        /// control): synchronous audio deliveries must match and leave no
+        /// fed results pending; every journaled video cascade resolution must have
         /// been consumed by the load it named, and none may have paired
         /// against a different key. A leftover or mismatched record
         /// means the replayed updates issued different loads than the
         /// recording — divergence, not success.
-        pub fn finishReplay(self: *Self) error{ReplayVideoDivergence}!void {
+        pub fn finishReplay(self: *Self) error{ ReplayAudioDivergence, ReplayVideoDivergence, ReplayWindowDivergence, ReplayChannelSourceDivergence }!void {
+            if (self.replay_channel_source_diverged or self.replay_channel_source_len != 0) return error.ReplayChannelSourceDivergence;
+            if (self.replay_window_diverged or self.replay_window_execution_len != 0) return error.ReplayWindowDivergence;
+            for (&self.slots) |*slot| if (slot.replay_window_reply_len != 0) return error.ReplayWindowDivergence;
+            if (self.replay_audio_diverged) return error.ReplayAudioDivergence;
+            for (0..self.pending_exit_len) |offset| {
+                const entry = self.pending_exits[(self.pending_exit_head + offset) % max_effect_pending_exits];
+                if (entry == .audio and entry.audio.resolve) return error.ReplayAudioDivergence;
+            }
             if (self.replay_video_diverged) return error.ReplayVideoDivergence;
             if (self.replay_video_source_len > 0) {
                 std.debug.print(
@@ -7695,11 +7796,76 @@ pub fn Effects(comptime Msg: type) type {
             return .{ .shared = shared, .generation = generation };
         }
 
-        /// The thread-safe posting handle of the OPEN channel with
-        /// `key`, for callers that did not keep `openChannel`'s return
-        /// (an embedder resolving a channel a transpiled core opened).
-        /// Null while no open channel holds the key — including the
-        /// `.closing` window, where posts could no longer land anyway.
+        /// Capture startup truth before publishing the issuing dispatch. The
+        /// handle must come from this open, never a same-key old occupancy.
+        /// Returned failure bytes are borrowed until the next source start.
+        pub fn startChannelSource(self: *Self, key: u64, handle: ?ChannelHandle, name: []const u8, payload: []const u8) EffectChannelSourceResult {
+            std.debug.assert(name.len > 0 and name.len <= max_effect_host_name_bytes and payload.len <= max_channel_source_payload);
+            var request: [max_channel_source_request]u8 = undefined;
+            request[0] = @intCast(name.len);
+            @memcpy(request[1..][0..name.len], name);
+            std.mem.writeInt(u32, request[1 + name.len ..][0..4], @intCast(payload.len), .little);
+            @memcpy(request[5 + name.len ..][0..payload.len], payload);
+            const encoded = request[0 .. 5 + name.len + payload.len];
+            if (self.replay) {
+                if (self.replay_channel_source_len == 0) {
+                    self.replay_channel_source_diverged = true;
+                    return .{ .key = key, .state = .failed, .bytes = "replay_diverged" };
+                }
+                const entry = &self.replay_channel_sources[0];
+                if (entry.key != key or !std.mem.eql(u8, encoded, entry.request[0..entry.request_len]) or
+                    ((entry.state == .skipped) != (handle == null))) self.replay_channel_source_diverged = true;
+                const state = entry.state;
+                const len = entry.failure_len;
+                @memcpy(self.channel_source_reply[0..len], entry.failure[0..len]);
+                self.replay_channel_source_len -= 1;
+                std.mem.copyForwards(ReplayChannelSource, self.replay_channel_sources[0..self.replay_channel_source_len], self.replay_channel_sources[1 .. self.replay_channel_source_len + 1]);
+                return .{ .key = key, .state = state, .bytes = self.channel_source_reply[0..len] };
+            }
+            var result: EffectChannelSourceResult = .{ .key = key, .state = .skipped };
+            if (handle) |live| {
+                if (live.live()) {
+                    result.state = .started;
+                    const outcome = if (self.channel_sources) |binding|
+                        binding.start_fn(binding.context, name, payload, live)
+                    else if (self.executor == .fake)
+                        error.UnsupportedChannelSource
+                    else
+                        @import("channel_sources.zig").start(name, payload, live);
+                    outcome catch |err| {
+                        result.state = .failed;
+                        const failure = @errorName(err);
+                        result.bytes = failure[0..@min(failure.len, self.channel_source_reply.len)];
+                    };
+                }
+            }
+            self.journalNote(.{ .kind = .channel_source, .key = key, .code = @intFromEnum(result.state), .payload = encoded, .stderr_tail = result.bytes });
+            return result;
+        }
+
+        pub fn pushReplayChannelSource(self: *Self, record: EffectResultRecord) !void {
+            const canonical: EffectResultRecord = .{ .kind = .channel_source, .key = record.key, .code = record.code, .payload = record.payload, .stderr_tail = record.stderr_tail };
+            if (!self.replay or record.kind != .channel_source or record.code < 0 or record.code > 2 or
+                !std.meta.eql(record, canonical) or record.payload.len < 6 or record.payload.len > max_channel_source_request or
+                record.stderr_tail.len > 255 or (record.code == 2) != (record.stderr_tail.len != 0)) return error.ReplayDamagedRecord;
+            const name_len: usize = record.payload[0];
+            if (name_len == 0 or record.payload.len < 5 + name_len or
+                !std.unicode.utf8ValidateSlice(record.payload[1..][0..name_len]) or
+                std.mem.readInt(u32, record.payload[1 + name_len ..][0..4], .little) != record.payload.len - 5 - name_len or
+                record.payload.len - 5 - name_len > max_channel_source_payload) return error.ReplayDamagedRecord;
+            if (self.replay_channel_source_len == self.replay_channel_sources.len) return error.ReplayChannelSourceDivergence;
+            const entry = &self.replay_channel_sources[self.replay_channel_source_len];
+            entry.key = record.key;
+            entry.state = @enumFromInt(record.code);
+            entry.request_len = record.payload.len;
+            @memcpy(entry.request[0..record.payload.len], record.payload);
+            entry.failure_len = @intCast(record.stderr_tail.len);
+            @memcpy(entry.failure[0..record.stderr_tail.len], record.stderr_tail);
+            self.replay_channel_source_len += 1;
+        }
+
+        /// Resolve the open occupancy's generation-safe posting handle.
+        /// Closing and absent occupancies have no handle.
         pub fn channelHandle(self: *Self, key: u64) ?ChannelHandle {
             for (&self.channel_slots) |*slot| {
                 if (slot.state == .open and slot.key == key) {
@@ -7806,6 +7972,80 @@ pub fn Effects(comptime Msg: type) type {
             if (result != .accepted) return error.EffectQueueFull;
         }
 
+        /// Register or replace the app's global shortcut set.
+        pub fn setGlobalShortcuts(self: *Self, options: SetGlobalShortcutsOptions) void {
+            const session = &self.global_shortcuts;
+            if (session.active and session.key != options.key) {
+                self.rejectChannel(options.key, options.on_event, true);
+                return;
+            }
+            if (!session.active) {
+                if (self.keyOccupiedUntilDelivery(options.key)) {
+                    self.rejectChannel(options.key, options.on_event, true);
+                    return;
+                }
+                _ = self.openChannel(.{ .key = options.key, .on_event = options.on_event });
+                if (self.findChannelSlot(options.key) == null) return;
+                session.* = .{ .active = true, .key = options.key };
+            }
+            const handle = self.channelHandle(options.key) orelse return;
+            if (!handle.live()) return;
+
+            var accepted: [platform.max_global_shortcuts]platform.Shortcut = undefined;
+            var accepted_count: usize = 0;
+            for (options.shortcuts) |shortcut| {
+                if (global_shortcuts_mod.admissible(shortcut, accepted[0..accepted_count])) {
+                    accepted[accepted_count] = shortcut;
+                    accepted_count += 1;
+                } else {
+                    postGlobalShortcutReport(handle, .rejected, shortcut);
+                }
+            }
+
+            var statuses: [platform.max_global_shortcuts]platform.GlobalShortcutStatus = undefined;
+            var unsupported = false;
+            if (self.executor == .fake) {
+                for (accepted[0..accepted_count], 0..) |shortcut, index| {
+                    statuses[index] = .registered;
+                    for (accepted[0..index]) |earlier| {
+                        if (platform.sameShortcutCombination(earlier, shortcut)) statuses[index] = .conflict;
+                    }
+                }
+            } else if (self.services) |services| {
+                services.configureGlobalShortcuts(accepted[0..accepted_count], globalShortcutSink(handle), statuses[0..accepted_count]) catch {
+                    unsupported = true;
+                };
+                session.platform_configured = session.platform_configured or !unsupported;
+            } else {
+                unsupported = true;
+            }
+
+            var next: [platform.max_global_shortcuts]global_shortcuts_mod.Binding = undefined;
+            for (accepted[0..accepted_count], 0..) |shortcut, index| {
+                const kind: EffectGlobalShortcutEventKind = if (unsupported) .unsupported else switch (statuses[index]) {
+                    inline else => |status| @field(EffectGlobalShortcutEventKind, @tagName(status)),
+                };
+                const unchanged = if (session.find(shortcut.id)) |previous| previous.shortcut.matches(shortcut) and previous.kind == .registered else false;
+                if (!unchanged or kind != .registered) postGlobalShortcutReport(handle, kind, shortcut);
+                next[index] = .{ .shortcut = .init(shortcut), .kind = kind };
+            }
+            @memcpy(session.bindings[0..accepted_count], next[0..accepted_count]);
+            session.count = accepted_count;
+        }
+
+        /// Unregister the set; reports end with `stopped`.
+        pub fn clearGlobalShortcuts(self: *Self, key: u64) void {
+            if (!self.global_shortcuts.active or self.global_shortcuts.key != key) return;
+            self.closeChannel(key);
+        }
+
+        fn releaseGlobalShortcuts(self: *Self) void {
+            if (self.global_shortcuts.platform_configured) {
+                if (self.services) |services| services.configureGlobalShortcuts(&.{}, globalShortcutSink(self.channelHandle(self.global_shortcuts.key) orelse .{}), &.{}) catch {};
+            }
+            self.global_shortcuts = .{};
+        }
+
         /// Close the open channel with `key`: posts stop landing
         /// immediately (the handle answers `.closed`), the staged
         /// backlog flushes in post order, and exactly one terminal
@@ -7815,6 +8055,7 @@ pub fn Effects(comptime Msg: type) type {
         /// is NOT a channel's close (channels end the way audio does:
         /// through their own verb).
         pub fn closeChannel(self: *Self, key: u64) void {
+            if (self.global_shortcuts.active and self.global_shortcuts.key == key) self.releaseGlobalShortcuts();
             if (self.findAudioCaptureByKey(key)) |capture| {
                 if (capture.platform_started) {
                     if (self.services) |services| services.audioCaptureStop(capture.source) catch {};
@@ -8592,7 +8833,7 @@ pub fn Effects(comptime Msg: type) type {
         /// user-visible side effect.
         pub fn showNotification(self: *Self, options: platform.NotificationOptions) void {
             if (self.executor == .fake or self.replay) return;
-            validation.validateNotificationOptions(options) catch return;
+            @import("system_admission_policy.zig").notification(self.system_admission_policy, options) catch return;
             const services = self.services orelse return;
             services.showNotification(options) catch {};
         }
@@ -9346,6 +9587,40 @@ pub fn Effects(comptime Msg: type) type {
             self.startHostRequest(options, max_effect_host_payload_bytes, max_effect_host_result_bytes, null, null, null);
         }
 
+        pub const KeyChordOptions = struct {
+            key: u64,
+            chord: platform.KeyChord,
+            on_result: ?HostMsgFn = null,
+        };
+
+        pub const KeyboardAccessOptions = struct {
+            key: u64,
+            prompt: bool = false,
+            on_result: ?HostMsgFn = null,
+        };
+
+        /// Post a key chord to the focused app; requires the `keyboard_input` permission.
+        pub fn sendKeyChord(self: *Self, options: KeyChordOptions) void {
+            var payload: [keyboard_input.max_chord_payload_bytes]u8 = undefined;
+            self.hostRequest(.{
+                .key = options.key,
+                .name = keyboard_input.send_chord_name,
+                .payload = keyboard_input.encodeChord(&payload, options.chord),
+                .on_result = options.on_result,
+            });
+        }
+
+        /// Ask for the OS grant; the ok bytes are `granted`, `denied`, or `not_required`.
+        pub fn keyboardAccessStatus(self: *Self, options: KeyboardAccessOptions) void {
+            const payload = [_]u8{@intFromBool(options.prompt)};
+            self.hostRequest(.{
+                .key = options.key,
+                .name = keyboard_input.access_status_name,
+                .payload = &payload,
+                .on_result = options.on_result,
+            });
+        }
+
         fn startHostRequest(
             self: *Self,
             options: HostRequestOptions,
@@ -9470,6 +9745,8 @@ pub fn Effects(comptime Msg: type) type {
             slot.on_file = null;
             slot.on_clipboard = null;
             slot.on_host = options.on_result;
+            slot.desktop_waiting = false;
+            slot.replay_window_reply_len = 0;
             slot.on_credentials = credentials_fn;
             slot.cancel_requested.store(false, .release);
             // `cancelled_generation` stays sticky, exactly as in `spawn`.
@@ -9494,7 +9771,10 @@ pub fn Effects(comptime Msg: type) type {
 
             // Fake mode (tests and session replay) parks here: the feed
             // is the only terminal source.
-            if (fake) return;
+            if (fake) {
+                slot.desktop_waiting = self.defer_desktop_capabilities and @import("desktop_files.zig").isName(slot.hostName());
+                return;
+            }
             if (store_op) |operation| {
                 if (operation == .get or operation == .scan) {
                     self.performBoundStoreRequest(slot.hostName(), options.key, slot.fetchPayload());
@@ -9508,6 +9788,10 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             }
             if (native_request) {
+                if (self.defer_desktop_capabilities and @import("desktop_files.zig").isName(slot.hostName())) {
+                    slot.desktop_waiting = true;
+                    return;
+                }
                 self.performNativeHostRequest(slot.hostName(), options.key, slot.fetchPayload());
                 return;
             }
@@ -9516,33 +9800,176 @@ pub fn Effects(comptime Msg: type) type {
         }
 
         fn isNativeHostRequestName(name: []const u8) bool {
-            return std.mem.startsWith(u8, name, "core.store.") or
+            return @import("desktop_files.zig").isName(name) or std.mem.startsWith(u8, name, "core.store.") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.status") or
                 std.mem.eql(u8, name, "native-sdk.launch-at-login.set") or
-                std.mem.eql(u8, name, "native-sdk.time.formatLocal");
+                std.mem.eql(u8, name, "native-sdk.time.formatLocal") or
+                keyboard_input.isRequestName(name);
         }
 
         fn isNativeHostSendName(name: []const u8) bool {
             return std.mem.eql(u8, name, "native-sdk.os.openUrl") or
+                std.mem.eql(u8, name, "native-sdk.debug.log") or
                 std.mem.eql(u8, name, "native-sdk.os.revealPath");
         }
 
         fn performNativeHostSend(self: *Self, name: []const u8, payload: []const u8) void {
+            if (std.mem.eql(u8, name, "native-sdk.debug.log")) {
+                if (payload.len <= 4096) std.debug.print("{s}", .{payload});
+                return;
+            }
             const binding = self.system_services orelse return;
             if (std.mem.eql(u8, name, "native-sdk.os.openUrl")) {
-                binding.open_external_url_fn(binding.context, payload) catch {};
+                binding.open_external_url_fn(binding.context, payload) catch |err| {
+                    if (err == error.NavigationDenied) {
+                        std.debug.print("native warning: external URL denied by security.navigation.external_links\n", .{});
+                    } else {
+                        std.debug.print("native warning: external URL open failed: {s}\n", .{@errorName(err)});
+                    }
+                };
             } else {
                 binding.reveal_path_fn(binding.context, payload) catch {};
             }
         }
 
+        /// Execute a captured batch in issue order after the view transaction.
+        /// Slots own copied payloads; cancellation and replacement invalidate
+        /// captured generations. Calls queued by a nested native event belong
+        /// to the next batch, and fake/replay executors never reach the OS.
+        pub fn flushDesktopCapabilities(self: *Self) void {
+            if (self.executor == .fake) {
+                if (self.replay) self.flushReplayWindowExecutions();
+                return;
+            }
+            if (self.flushing_desktop_capabilities) return;
+            self.flushing_desktop_capabilities = true;
+            defer self.flushing_desktop_capabilities = false;
+            const Pending = struct { index: usize, generation: u32 };
+            var pending: [total_effect_slots]Pending = undefined;
+            var count: usize = 0;
+            const boundary = self.next_generation;
+            for (&self.slots, 0..) |*slot, index| {
+                if (slot.kind != .host or slot.fake or !slot.desktop_waiting or slot.state.load(.acquire) != .running) continue;
+                var at = count;
+                while (at > 0 and boundary -% pending[at - 1].generation < boundary -% slot.generation) : (at -= 1) {
+                    pending[at] = pending[at - 1];
+                }
+                pending[at] = .{ .index = index, .generation = slot.generation };
+                count += 1;
+            }
+            for (pending[0..count]) |entry| {
+                const slot = &self.slots[entry.index];
+                if (slot.generation != entry.generation or slot.kind != .host or slot.fake or !slot.desktop_waiting or slot.state.load(.acquire) != .running) continue;
+                slot.desktop_waiting = false;
+                self.performDesktopCapability(entry.index);
+            }
+        }
+
+        fn feedDesktopResult(self: *Self, index: usize, generation: u32, ok: bool, bytes: []const u8) void {
+            const slot = &self.slots[index];
+            if (slot.kind != .host or slot.generation != generation or slot.state.load(.acquire) != .running) return;
+            self.feedHostResult(slot.key, ok, bytes) catch {};
+        }
+
+        fn performDesktopCapability(self: *Self, index: usize) void {
+            const slot = &self.slots[index];
+            const generation = slot.generation;
+            const key = slot.key;
+            const binding = self.system_services orelse return self.feedDesktopResult(index, generation, false, "unsupported");
+            const execute = binding.execute_capability_fn orelse return self.feedDesktopResult(index, generation, false, "unsupported");
+            // A modal native call can reenter the event loop and replace or
+            // cancel this slot. Keep its arguments alive independently and
+            // deliver only to the original occupancy when the call returns.
+            var name_storage: [max_effect_host_name_bytes]u8 = undefined;
+            const name = name_storage[0..slot.url_len];
+            @memcpy(name, slot.hostName());
+            const payload = self.allocator.dupe(u8, slot.fetchPayload()) catch return self.feedDesktopResult(index, generation, false, "unsupported");
+            defer self.allocator.free(payload);
+            const output = self.allocator.alloc(u8, max_effect_host_result_bytes) catch return self.feedDesktopResult(index, generation, false, "unsupported");
+            defer self.allocator.free(output);
+            const result = execute(binding.context, name, payload, output) catch |err| {
+                self.feedDesktopResult(index, generation, false, @errorName(err));
+                return;
+            };
+            if (desktopWindowSuccess(name, payload, result)) {
+                self.journalNote(.{ .kind = .window_execution, .key = key, .code = @intFromBool(std.mem.eql(u8, name, "native-sdk.window.closeResult")), .payload = payload, .stderr_tail = result });
+            }
+            self.feedDesktopResult(index, generation, true, result);
+        }
+
+        fn desktopWindowSuccess(name: []const u8, payload: []const u8, reply: []const u8) bool {
+            if (!std.mem.eql(u8, name, "native-sdk.window.focusResult") and !std.mem.eql(u8, name, "native-sdk.window.closeResult")) return false;
+            const desktop = @import("desktop_files.zig");
+            var request = desktop.request(payload) catch return false;
+            var response = desktop.request(reply) catch return false;
+            if (request.at != response.at or !std.mem.eql(u8, payload[0..request.at], reply[0..response.at])) return false;
+            const label = request.field() catch return false;
+            request.finish() catch return false;
+            const failure = response.field() catch return false;
+            response.finish() catch return false;
+            return failure.len == 0 and label.len > 0 and label.len <= 255 and std.mem.indexOfScalar(u8, label, 0) == null;
+        }
+
+        /// Execution facts can precede their triggering event, like clock
+        /// reads. Copy them until that event's settled view transaction claims
+        /// the exact request. Neither native calls nor application Msgs run.
+        pub fn pushReplayWindowExecution(self: *Self, record: EffectResultRecord) !void {
+            const name = if (record.code == 1) "native-sdk.window.closeResult" else "native-sdk.window.focusResult";
+            const canonical: EffectResultRecord = .{ .kind = .window_execution, .key = record.key, .code = record.code, .payload = record.payload, .stderr_tail = record.stderr_tail };
+            if (!self.replay or record.kind != .window_execution or record.code < 0 or record.code > 1 or
+                !std.meta.eql(record, canonical) or
+                record.payload.len > 293 or record.stderr_tail.len > 38 or
+                !desktopWindowSuccess(name, record.payload, record.stderr_tail)) return error.ReplayDamagedRecord;
+            if (self.replay_window_execution_len == self.replay_window_executions.len) return error.ReplayWindowDivergence;
+            const entry = &self.replay_window_executions[self.replay_window_execution_len];
+            entry.key = record.key;
+            entry.closed = record.code == 1;
+            entry.request_len = @intCast(record.payload.len);
+            @memcpy(entry.request[0..record.payload.len], record.payload);
+            entry.reply_len = @intCast(record.stderr_tail.len);
+            @memcpy(entry.reply[0..record.stderr_tail.len], record.stderr_tail);
+            self.replay_window_execution_len += 1;
+        }
+
+        fn flushReplayWindowExecutions(self: *Self) void {
+            while (self.replay_window_execution_len > 0) {
+                const entry = &self.replay_window_executions[0];
+                const index = self.findActiveSlot(entry.key) orelse break;
+                const slot = &self.slots[index];
+                const name = if (entry.closed) "native-sdk.window.closeResult" else "native-sdk.window.focusResult";
+                if (slot.kind != .host or !slot.fake or (self.defer_desktop_capabilities and !slot.desktop_waiting) or slot.state.load(.acquire) != .running or
+                    !std.mem.eql(u8, slot.hostName(), name) or !std.mem.eql(u8, slot.fetchPayload(), entry.request[0..entry.request_len])) break;
+                if (slot.replay_window_reply_len != 0) {
+                    self.replay_window_diverged = true;
+                    break;
+                }
+                slot.desktop_waiting = false;
+                slot.replay_window_reply_len = entry.reply_len;
+                @memcpy(slot.replay_window_reply[0..entry.reply_len], entry.reply[0..entry.reply_len]);
+                self.restoreDesktopWindowResult(slot, entry.reply[0..entry.reply_len]);
+                self.replay_window_execution_len -= 1;
+                std.mem.copyForwards(ReplayWindowExecution, self.replay_window_executions[0..self.replay_window_execution_len], self.replay_window_executions[1 .. self.replay_window_execution_len + 1]);
+            }
+        }
+
         fn performNativeHostRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
+            if (@import("desktop_files.zig").isName(name)) {
+                self.performDesktopCapability(self.findActiveSlot(key) orelse return);
+                return;
+            }
             if (std.mem.startsWith(u8, name, "core.store.")) {
                 self.performBoundStoreRequest(name, key, payload);
                 return;
             }
             if (std.mem.eql(u8, name, "native-sdk.time.formatLocal")) {
                 self.performBoundSystemRequest(name, key, payload);
+                return;
+            }
+            if (keyboard_input.isRequestName(name)) {
+                const binding = (self.system_services orelse return self.feedUnsupportedNativeRequest(key)).keyboard_input orelse
+                    return self.feedUnsupportedNativeRequest(key);
+                const result = keyboard_input.execute(binding, name, payload);
+                self.feedHostResult(key, result.ok, result.bytes) catch {};
                 return;
             }
             const services = self.services orelse {
@@ -9570,6 +9997,10 @@ pub fn Effects(comptime Msg: type) type {
                 return;
             };
             self.feedHostResult(key, true, launchAtLoginStatusName(status)) catch {};
+        }
+
+        fn feedUnsupportedNativeRequest(self: *Self, key: u64) void {
+            self.feedHostResult(key, false, "unsupported") catch {};
         }
 
         fn performBoundStoreRequest(self: *Self, name: []const u8, key: u64, payload: []const u8) void {
@@ -10007,6 +10438,25 @@ pub fn Effects(comptime Msg: type) type {
             } });
         }
 
+        /// Cancel only an image load under this exact identity. A rejected
+        /// image request may share a key with another live effect; that
+        /// incumbent belongs to its original caller and must stay intact.
+        pub fn cancelImage(self: *Self, key: u64) void {
+            const index = self.findActiveSlot(key) orelse self.findFinishedSlot(key) orelse return;
+            if (self.slots[index].kind != .image) return;
+            self.cancel(key);
+        }
+
+        /// Named bridge operations use their own keys, but full-width image
+        /// identities may coincide with them. Preserve the image incumbent
+        /// when a rejected named operation is cancelled before delivery.
+        pub fn cancelNonImage(self: *Self, key: u64) void {
+            if (self.findActiveSlot(key) orelse self.findFinishedSlot(key)) |index| {
+                if (self.slots[index].kind == .image) return;
+            }
+            self.cancel(key);
+        }
+
         /// Cancel a running effect by key. After this returns, no
         /// further `on_line` Msgs for that spawn are dispatched; one
         /// `on_exit` Msg with reason `.cancelled` follows once the
@@ -10132,7 +10582,7 @@ pub fn Effects(comptime Msg: type) type {
         /// platform without a timer service delivers exactly one Msg
         /// with outcome `.rejected` on the next drain.
         pub fn startTimer(self: *Self, options: StartTimerOptions) void {
-            if (options.interval_ms == 0) return self.rejectTimer(options);
+            if (options.interval_ms == 0 or options.interval_ms > std.math.maxInt(u64) / std.time.ns_per_ms) return self.rejectTimer(options);
             const fake = self.executor == .fake;
             // Services are bound before init_fx/update ever run; a null
             // here means a host without the platform timer arm.
@@ -10208,11 +10658,7 @@ pub fn Effects(comptime Msg: type) type {
         /// is its own namespace (like timer keys) and identifies the
         /// playback in every event; it consumes no `max_effects` slots.
         pub fn playAudio(self: *Self, options: PlayAudioOptions) void {
-            const rejected = (options.path.len == 0 and options.url.len == 0) or
-                options.path.len > max_effect_audio_path_bytes or
-                options.url.len > max_effect_audio_path_bytes or
-                options.cache_path.len > max_effect_audio_path_bytes;
-            if (rejected) {
+            if (audioPlayRejected(options)) {
                 self.deliverLoopAudio(.{ .key = options.key, .kind = .rejected }, options.on_event);
                 return;
             }
@@ -10269,6 +10715,15 @@ pub fn Effects(comptime Msg: type) type {
             }
             services.audioPlay() catch return self.failAudioChannel();
             if (volume != 1.0) services.audioSetVolume(volume) catch {};
+        }
+
+        /// The native source admission boundary; rejected loads retain the
+        /// active player and deliver their own deferred result.
+        pub fn audioPlayRejected(options: PlayAudioOptions) bool {
+            return (options.path.len == 0 and options.url.len == 0) or
+                options.path.len > max_effect_audio_path_bytes or
+                options.url.len > max_effect_audio_path_bytes or
+                options.cache_path.len > max_effect_audio_path_bytes;
         }
 
         /// Pause the current playback in place. Idle channels no-op; no
@@ -10364,12 +10819,19 @@ pub fn Effects(comptime Msg: type) type {
         /// a `close_policy = .hide` hide and also brings back a minimized
         /// or merely backgrounded window. Fire-and-forget, same contract
         /// as `closeWindow`: no event echoes beyond the window's own
-        /// frame event, an unknown label is a no-op, and the fake
-        /// executor only records the request in the mirror.
+        /// frame event, an unknown label is a no-op, and ordinary fake
+        /// execution only records the request in the mirror. Replay also
+        /// restores the synchronous visibility/focus transition before
+        /// any checkpoint, without entering the native show service.
         pub fn showWindow(self: *Self, window_label: []const u8) void {
             self.window_action_state.show_count += 1;
             self.window_action_state.record(window_label);
-            if (self.executor == .fake) return;
+            if (self.executor == .fake) {
+                if (self.replay) if (self.window_actions) |binding| {
+                    if (binding.replay_show_fn) |restore| restore(binding.context, window_label);
+                };
+                return;
+            }
             const binding = self.window_actions orelse return;
             _ = binding.show_fn(binding.context, window_label);
         }
@@ -10424,10 +10886,6 @@ pub fn Effects(comptime Msg: type) type {
         /// or has no handler. Loop-thread only; called by
         /// `UiApp.handleEvent` for `.audio` platform events.
         pub fn takeAudioMsg(self: *Self, platform_event: platform.AudioEvent) ?Msg {
-            // Under replay the journaled effect records are the ONLY
-            // Msg source (fed through `feedAudioEvent`); the replayed
-            // platform `.audio` events would double-deliver.
-            if (self.replay) return null;
             const kind: EffectAudioEventKind = switch (platform_event.kind) {
                 .loaded => .loaded,
                 .position => .position,
@@ -10445,6 +10903,21 @@ pub fn Effects(comptime Msg: type) type {
                 .buffering = platform_event.buffering,
                 .bands = platform_event.bands,
             }) orelse return null;
+            if (self.replay) {
+                // Live reports deliver synchronously. Pair the fed result
+                // with this event now, leaving deferred rejections and other
+                // completions in their original drain order.
+                if (self.takePendingAudioMatching(event.key)) |recorded| {
+                    if (!std.meta.eql(recorded, event)) {
+                        self.replay_audio_diverged = true;
+                        return null;
+                    }
+                    const event_fn = audio_fn orelse return null;
+                    return event_fn(recorded);
+                }
+                if (audio_fn != null) self.replay_audio_diverged = true;
+                return null;
+            }
             const event_fn = audio_fn orelse return null;
             self.journalNote(.{
                 .kind = .audio,
@@ -10490,6 +10963,36 @@ pub fn Effects(comptime Msg: type) type {
             };
         }
 
+        /// Queue every field of a recorded delivery, including its owner
+        /// key and spectrum transport flags. Platform audio events pair
+        /// these records synchronously; fake executor feeds still drain.
+        pub fn feedAudioRecord(self: *Self, event: EffectAudio) !void {
+            if (!self.audio.active or self.audio.key != event.key) return error.EffectNotFound;
+            self.deliverPending(.{ .audio = .{ .event = event, .audio_fn = null, .resolve = true } });
+        }
+
+        /// Remove only the first fed audio result for this channel. Shift
+        /// entries and their sequence stamps together so unrelated deferred
+        /// completions retain their exact order, including wrapped rings.
+        fn takePendingAudioMatching(self: *Self, key: u64) ?EffectAudio {
+            for (0..self.pending_exit_len) |offset| {
+                const index = (self.pending_exit_head + offset) % max_effect_pending_exits;
+                const entry = self.pending_exits[index];
+                if (entry != .audio or !entry.audio.resolve or entry.audio.event.key != key) continue;
+                var hole = offset;
+                while (hole + 1 < self.pending_exit_len) : (hole += 1) {
+                    const to = (self.pending_exit_head + hole) % max_effect_pending_exits;
+                    const from = (self.pending_exit_head + hole + 1) % max_effect_pending_exits;
+                    self.pending_exits[to] = self.pending_exits[from];
+                    self.pending_exit_seqs[to] = self.pending_exit_seqs[from];
+                }
+                self.pending_exit_len -= 1;
+                if (self.pending_exit_len == 0) self.pending_exit_head = 0;
+                return entry.audio.event;
+            }
+            return null;
+        }
+
         /// Fake executor / replay: feed one audio event as the platform
         /// would deliver it. The event resolves against the live channel
         /// at drain time (key and handler from the channel, mirrors
@@ -10499,9 +11002,8 @@ pub fn Effects(comptime Msg: type) type {
             return self.feedAudioEventBuffering(kind, position_ms, duration_ms, playing, false);
         }
 
-        /// `feedAudioEvent` with the stream-stall flag — the shape the
-        /// replayer feeds (journal records carry buffering) and stream
-        /// suites use; the plain feed keeps local-file tests terse.
+        /// `feedAudioEvent` with the stream-stall flag for fake executor
+        /// stream tests; the plain feed keeps local-file tests terse.
         pub fn feedAudioEventBuffering(self: *Self, kind: EffectAudioEventKind, position_ms: u64, duration_ms: u64, playing: bool, buffering: bool) !void {
             if (!self.audio.active) return error.EffectNotFound;
             self.deliverPending(.{ .audio = .{
@@ -11749,6 +12251,7 @@ pub fn Effects(comptime Msg: type) type {
                             if (entry.retire_slot) |slot_index| {
                                 const parked = &self.channel_slots[slot_index];
                                 if (parked.state != .idle and parked.generation == entry.retire_generation) {
+                                    if (self.global_shortcuts.active and self.global_shortcuts.key == parked.key) self.global_shortcuts = .{};
                                     retireChannelSlot(parked);
                                 }
                             }
@@ -12751,6 +13254,8 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
+                        .timeout_ms = slot.timeout_ms,
                         .method = slot.method,
                         .url = slot.fetchUrl(),
                         .headers = slot.fetchHeaders(),
@@ -12846,6 +13351,16 @@ pub fn Effects(comptime Msg: type) type {
         /// feed, which must deliver exactly the reason the recorded
         /// session delivered (`.signaled`, `.cancelled`, ...).
         pub fn feedExitReason(self: *Self, key: u64, code: i32, reason: EffectExitReason) error{EffectNotFound}!void {
+            return self.feedExitWithMetadata(key, code, reason, .{});
+        }
+
+        /// Preserve the complete journaled terminal, including loss that
+        /// cannot be inferred from an already-truncated output/tail payload.
+        pub fn feedExitWithMetadata(self: *Self, key: u64, code: i32, reason: EffectExitReason, metadata: struct {
+            output_truncated: bool = false,
+            stderr_truncated: bool = false,
+            dropped_lines: ?u32 = null,
+        }) error{EffectNotFound}!void {
             const slot_index = self.findActiveFakeSlot(key, .spawn) orelse return error.EffectNotFound;
             const slot = &self.slots[slot_index];
             var entry: Entry = .{
@@ -12855,12 +13370,16 @@ pub fn Effects(comptime Msg: type) type {
                 .key = slot.key,
                 .code = code,
                 .reason = reason,
-                .dropped_lines = slot.dropped_total,
+                .dropped_lines = metadata.dropped_lines orelse slot.dropped_total,
+                .collect_truncated = metadata.output_truncated,
+                .stderr_truncated = metadata.stderr_truncated,
                 .exit_fn = slot.on_exit,
             };
             const exit_fn = slot.on_exit;
             if (slot.output_mode == .collect) {
                 stampCollectExit(slot, &entry);
+                entry.collect_truncated = entry.collect_truncated or metadata.output_truncated;
+                entry.stderr_truncated = entry.stderr_truncated or metadata.stderr_truncated;
                 slot.state.store(.draining, .release);
                 if (!self.enqueue(&entry)) {
                     self.releaseSpawnSlot(slot);
@@ -12890,6 +13409,8 @@ pub fn Effects(comptime Msg: type) type {
                     .code = code,
                     .reason = reason,
                     .dropped_lines = entry.dropped_lines,
+                    .output_truncated = entry.collect_truncated,
+                    .stderr_truncated = entry.stderr_truncated,
                 }, exit_fn);
             }
             self.wakeHost();
@@ -12998,9 +13519,10 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
                         .op = slot.file_op,
                         .path = slot.filePath(),
-                        .bytes = if (slot.file_op == .write) slot.fetchPayload() else "",
+                        .bytes = if (slot.file_op == .write or slot.file_op == .append) slot.fetchPayload() else "",
                     };
                 }
                 seen += 1;
@@ -13151,6 +13673,7 @@ pub fn Effects(comptime Msg: type) type {
                 if (seen == index) {
                     return .{
                         .key = slot.key,
+                        .generation = slot.generation,
                         .op = slot.clipboard_op,
                         .text = if (slot.clipboard_op == .write) slot.fetchPayload() else "",
                     };
@@ -13382,6 +13905,32 @@ pub fn Effects(comptime Msg: type) type {
             return count;
         }
 
+        /// The index-th parked fake database operation, in slot order. Live
+        /// query facts borrow engine-owned storage until the next operation.
+        pub fn pendingDbAt(self: *Self, index: usize) ?struct {
+            key: u64,
+            generation: u64,
+            kind: DbSlotKind,
+            sql: []const u8,
+            params: []const EffectDbValue,
+            tables: []const []const u8,
+        } {
+            var seen: usize = 0;
+            for (&self.db_slots) |*slot| {
+                if (!slot.active or !slot.fake) continue;
+                if (seen == index) return .{
+                    .key = slot.key,
+                    .generation = slot.generation,
+                    .kind = slot.kind,
+                    .sql = if (slot.live) |live| live.sql else "",
+                    .params = if (slot.live) |live| live.params else &.{},
+                    .tables = if (slot.live) |live| live.tables else &.{},
+                };
+                seen += 1;
+            }
+            return null;
+        }
+
         /// Number of parked (still-active) fake host requests.
         pub fn pendingHostCount(self: *Self) usize {
             var count: usize = 0;
@@ -13419,13 +13968,21 @@ pub fn Effects(comptime Msg: type) type {
         /// whole one); if the completion queue is somehow full, the
         /// terminal still lands through the pending ring as an err —
         /// never a silent ok with lost bytes.
-        pub fn feedHostResult(self: *Self, key: u64, ok: bool, bytes: []const u8) error{EffectNotFound}!void {
+        pub fn feedHostResult(self: *Self, key: u64, ok: bool, bytes: []const u8) error{ EffectNotFound, ReplayWindowDivergence }!void {
             const slot_index = blk: {
                 const index = self.findActiveSlot(key) orelse return error.EffectNotFound;
                 if (self.slots[index].kind != .host and self.slots[index].kind != .store and self.slots[index].kind != .credentials) return error.EffectNotFound;
                 break :blk index;
             };
             const slot = &self.slots[slot_index];
+            if (self.replay and desktopWindowSuccess(slot.hostName(), slot.fetchPayload(), bytes)) {
+                // Test-owned replies can arrive after the request's settled
+                // view flush. Their execution fact belongs to this completion
+                // boundary; live facts are normally claimed by the flush.
+                self.flushReplayWindowExecutions();
+                if (!ok or slot.replay_window_reply_len == 0 or !std.mem.eql(u8, bytes, slot.replay_window_reply[0..slot.replay_window_reply_len])) return error.ReplayWindowDivergence;
+            } else if (self.replay and slot.replay_window_reply_len != 0) return error.ReplayWindowDivergence;
+            slot.replay_window_reply_len = 0;
             const buffer = slot.fetch_buffer orelse return error.EffectNotFound;
             const capacity = buffer.len - slot.payload_len;
             var delivered_ok = ok;
@@ -13433,6 +13990,12 @@ pub fn Effects(comptime Msg: type) type {
             if (bytes.len > capacity) {
                 delivered_ok = false;
                 delivered = "host result over budget";
+            }
+            if (slot.fake and !self.replay and delivered_ok) {
+                if (desktopWindowSuccess(slot.hostName(), slot.fetchPayload(), delivered)) {
+                    self.journalNote(.{ .kind = .window_execution, .key = key, .code = @intFromBool(std.mem.eql(u8, slot.hostName(), "native-sdk.window.closeResult")), .payload = slot.fetchPayload(), .stderr_tail = delivered });
+                }
+                self.restoreDesktopWindowResult(slot, delivered);
             }
             @memcpy(buffer[slot.payload_len..][0..delivered.len], delivered);
             slot.body_len = delivered.len;
@@ -13464,6 +14027,23 @@ pub fn Effects(comptime Msg: type) type {
                 }
             }
             self.wakeHost();
+        }
+
+        fn restoreDesktopWindowResult(self: *Self, slot: *Slot, bytes: []const u8) void {
+            const closed = std.mem.eql(u8, slot.hostName(), "native-sdk.window.closeResult");
+            if (!closed and !std.mem.eql(u8, slot.hostName(), "native-sdk.window.focusResult")) return;
+            const binding = self.system_services orelse return;
+            const restore = binding.replay_window_result_fn orelse return;
+            const desktop = @import("desktop_files.zig");
+            var request = desktop.request(slot.fetchPayload()) catch return;
+            var reply = desktop.request(bytes) catch return;
+            if (request.at != reply.at or !std.mem.eql(u8, request.bytes[0..request.at], bytes[0..reply.at])) return;
+            const label = request.field() catch return;
+            request.finish() catch return;
+            const failure = reply.field() catch return;
+            reply.finish() catch return;
+            if (failure.len != 0 or label.len == 0 or label.len > 255 or std.mem.indexOfScalar(u8, label, 0) != null) return;
+            restore(binding.context, label, closed);
         }
 
         /// Replay one redacted credential result. A successful get receives a
@@ -13525,6 +14105,15 @@ pub fn Effects(comptime Msg: type) type {
                 seen += 1;
             }
             return null;
+        }
+
+        /// Build a fake timer's platform event without firing it. Harnesses
+        /// that record sessions dispatch this event through Runtime so replay
+        /// can regenerate the timer Msg from the same journaled input.
+        pub fn fakeTimerEvent(self: *Self, key: u64, timestamp_ns: u64) error{EffectNotFound}!platform.TimerEvent {
+            const index = self.findActiveTimerIndex(key) orelse return error.EffectNotFound;
+            if (!self.timer_slots[index].fake) return error.EffectNotFound;
+            return .{ .id = effectTimerPlatformId(index), .timestamp_ns = timestamp_ns };
         }
 
         /// Fire the fake fx timer with `key` by hand: its `on_fire` Msg
@@ -13690,6 +14279,20 @@ pub fn Effects(comptime Msg: type) type {
                 if (capture.active and capture.key == key) return capture;
             }
             return null;
+        }
+
+        fn postGlobalShortcutReport(handle: ChannelHandle, kind: EffectGlobalShortcutEventKind, shortcut: platform.Shortcut) void {
+            var packet: [global_shortcuts_mod.max_packet_bytes]u8 = undefined;
+            _ = handle.post(global_shortcuts_mod.encodePacket(&packet, kind, shortcut));
+        }
+
+        fn globalShortcutSink(handle: ChannelHandle) platform.GlobalShortcutSink {
+            return .{ .context = handle.shared, .generation = handle.generation, .push_fn = pushGlobalShortcutEvent };
+        }
+
+        fn pushGlobalShortcutEvent(context: ?*anyopaque, generation: u64, event: platform.GlobalShortcutEvent) void {
+            const handle: ChannelHandle = .{ .shared = @ptrCast(@alignCast(context orelse return)), .generation = generation };
+            postGlobalShortcutReport(handle, if (event.phase == .pressed) .pressed else .released, event.shortcut);
         }
 
         fn pushAudioCaptureEvent(context: ?*anyopaque, generation: u64, event: platform.AudioCaptureEvent) platform.AudioCapturePushResult {
@@ -14453,6 +15056,8 @@ pub fn Effects(comptime Msg: type) type {
                 slot.line_buffer = null;
             }
             if (slot.kind == .credentials) slot.credentials_waiting = false;
+            slot.desktop_waiting = false;
+            slot.replay_window_reply_len = 0;
             slot.state.store(.idle, .release);
         }
 

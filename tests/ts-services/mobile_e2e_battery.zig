@@ -33,6 +33,7 @@ const App = Adapter.App;
 const Bridge = Adapter.Host;
 const ServiceCarrier = native_sdk.ServicePool(registry);
 const runtime_ns = native_sdk.runtime;
+const TrapServiceCarrier = native_sdk.ServicePool(@import("trap_service_registry.zig"));
 
 /// Poisoning deliberately abandons worker/instance allocations, and the
 /// battery runs to process exit anyway.
@@ -221,7 +222,7 @@ fn checkTypedResults() !void {
 const Completion = struct { key: u64, ok: bool, bytes: []u8 };
 
 const DirectPool = struct {
-    pool: ServiceCarrier,
+    pool: TrapServiceCarrier,
     binding: native_sdk.HostCallBinding,
     platform_services: native_sdk.platform.PlatformServices,
     completions: std.ArrayList(Completion) = .empty,
@@ -229,7 +230,7 @@ const DirectPool = struct {
     fn create() !*DirectPool {
         const self = try allocator.create(DirectPool);
         self.* = .{
-            .pool = ServiceCarrier.init(allocator, io, fixture_root, .{ .max_workers = 2 }),
+            .pool = TrapServiceCarrier.init(allocator, io, fixture_root, .{ .max_workers = 2 }),
             .binding = undefined,
             .platform_services = undefined,
         };
@@ -309,6 +310,8 @@ fn checkTrapIsolation() !void {
     try expect(trapped[0].key == 1);
     try expect(!trapped[0].ok);
     try expect(std.mem.indexOf(u8, trapped[0].bytes, "\"kind\":\"service_trap\"") != null);
+    try expect(std.mem.indexOf(u8, trapped[0].bytes, "library inbound bytes length out of range") != null);
+    try expect(std.mem.indexOf(u8, trapped[0].bytes, "SC4012") != null);
     try expect(d.pool.poisonedCount() == 1);
 
     var payload_buffer: [64]u8 = undefined;

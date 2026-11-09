@@ -780,6 +780,7 @@ test "a declared context menu presents as the anchored fallback surface on prese
     defer std.testing.allocator.destroy(app_state);
     app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -1976,6 +1977,51 @@ test "model-derived theme state composes forced/system schemes and model accent 
     try std.testing.expect(!std.meta.eql(teal, actual.colors.accent));
 }
 
+test "window appearance follows model schemes and restores system inheritance" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    var options = counterOptions();
+    options.theme_state_fn = counterThemeState;
+    const state = try CounterApp.create(std.heap.page_allocator, options);
+    defer state.destroy();
+    const app = state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .light } });
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expectEqual(zero_platform.WindowColorScheme.dark, harness.null_platform.windowColorScheme(1).?);
+    // The override must never replace the real system appearance input.
+    try std.testing.expectEqual(zero_platform.ColorScheme.light, state.system_appearance.color_scheme);
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(zero_platform.WindowColorScheme.system, harness.null_platform.windowColorScheme(1).?);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .appearance_changed = .{ .color_scheme = .dark } });
+    const dark = canvas.DesignTokens.theme(.{ .color_scheme = .dark, .pack = .geist });
+    try std.testing.expectEqualDeep(dark.colors.background, state.effectiveTokens().colors.background);
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(zero_platform.WindowColorScheme.light, harness.null_platform.windowColorScheme(1).?);
+    try std.testing.expectEqual(zero_platform.ColorScheme.dark, state.system_appearance.color_scheme);
+
+    // An explicit complete token register still outranks themeState. Do
+    // not evaluate an ignored malformed helper or infer chrome from RGB.
+    state.options.tokens = canvas.DesignTokens.theme(.{ .color_scheme = .dark });
+    state.options.theme_state_fn = invalidCounterThemeState;
+    try state.rebuild(&harness.runtime, 1);
+    try std.testing.expectEqual(zero_platform.WindowColorScheme.system, harness.null_platform.windowColorScheme(1).?);
+
+    // Backends without this optional capability keep rendering normally.
+    harness.runtime.options.platform.services.set_window_color_scheme_fn = null;
+    state.options.tokens = null;
+    state.options.theme_state_fn = counterThemeState;
+    try state.rebuild(&harness.runtime, 1);
+}
+
 test "malformed adapter theme accents reject the rebuild instead of inheriting silently" {
     const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
     defer harness.destroy(std.testing.allocator);
@@ -1997,6 +2043,30 @@ test "malformed adapter theme accents reject the rebuild instead of inheriting s
         .nonblank = true,
     } }));
     try std.testing.expect(!app_state.installed);
+}
+
+test "model accessibility theme flags preserve omission and explicit false and complete-token precedence" {
+    const state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(state);
+    state.* = CounterApp.init(std.testing.allocator, .{}, counterOptions());
+    defer state.deinit();
+    state.theme_state_known = true;
+    const accent = canvas.Color.rgb8(0xdf, 0x26, 0x70);
+    const flags = [_]?bool{ null, false, true };
+    for ([_]bool{ false, true }) |dark| for ([_]bool{ false, true }) |os_contrast| for ([_]bool{ false, true }) |os_motion| {
+        state.system_appearance = .{ .color_scheme = if (dark) .dark else .light, .high_contrast = os_contrast, .reduce_motion = os_motion };
+        for (flags) |contrast| for (flags) |motion| {
+            state.theme_state = .{ .pack = .geist, .accent = accent, .high_contrast = contrast, .reduce_motion = motion };
+            const scheme: canvas.ColorScheme = if (dark) .dark else .light;
+            var expected = canvas.DesignTokens.theme(.{ .pack = .geist, .color_scheme = scheme, .contrast = if (contrast orelse os_contrast) .high else .standard, .reduce_motion = motion orelse os_motion });
+            if (!(contrast orelse os_contrast)) expected = expected.withOverrides(canvas.accentOverrides(accent, scheme));
+            try std.testing.expectEqualDeep(expected, state.effectiveTokens());
+        };
+    };
+    const complete = canvas.DesignTokens.theme(.{ .color_scheme = .light });
+    state.options.tokens = complete;
+    state.theme_state = .{ .high_contrast = true, .reduce_motion = true, .invalid_accent = "ignored" };
+    try std.testing.expectEqualDeep(complete, state.effectiveTokens());
 }
 
 test "forced theme state still follows accessibility axes while scheme-only OS flips do not restyle" {
@@ -3955,192 +4025,16 @@ test "rapid-fire automation commands all dispatch, one per frame turn" {
 
 // ---------------------------------------------------------- webview panes
 
-const preview_canvas_label = "preview-canvas";
-const preview_pane_anchor = "preview-pane";
-const example_url = "https://example.com/";
-const docs_url = "https://native-sdk.dev/";
-
-const PreviewModel = struct {
-    show_docs: bool = false,
-    reload_token: u64 = 0,
-
-    fn url(model: *const PreviewModel) []const u8 {
-        return if (model.show_docs) docs_url else example_url;
-    }
-};
-
-const PreviewMsg = union(enum) {
-    show_docs,
-    show_example,
-    reload,
-};
-
-const PreviewApp = ui_app_model.UiApp(PreviewModel, PreviewMsg);
-
-fn previewUpdate(model: *PreviewModel, msg: PreviewMsg) void {
-    switch (msg) {
-        .show_docs => model.show_docs = true,
-        .show_example => model.show_docs = false,
-        .reload => model.reload_token += 1,
-    }
-}
-
-fn previewView(ui: *PreviewApp.Ui, model: *const PreviewModel) PreviewApp.Ui.Node {
-    _ = model;
-    return ui.row(.{ .gap = 0 }, .{
-        ui.column(.{ .width = 200, .padding = 12, .gap = 8 }, .{
-            ui.button(.{ .on_press = .show_docs }, "Docs"),
-            ui.button(.{ .on_press = .show_example }, "Example"),
-            ui.button(.{ .on_press = .reload }, "Reload"),
-        }),
-        // The empty panel that reserves the webview region: the pane
-        // anchor resolves to this widget's layout frame.
-        ui.panel(.{ .grow = 1, .semantics = .{ .label = preview_pane_anchor } }, .{}),
-    });
-}
-
-fn previewPanes(model: *const PreviewModel, out: []PreviewApp.WebViewPane) usize {
-    out[0] = .{
-        .label = "preview",
-        .anchor = preview_pane_anchor,
-        .url = model.url(),
-        .reload_token = model.reload_token,
-    };
-    return 1;
-}
-
-const preview_views = [_]app_manifest.ShellView{
-    .{ .label = preview_canvas_label, .kind = .gpu_surface, .fill = true, .gpu_backend = .metal },
-    .{ .label = "preview", .kind = .webview, .parent = preview_canvas_label, .url = example_url, .x = 200, .y = 0, .width = 440, .height = 480 },
-};
-const preview_windows = [_]app_manifest.ShellWindow{.{
-    .label = "main",
-    .title = "Preview",
-    .width = 640,
-    .height = 480,
-    .views = &preview_views,
-}};
-const preview_scene: app_manifest.ShellConfig = .{ .windows = &preview_windows };
-const preview_origins = [_][]const u8{ "https://example.com", "https://native-sdk.dev", "zero://app", "zero://inline" };
-
-fn previewOptions() PreviewApp.Options {
-    return .{
-        .name = "ui-app-preview",
-        .scene = preview_scene,
-        .canvas_label = preview_canvas_label,
-        .update = previewUpdate,
-        .view = previewView,
-        .web_panes = previewPanes,
-    };
-}
-
-fn previewHarnessAndApp(app_state: *PreviewApp) !*core.TestHarness() {
-    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(640, 480) });
-    errdefer harness.destroy(std.testing.allocator);
-    harness.null_platform.gpu_surfaces = true;
-    harness.runtime.options.security.navigation.allowed_origins = &preview_origins;
-
-    app_state.* = PreviewApp.init(std.heap.page_allocator, .{}, previewOptions());
-    const app = app_state.app();
-    try harness.start(app);
-    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
-        .label = preview_canvas_label,
-        .size = geometry.SizeF.init(640, 480),
-        .scale_factor = 1,
-        .frame_index = 1,
-        .timestamp_ns = 1_000_000,
-        .nonblank = true,
-    } });
-    return harness;
-}
-
-fn previewNullWebView(harness: *core.TestHarness()) !null_platform_mod.NullWebView {
-    for (harness.null_platform.webviews[0..harness.null_platform.webview_count]) |webview| {
-        if (std.mem.eql(u8, webview.label, "preview")) return webview;
-    }
-    return error.TestUnexpectedResult;
-}
-
 test "ui app scene with a child webview stays main-webview-free" {
-    const app_state = try std.testing.allocator.create(PreviewApp);
-    defer std.testing.allocator.destroy(app_state);
-    const harness = try previewHarnessAndApp(app_state);
-    defer harness.destroy(std.testing.allocator);
-    defer app_state.deinit();
-
-    // The canvas-first scene never grows an implicit main webview: the
-    // loaded source stays null and only the declared views exist.
-    try std.testing.expect(harness.runtime.loaded_source == null);
-    var views_buffer: [8]zero_platform.ViewInfo = undefined;
-    const views = harness.runtime.listViews(1, &views_buffer);
-    try std.testing.expectEqual(@as(usize, 2), views.len);
-    for (views) |view| {
-        try std.testing.expect(!std.mem.eql(u8, view.label, "main"));
-    }
+    try @import("web_pane_test_cases.zig").Cases(null).case0();
 }
 
 test "ui app webview pane snaps the webview to the anchor widget frame" {
-    const app_state = try std.testing.allocator.create(PreviewApp);
-    defer std.testing.allocator.destroy(app_state);
-    const harness = try previewHarnessAndApp(app_state);
-    defer harness.destroy(std.testing.allocator);
-    defer app_state.deinit();
-
-    try std.testing.expect(app_state.installed);
-    const webview = try previewNullWebView(harness);
-    try std.testing.expect(webview.open);
-    try std.testing.expectEqualStrings(example_url, webview.url);
-
-    // The pane frame is the anchor widget's layout frame: the row's
-    // remaining width after the 200pt sidebar column.
-    const layout = try harness.runtime.canvasWidgetLayout(1, preview_canvas_label);
-    var anchor_frame: ?geometry.RectF = null;
-    for (layout.nodes) |node| {
-        if (std.mem.eql(u8, node.widget.semantics.label, preview_pane_anchor)) anchor_frame = node.frame;
-    }
-    try std.testing.expect(anchor_frame != null);
-    try std.testing.expect(anchor_frame.?.width > 0);
-    try std.testing.expectApproxEqAbs(anchor_frame.?.x, webview.frame.x, 0.5);
-    try std.testing.expectApproxEqAbs(anchor_frame.?.y, webview.frame.y, 0.5);
-    try std.testing.expectApproxEqAbs(anchor_frame.?.width, webview.frame.width, 0.5);
-    try std.testing.expectApproxEqAbs(anchor_frame.?.height, webview.frame.height, 0.5);
-
-    // A resize rebuild follows the anchor to its new frame.
-    try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .gpu_surface_resized = .{
-        .label = preview_canvas_label,
-        .window_id = 1,
-        .frame = geometry.RectF.init(0, 0, 900, 600),
-        .scale_factor = 1,
-    } });
-    const resized = try previewNullWebView(harness);
-    try std.testing.expectApproxEqAbs(@as(f32, 900 - 200), resized.frame.width, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 600), resized.frame.height, 0.5);
+    try @import("web_pane_test_cases.zig").Cases(null).case1();
 }
 
 test "ui app webview pane navigates on url change and reloads on token bump" {
-    const app_state = try std.testing.allocator.create(PreviewApp);
-    defer std.testing.allocator.destroy(app_state);
-    const harness = try previewHarnessAndApp(app_state);
-    defer harness.destroy(std.testing.allocator);
-    defer app_state.deinit();
-
-    const navigations_after_install = harness.null_platform.webview_navigate_count;
-
-    // A model-driven URL change navigates the webview.
-    try app_state.dispatch(&harness.runtime, 1, .show_docs);
-    var webview = try previewNullWebView(harness);
-    try std.testing.expectEqualStrings(docs_url, webview.url);
-    try std.testing.expectEqual(navigations_after_install + 1, harness.null_platform.webview_navigate_count);
-
-    // A rebuild without a URL change does not renavigate.
-    try app_state.dispatch(&harness.runtime, 1, .show_docs);
-    try std.testing.expectEqual(navigations_after_install + 1, harness.null_platform.webview_navigate_count);
-
-    // Bumping the reload token renavigates the same URL.
-    try app_state.dispatch(&harness.runtime, 1, .reload);
-    webview = try previewNullWebView(harness);
-    try std.testing.expectEqualStrings(docs_url, webview.url);
-    try std.testing.expectEqual(navigations_after_install + 2, harness.null_platform.webview_navigate_count);
+    try @import("web_pane_test_cases.zig").Cases(null).case2();
 }
 
 // ----------------------------------------------------------- status item
@@ -4665,6 +4559,7 @@ test "ui app dispatches native context menu selections as typed messages" {
         .view = taskView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -4775,6 +4670,7 @@ test "a rebuild while the native menu is open never redirects the visible select
         .view = reorderView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -4955,6 +4851,7 @@ test "context menu selection dispatches the original arena payload across rebuil
         .view = arenaPayloadView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -5142,6 +5039,7 @@ test "any superseding presentation or dispatch releases the app menu's snapshot 
         .view = arenaPayloadView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5235,6 +5133,7 @@ test "rebuilds under an open menu stay bounded at two trees" {
         .view = arenaPayloadView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5386,6 +5285,7 @@ test "a failing rebuild routed into the live arena under an open menu drops the 
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5471,6 +5371,7 @@ test "dismissing the menu after a failed pinned rebuild restores the dropped tre
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5545,6 +5446,7 @@ test "a selection whose update breaks the build budget keeps the live tree and i
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -5641,6 +5543,7 @@ test "a menu presented while the tree is dropped still resolves once the model r
         .view = pinFailureView,
     });
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
     try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
@@ -6287,6 +6190,7 @@ test "windowed virtual list scrolls, re-windows, budgets to the viewport, and fi
     defer std.testing.allocator.destroy(app_state);
     app_state.* = VirtualFeedApp.init(std.heap.page_allocator, .{}, virtualFeedAppOptions());
     defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
     const app = app_state.app();
     try harness.start(app);
 
@@ -7940,4 +7844,570 @@ test "a primary drag released outside the view retires containment and its proof
     try expectHoverLog(&app_state.model, &.{ .outer_enter, .{ .row_enter = 1 }, .{ .row_leave = 1 }, .outer_leave });
     try std.testing.expectEqual(@as(usize, 0), harness.runtime.views[0].canvas_widget_hover_msg_chain_len);
     try std.testing.expect(!harness.runtime.views[0].canvas_widget_hover_pointer_live);
+}
+
+const StatusPolicyModel = struct { revision: u32 = 0, present: bool = true };
+const StatusPolicyMsg = union(enum) { bump, remove, restore };
+const StatusPolicyApp = ui_app_model.UiApp(StatusPolicyModel, StatusPolicyMsg);
+fn statusPolicyUpdate(model: *StatusPolicyModel, msg: StatusPolicyMsg) void {
+    switch (msg) {
+        .bump => model.revision += 1,
+        .remove => model.present = false,
+        .restore => model.present = true,
+    }
+}
+fn statusPolicyView(ui: *StatusPolicyApp.Ui, model: *const StatusPolicyModel) StatusPolicyApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Revision {d}", .{model.revision}));
+}
+fn statusPolicyItems(model: *const StatusPolicyModel, scratch: *StatusPolicyApp.StatusItemsScratch) []const StatusPolicyApp.StatusItemDescriptor {
+    if (!model.present) return &.{};
+    const title = std.fmt.bufPrint(&scratch.title_buffers[0], "Revision {d}", .{model.revision}) catch unreachable;
+    scratch.items[0] = .{ .id = 1, .label = title, .command = "app.bump" };
+    scratch.status_items[0] = .{ .id = 100, .state = .{ .title = title, .tooltip = title, .items = scratch.items[0..1] } };
+    return scratch.status_items[0..1];
+}
+const StatusPolicyProbe = struct {
+    var calls = [_]usize{0} ** 3;
+    var ignore: bool = false;
+    var retire: u8 = 0;
+    var patch: u8 = 0;
+    fn decide(request: []const u8, output: []u8) usize {
+        calls[request[0]] += 1;
+        output[1] = 255;
+        if (request[0] == 0) {
+            output[0] = retire;
+            return 2;
+        }
+        if (request[0] == 2) {
+            output[0] = patch;
+            return 2;
+        }
+        if (ignore) {
+            output[0] = 0;
+            return 2;
+        }
+        const slot: u8 = 6;
+        const at = 4 + @as(usize, request[2]) * 4 + slot * 5;
+        output[0] = if (request[at] == 1) 3 else 2;
+        output[1] = slot;
+        return 2;
+    }
+};
+fn startStatusPolicyApp(harness: anytype, policy: ?*const fn ([]const u8, []u8) usize) !*StatusPolicyApp {
+    harness.null_platform.gpu_surfaces = true;
+    const state = try std.testing.allocator.create(StatusPolicyApp);
+    state.* = StatusPolicyApp.init(std.heap.page_allocator, .{}, .{
+        .name = "status-policy-test",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update = statusPolicyUpdate,
+        .view = statusPolicyView,
+        .status_items_fn = statusPolicyItems,
+        .status_policy = policy,
+    });
+    errdefer {
+        state.deinit();
+        std.testing.allocator.destroy(state);
+    }
+    try harness.start(state.app());
+    try harness.runtime.dispatchPlatformEvent(state.app(), .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 1,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    return state;
+}
+
+test "status host consumes authoritative admission slot patch and retirement decisions" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    StatusPolicyProbe.calls = @splat(0);
+    StatusPolicyProbe.ignore = false;
+    StatusPolicyProbe.retire = 0;
+    StatusPolicyProbe.patch = 0;
+    const state = try startStatusPolicyApp(harness, StatusPolicyProbe.decide);
+    defer {
+        state.deinit();
+        std.testing.allocator.destroy(state);
+    }
+    try std.testing.expect(state.applied_status_items[6].active);
+    try std.testing.expect(!state.applied_status_items[0].active);
+    try state.dispatch(&harness.runtime, 1, .bump);
+    // Deliberately suppress changed hashes: native must honor the returned plan.
+    try std.testing.expectEqualStrings("Revision 0", harness.null_platform.statusItemTitle(100));
+    try std.testing.expectEqual(@as(usize, 0), harness.null_platform.trayShellUpdateCount());
+    StatusPolicyProbe.patch = 2;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqualStrings("Revision 2", harness.null_platform.statusItemTitle(100));
+    try std.testing.expectEqualStrings("Revision 0", harness.null_platform.statusItemTooltip(100));
+    try std.testing.expectEqualStrings("Revision 0", harness.null_platform.statusItemMenu(100)[0].label);
+    StatusPolicyProbe.patch = 5;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqualStrings("Revision 3", harness.null_platform.statusItemTooltip(100));
+    try std.testing.expectEqualStrings("Revision 3", harness.null_platform.statusItemMenu(100)[0].label);
+    try std.testing.expectEqualStrings("Revision 2", harness.null_platform.statusItemTitle(100));
+    try state.dispatch(&harness.runtime, 1, .remove);
+    try std.testing.expect(harness.null_platform.statusItemExists(100)); // Policy retains an absent declaration.
+    StatusPolicyProbe.retire = 1 << 6;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expect(!harness.null_platform.statusItemExists(100));
+    StatusPolicyProbe.retire = 0;
+    StatusPolicyProbe.ignore = true;
+    try state.dispatch(&harness.runtime, 1, .restore);
+    try std.testing.expect(!harness.null_platform.statusItemExists(100)); // Valid id intentionally refused.
+    try std.testing.expect(StatusPolicyProbe.calls[0] > 0 and StatusPolicyProbe.calls[1] > 0 and StatusPolicyProbe.calls[2] > 0);
+}
+
+const StatusFailureProbe = struct {
+    var original: zero_platform.PlatformServices = undefined;
+    var creates: usize = 0;
+    var removes: usize = 0;
+    var shells: usize = 0;
+    var presentations: usize = 0;
+    var menus: usize = 0;
+    var fail_create: bool = false;
+    var fail_remove: bool = false;
+    var fail_patch: bool = false;
+    fn create(_: ?*anyopaque, id: u32, options: zero_platform.TrayOptions) anyerror!void {
+        creates += 1;
+        if (fail_create) return error.CreateFailed;
+        try original.createStatusItem(id, options);
+    }
+    fn remove(_: ?*anyopaque, id: u32) anyerror!void {
+        removes += 1;
+        if (fail_remove) return error.RemoveFailed;
+        try original.removeStatusItem(id);
+    }
+    fn shell(_: ?*anyopaque, id: u32, options: zero_platform.TrayShell) anyerror!void {
+        shells += 1;
+        if (fail_patch) return error.UnsupportedService;
+        try original.updateStatusItemShell(id, options);
+    }
+    fn presentation(_: ?*anyopaque, id: u32, options: zero_platform.TrayPresentation) anyerror!void {
+        presentations += 1;
+        if (fail_patch) return error.UnsupportedService;
+        try original.updateStatusItemPresentation(id, options);
+    }
+    fn menu(_: ?*anyopaque, id: u32, items: []const zero_platform.TrayMenuItem) anyerror!void {
+        menus += 1;
+        if (fail_patch) return error.UpdateFailed;
+        try original.updateStatusItemMenu(id, items);
+    }
+};
+
+test "status capability failures retain slots retry creates and preserve sticky update behavior" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    StatusFailureProbe.original = harness.runtime.options.platform.services;
+    StatusFailureProbe.creates = 0;
+    StatusFailureProbe.removes = 0;
+    StatusFailureProbe.shells = 0;
+    StatusFailureProbe.presentations = 0;
+    StatusFailureProbe.menus = 0;
+    StatusFailureProbe.fail_create = true;
+    StatusFailureProbe.fail_remove = false;
+    StatusFailureProbe.fail_patch = false;
+    harness.runtime.options.platform.services.create_tray_fn = StatusFailureProbe.create;
+    harness.runtime.options.platform.services.remove_tray_fn = StatusFailureProbe.remove;
+    harness.runtime.options.platform.services.update_tray_shell_fn = StatusFailureProbe.shell;
+    harness.runtime.options.platform.services.update_tray_presentation_fn = StatusFailureProbe.presentation;
+    harness.runtime.options.platform.services.update_tray_menu_fn = StatusFailureProbe.menu;
+    const state = try startStatusPolicyApp(harness, null);
+    defer {
+        state.deinit();
+        std.testing.allocator.destroy(state);
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.applied_status_item_count);
+    StatusFailureProbe.fail_create = false;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 1), state.applied_status_item_count);
+    try std.testing.expect(harness.null_platform.statusItemExists(100));
+    StatusFailureProbe.fail_patch = true;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expect(state.applied_status_items[0].shell_unsupported and state.applied_status_items[0].presentation_unsupported);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.shells);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.presentations);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.menus);
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.shells);
+    try std.testing.expectEqual(@as(usize, 1), StatusFailureProbe.presentations);
+    try std.testing.expectEqual(@as(usize, 2), StatusFailureProbe.menus); // Changed menus still try independently.
+    StatusFailureProbe.fail_remove = true;
+    try state.dispatch(&harness.runtime, 1, .remove);
+    try std.testing.expectEqual(@as(usize, 1), state.applied_status_item_count);
+    try std.testing.expect(harness.null_platform.statusItemExists(100));
+    StatusFailureProbe.fail_remove = false;
+    try state.dispatch(&harness.runtime, 1, .bump);
+    try std.testing.expectEqual(@as(usize, 0), state.applied_status_item_count);
+    try std.testing.expectEqual(@as(usize, 2), StatusFailureProbe.removes);
+    StatusFailureProbe.fail_patch = false;
+    try state.dispatch(&harness.runtime, 1, .restore);
+    try std.testing.expect(!state.applied_status_items[0].shell_unsupported and !state.applied_status_items[0].presentation_unsupported);
+}
+
+const dispatch_reference = @import("app_dispatch_policy.zig");
+const DispatchProbe = struct {
+    var stages: [128]u8 = @splat(0);
+    var count: usize = 0;
+    var suppress_render: bool = false;
+    var suppress_apply: bool = false;
+    var suppress_pending: bool = false;
+    var suppress_event: bool = false;
+    var suppress_tail: bool = false;
+    var suppress_secondary: bool = false;
+    var suppress_capture: bool = false;
+    fn reset() void {
+        count = 0;
+        suppress_render = false;
+        suppress_apply = false;
+        suppress_pending = false;
+        suppress_event = false;
+        suppress_tail = false;
+        suppress_secondary = false;
+        suppress_capture = false;
+    }
+    fn policy(request: []const u8, output: []u8) usize {
+        std.debug.assert(request.len == 6 and request[0] == 19);
+        if (count < stages.len) {
+            stages[count] = request[1];
+            count += 1;
+        }
+        var plan = dispatch_reference.reference(@enumFromInt(request[1]), request[2], request[3]);
+        if ((suppress_render and request[1] == 2) or
+            (suppress_apply and request[1] == 1) or
+            (suppress_pending and request[1] == 3) or
+            (suppress_event and request[1] == 9) or
+            (suppress_tail and request[1] == 8) or
+            (suppress_secondary and request[1] == 7)) plan = @splat(0);
+        if (suppress_capture and request[1] == 4) plan = @splat(0);
+        @memcpy(output, &plan);
+        return plan.len;
+    }
+};
+
+test "dispatch coordination consumes preparation update rendering and event plans" {
+    DispatchProbe.reset();
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const state = try std.testing.allocator.create(CounterApp);
+    defer std.testing.allocator.destroy(state);
+    var options = counterOptions();
+    options.app_dispatch_policy = DispatchProbe.policy;
+    state.* = CounterApp.init(std.heap.page_allocator, .{}, options);
+    defer state.deinit();
+    // A pre-install update executes, but refuses a view build.
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(@as(u32, 1), state.model.count);
+    try std.testing.expect(!state.installed);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 1, 2 }, DispatchProbe.stages[0..DispatchProbe.count]);
+    const app = state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    DispatchProbe.reset();
+    DispatchProbe.suppress_render = true;
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(@as(u32, 2), state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 1"));
+    DispatchProbe.reset();
+    DispatchProbe.suppress_apply = true;
+    try state.dispatch(&harness.runtime, 1, .increment);
+    try std.testing.expectEqual(@as(u32, 2), state.model.count);
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Count 2"));
+    DispatchProbe.reset();
+    try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .window_id = 1, .name = "counter.reset" } });
+    try std.testing.expectEqual(@as(u32, 0), state.model.count);
+    try std.testing.expect(std.mem.indexOfScalar(u8, DispatchProbe.stages[0..DispatchProbe.count], 9) != null);
+    try harness.stop(app);
+}
+
+const DrainModel = struct { count: u32 = 0, handle: effects_mod.ChannelHandle = .{} };
+const DrainMsg = union(enum) { event: effects_mod.EffectChannelEvent, unused };
+const DrainApp = ui_app_model.UiApp(DrainModel, DrainMsg);
+fn drainUpdate(model: *DrainModel, msg: DrainMsg, _: *DrainApp.Effects) void {
+    if (msg == .event and msg.event.kind == .data) {
+        model.count += 1;
+        if (model.count == 1) _ = model.handle.post("next-boundary");
+    }
+}
+fn drainView(ui: *DrainApp.Ui, model: *const DrainModel) DrainApp.Ui.Node {
+    return ui.text(.{}, ui.fmt("Drain {d}", .{model.count}));
+}
+test "dispatch coordination consumes drain admission and retains the captured causal boundary" {
+    DispatchProbe.reset();
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const state = try std.testing.allocator.create(DrainApp);
+    defer std.testing.allocator.destroy(state);
+    state.* = DrainApp.init(std.heap.page_allocator, .{}, .{
+        .name = "dispatch-drain",
+        .scene = counter_scene,
+        .canvas_label = canvas_label,
+        .update_fx = drainUpdate,
+        .view = drainView,
+        .app_dispatch_policy = DispatchProbe.policy,
+    });
+    defer state.deinit();
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 4 }, DispatchProbe.stages[0..DispatchProbe.count]);
+    const app = state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+        .label = canvas_label,
+        .size = geometry.SizeF.init(400, 300),
+        .scale_factor = 2,
+        .frame_index = 1,
+        .timestamp_ns = 1_000_000,
+        .nonblank = true,
+    } });
+    state.model.handle = state.effects.openChannel(.{ .key = std.math.maxInt(u64), .on_event = DrainApp.Effects.channelMsg(.event) });
+    try std.testing.expectEqual(effects_mod.ChannelHandle.PostResult.accepted, state.model.handle.post("first"));
+    DispatchProbe.reset();
+    DispatchProbe.suppress_pending = true;
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 0), state.model.count);
+    try std.testing.expect(state.effects.hasPending());
+    DispatchProbe.reset();
+    DispatchProbe.suppress_capture = true;
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 0), state.model.count);
+    try std.testing.expect(state.effects.hasPending());
+    DispatchProbe.reset();
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 1), state.model.count);
+    try std.testing.expect(state.effects.hasPending());
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Drain 1"));
+    try state.drainEffects(&harness.runtime);
+    try std.testing.expectEqual(@as(u32, 2), state.model.count);
+    try std.testing.expect(!state.effects.hasPending());
+    try std.testing.expect(try retainedTextExists(&harness.runtime, "Drain 2"));
+    try harness.stop(app);
+}
+
+test "dispatch coordination consumes direct and standalone event settlement plans" {
+    for ([_]bool{ false, true }) |standalone| {
+        DispatchProbe.reset();
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const state = try std.testing.allocator.create(CaptureApp);
+        defer std.testing.allocator.destroy(state);
+        var options = captureOptions();
+        options.app_dispatch_policy = DispatchProbe.policy;
+        state.* = CaptureApp.init(std.heap.page_allocator, .{}, options);
+        defer state.deinit();
+        const app = state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        try hoverMove(harness, app, 50, 20);
+        DispatchProbe.reset();
+        if (standalone) {
+            DispatchProbe.suppress_event = true;
+            try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "capture.hide", .window_id = 1 } });
+        } else {
+            DispatchProbe.suppress_tail = true;
+            try state.dispatch(&harness.runtime, 1, .hide_row);
+        }
+        try std.testing.expectEqualStrings("", state.model.leftText());
+        DispatchProbe.reset();
+        // A subsequent event completes the captured edge with its owned bytes.
+        try harness.runtime.dispatchPlatformEvent(app, .{ .menu_command = .{ .name = "unmapped", .window_id = 1 } });
+        try std.testing.expectEqualStrings("left-after-0-churns", state.model.leftText());
+        try harness.stop(app);
+    }
+}
+
+const DispatchWindowModel = struct { count: u32 = 0, open: bool = true, fail_main: bool = false, fail_secondary: bool = false };
+const DispatchWindowMsg = union(enum) { bump, idle };
+const DispatchWindowApp = ui_app_model.UiApp(DispatchWindowModel, DispatchWindowMsg);
+var dispatch_main_builds: usize = 0;
+var dispatch_secondary_builds: usize = 0;
+fn dispatchWindowUpdate(model: *DispatchWindowModel, msg: DispatchWindowMsg) void {
+    if (msg == .bump) model.count += 1;
+}
+fn dispatchWindowView(ui: *DispatchWindowApp.Ui, model: *const DispatchWindowModel) DispatchWindowApp.Ui.Node {
+    dispatch_main_builds += 1;
+    return ui.text(.{}, ui.fmt("Main {d}", .{model.count}));
+}
+fn dispatchWindowTheme(model: *const DispatchWindowModel) DispatchWindowApp.ThemeState {
+    return if (model.fail_main) .{ .invalid_accent = "bad" } else .{};
+}
+fn dispatchWindows(model: *const DispatchWindowModel, scratch: *DispatchWindowApp.WindowsScratch) []const DispatchWindowApp.WindowDescriptor {
+    if (!model.open) return &.{};
+    scratch.windows[0] = .{ .label = "panel", .canvas_label = "panel-canvas", .title = "Panel", .width = 320, .height = 240 };
+    return scratch.windows[0..1];
+}
+fn dispatchPanelView(ui: *DispatchWindowApp.Ui, model: *const DispatchWindowModel, _: []const u8) DispatchWindowApp.Ui.Node {
+    dispatch_secondary_builds += 1;
+    if (model.fail_secondary) {
+        const nodes = ui.arena.alloc(DispatchWindowApp.Ui.Node, core.max_canvas_widget_nodes_per_view + 40) catch @panic("fixture allocation");
+        for (nodes) |*node| node.* = ui.text(.{}, "overflow");
+        return ui.column(.{}, nodes);
+    }
+    return ui.text(.{}, ui.fmt("Panel {d}", .{model.count}));
+}
+test "dispatch coordination preserves main secondary failure ordering and independent reinitialization" {
+    const saved_log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = saved_log_level;
+    for (0..2) |_| {
+        DispatchProbe.reset();
+        dispatch_main_builds = 0;
+        dispatch_secondary_builds = 0;
+        const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+        defer harness.destroy(std.testing.allocator);
+        harness.null_platform.gpu_surfaces = true;
+        const state = try std.testing.allocator.create(DispatchWindowApp);
+        defer std.testing.allocator.destroy(state);
+        state.* = DispatchWindowApp.init(std.heap.page_allocator, .{}, .{
+            .name = "dispatch-windows",
+            .scene = counter_scene,
+            .canvas_label = canvas_label,
+            .update = dispatchWindowUpdate,
+            .view = dispatchWindowView,
+            .theme_state_fn = dispatchWindowTheme,
+            .windows_fn = dispatchWindows,
+            .window_view = dispatchPanelView,
+            .app_dispatch_policy = DispatchProbe.policy,
+        });
+        defer state.deinit();
+        const app = state.app();
+        try harness.start(app);
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .label = canvas_label,
+            .size = geometry.SizeF.init(400, 300),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 1_000_000,
+            .nonblank = true,
+        } });
+        try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{
+            .window_id = 2,
+            .label = "panel-canvas",
+            .size = geometry.SizeF.init(320, 240),
+            .scale_factor = 2,
+            .frame_index = 1,
+            .timestamp_ns = 2_000_000,
+            .nonblank = true,
+        } });
+        try state.dispatch(&harness.runtime, 2, .bump);
+        try std.testing.expect(dispatch_secondary_builds > 0);
+        const secondary_before = dispatch_secondary_builds;
+        state.model.fail_main = true;
+        try std.testing.expectError(error.InvalidThemeAccent, state.dispatch(&harness.runtime, 2, .bump));
+        try std.testing.expectEqual(secondary_before, dispatch_secondary_builds);
+        state.model.fail_main = false;
+        state.model.fail_secondary = true;
+        try std.testing.expectError(error.WidgetLayoutListFull, state.dispatch(&harness.runtime, 2, .bump));
+        try std.testing.expectEqual(secondary_before + 1, dispatch_secondary_builds);
+        DispatchProbe.suppress_secondary = true;
+        try state.dispatch(&harness.runtime, 2, .idle);
+        try std.testing.expectEqual(secondary_before + 1, dispatch_secondary_builds);
+        DispatchProbe.suppress_secondary = false;
+        state.model.fail_secondary = false;
+        try state.dispatch(&harness.runtime, 2, .bump);
+        try std.testing.expectEqual(@as(u32, 4), state.model.count);
+        try std.testing.expect(try retainedTextExists(&harness.runtime, "Main 4"));
+        try harness.stop(app);
+    }
+}
+
+const component_reference = @import("component_policy.zig");
+const ComponentProbe = struct {
+    var calls: usize = 0;
+    var suppress_snapshot = false;
+    fn policy(packet: []const u8, output: []u8) usize {
+        calls += 1;
+        if (packet[0] == 22) {
+            const stage: component_reference.Stage = @enumFromInt(packet[1]);
+            var result = component_reference.reference(stage, packet[2] != 0, packet[3] != 0, packet[4] != 0, std.mem.readInt(u64, packet[8..16], .little), std.mem.readInt(u64, packet[16..24], .little));
+            if (suppress_snapshot and stage == .shown_count) @memset(result[8..], 0);
+            @memcpy(output[0..result.len], &result);
+            return result.len;
+        }
+        std.debug.assert(packet[0] == 23);
+        const scroll: canvas.ScrollState = .{
+            .offset_y = @bitCast(std.mem.readInt(u32, packet[8..12], .little)),
+            .viewport_extent_y = @bitCast(std.mem.readInt(u32, packet[12..16], .little)),
+            .content_extent_y = @bitCast(std.mem.readInt(u32, packet[16..20], .little)),
+            .offset_x = @bitCast(std.mem.readInt(u32, packet[20..24], .little)),
+            .viewport_extent_x = @bitCast(std.mem.readInt(u32, packet[24..28], .little)),
+            .content_extent_x = @bitCast(std.mem.readInt(u32, packet[28..32], .little)),
+        };
+        const result = component_reference.reachReference(packet[1] != 0, packet[2] != 0, scroll, packet[3] != 0, packet[4] != 0);
+        output[0..8].* = .{ @intFromBool(result.horizontal), @intFromEnum(result.action), 0, 0, 0, 0, 0, 0 };
+        return 8;
+    }
+};
+
+test "component coordination consumes callback counts before pinning and restores swallowed selection" {
+    ComponentProbe.calls = 0;
+    ComponentProbe.suppress_snapshot = true;
+    defer ComponentProbe.suppress_snapshot = false;
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(TaskRowApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = TaskRowApp.init(std.heap.page_allocator, .{}, taskRowOptions());
+    defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000, .nonblank = true } });
+    const id = findIn(app_state.tree.?.root, .list_item, "Task").?;
+    const layout = try harness.runtime.canvasWidgetLayout(1, canvas_label);
+    const frame = layout.findById(id).?.frame;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_input = .{ .window_id = 1, .label = canvas_label, .kind = .pointer_down, .button = 1, .x = frame.x + 4, .y = frame.y + 4, .timestamp_ns = 2_000_000 } });
+    try std.testing.expectEqual(@as(usize, 0), app_state.context_menu_shown_count);
+    const token = harness.null_platform.context_menu_token;
+    try harness.runtime.dispatchPlatformEvent(app, .{ .context_menu_action = .{ .window_id = 1, .view_label = canvas_label, .token = token, .item_id = 1 } });
+    try std.testing.expectEqual(@as(u32, 0), app_state.model.completed);
+    try std.testing.expect(app_state.context_menu_pin == null);
+    try std.testing.expect(app_state.tree != null);
+    try std.testing.expect(ComponentProbe.calls > 0);
+}
+
+test "component coordination preserves end latches and full-table silence" {
+    const harness = try core.TestHarness().create(std.testing.allocator, .{ .size = geometry.SizeF.init(400, 300) });
+    defer harness.destroy(std.testing.allocator);
+    harness.null_platform.gpu_surfaces = true;
+    const app_state = try std.testing.allocator.create(VirtualFeedApp);
+    defer std.testing.allocator.destroy(app_state);
+    app_state.* = VirtualFeedApp.init(std.heap.page_allocator, .{}, virtualFeedAppOptions());
+    defer app_state.deinit();
+    app_state.options.component_policy = ComponentProbe.policy;
+    const app = app_state.app();
+    try harness.start(app);
+    try harness.runtime.dispatchPlatformEvent(app, .{ .gpu_surface_frame = .{ .label = canvas_label, .size = geometry.SizeF.init(400, 300), .scale_factor = 1, .frame_index = 1, .timestamp_ns = 1_000_000, .nonblank = true } });
+    const id = app_state.virtual_windows[0].id;
+    for (&app_state.reach_end_fired, 0..) |*slot, index| slot.* = .{ .id = @as(u64, @intCast(index)) + 5000, .axis = .vertical };
+    const before = app_state.model.fetches;
+    const scroll: canvas.ScrollState = .{ .offset_y = 300, .viewport_extent_y = 100, .content_extent_y = 400 };
+    for (0..3) |_| try app.event(&harness.runtime, .{ .canvas_widget_scroll = .{ .window_id = 1, .view_label = canvas_label, .id = id, .scroll = scroll } });
+    try std.testing.expectEqual(before, app_state.model.fetches);
+    app_state.reach_end_fired[0] = .{};
+    try app.event(&harness.runtime, .{ .canvas_widget_scroll = .{ .window_id = 1, .view_label = canvas_label, .id = id, .scroll = scroll } });
+    try std.testing.expectEqual(before + 1, app_state.model.fetches);
+    try app.event(&harness.runtime, .{ .canvas_widget_scroll = .{ .window_id = 1, .view_label = canvas_label, .id = id, .scroll = scroll } });
+    try std.testing.expectEqual(before + 1, app_state.model.fetches);
 }

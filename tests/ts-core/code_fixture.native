@@ -1,0 +1,6 @@
+<column gap="8">
+  <code source="{sourceBytes}" language="tsx" line-numbers="{numbered}" added-lines="{addedSpec}" removed-lines="{removedSpec}" height="120" width="320" label="Wrapped source"/>
+  <code source="{sourceBytes}" language="markdown" wrap="false" line-numbers="{numbered}" added-lines="{addedSpec}" removed-lines="{removedSpec}" width="320" label="Static source"/>
+  <code source="{sourceBytes}" language="typescript" editable="true" line-numbers="{numbered}" added-lines="{addedSpec}" removed-lines="{removedSpec}" height="120" width="320" on-input="edit" label="Wrapped editor"/>
+  <code source="{sourceBytes}" language="rust" editable="true" wrap="false" line-numbers="{numbered}" added-lines="{addedSpec}" removed-lines="{removedSpec}" height="120" width="320" on-input="edit" label="Editor"/>
+</column>

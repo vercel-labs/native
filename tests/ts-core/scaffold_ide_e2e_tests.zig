@@ -77,6 +77,7 @@ test "a fresh ts scaffold typechecks under stock tsc, and builds never need the 
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/tsconfig.json"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/package.json"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/core.ts"));
+    try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/bytes.ts"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/text.ts"));
     try std.testing.expect(tooling.buildgraph.fileExists(io, root ++ "/node_modules/@native-sdk/core/sdk/events.ts"));
 
@@ -109,7 +110,7 @@ test "the committed TS example ports typecheck under stock tsc (multi-file cores
     const bundled = try tooling.ts_core.bundledSdkVersion(allocator, io, ".");
     defer allocator.free(bundled);
 
-    const ports = [_][]const u8{ "examples/kanban", "examples/soundboard-ts", "examples/system-monitor-ts" };
+    const ports = [_][]const u8{ "examples/kanban", "examples/habits", "examples/soundboard", "examples/system-monitor" };
     for (ports, 0..) |port, index| {
         var stage_buffer: [128]u8 = undefined;
         const stage = try std.fmt.bufPrint(&stage_buffer, ".zig-cache/e2e-ide-port-{d}", .{index});

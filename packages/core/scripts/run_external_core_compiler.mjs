@@ -21,6 +21,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { compilerArgv, publishedScriptcArgv } from "./compiler_command.mjs";
 
 function parseArgs(argv) {
@@ -79,8 +80,9 @@ try {
 // build mixes a host-format core archive with target-format Zig and service
 // objects. Standalone host-only callers may omit both platform arguments.
 // The pairing matrix is the pinned compiler's build matrix, shared with
-// run_external_service_compiler.mjs: same-triple compiles run the native
-// lane; Linux and Windows GNU targets cross-compile from any desktop host;
+// run_external_service_compiler.mjs: same-triple compiles normally run the
+// native lane, but Windows GNU always uses zig-cc for its headers and CRT;
+// Linux and Windows GNU targets cross-compile from any desktop host, while
 // macOS targets need a macOS build host.
 const hostParts = args["host-platform"]?.split("-") ?? [];
 const targetParts = args["target-platform"]?.split("-") ?? [];
@@ -109,6 +111,7 @@ const nativeWindows = hostOs === "windows" && targetOs === "windows" && hostArch
   (targetAbi === hostAbi || targetAbi === "msvc");
 const cross = args["host-platform"] !== undefined &&
   args["target-platform"] !== args["host-platform"] && !nativeWindows;
+const zigCcCompile = cross || (targetOs === "windows" && targetAbi === "gnu");
 if (mobileTarget) {
   const desktopHost = ["macos", "linux", "windows"].includes(hostOs);
   const admitted = desktopHost && targetArch === "aarch64" && (!iosTarget || hostOs === "macos");
@@ -137,11 +140,11 @@ if (mobileTarget) {
     process.exit(2);
   }
 }
-// Cross compiles ride the compiler's zig-cc lane: SCRIPTC_TARGET carries the
-// compiler's own mobile spellings for iOS/Android, --zig-exe's directory
-// fronts PATH, and an Android build threads the NDK location the same way
-// (--android-ndk becomes ANDROID_NDK_ROOT for the sysroot discovery).
-const compileEnv = cross
+// Zig-cc compiles include native Windows GNU: host Clang alone cannot supply
+// that target's headers and CRT. SCRIPTC_TARGET carries the compiler's mobile
+// spellings for iOS/Android, --zig-exe's directory fronts PATH, and Android
+// builds pass --android-ndk through as ANDROID_NDK_ROOT.
+const compileEnv = zigCcCompile
   ? {
       ...process.env,
       SCRIPTC_CC: "zigcc",
@@ -154,12 +157,12 @@ const compileEnv = cross
   : process.env;
 
 // The profile's determinism-fence table is RELEASE-PINNED DATA (see
-// tools/corewire/emit_profile.zig): its ids resolve against one
+// tools/corewire/emit_profile.ts): its ids resolve against one
 // toolchain release's surface manifest, so the supplied command must BE
 // the release the SDK pins — the exact-pinned dependency of
 // packages/core (the ONE place the pin lives).
 const manifest = JSON.parse(fs.readFileSync(args.manifest, "utf8"));
-const pin = manifest.dependencies?.scriptc;
+const pin = manifest.nativeToolchain?.scriptc ?? manifest.dependencies?.scriptc;
 if (typeof pin !== "string" || !/^\d+\.\d+\.\d+$/.test(pin)) {
   console.error("the SDK's packages/core/package.json carries no exact external core compiler pin — the SDK tree is broken; reinstall or re-clone it");
   process.exit(2);
@@ -180,7 +183,16 @@ if (reported !== pin) {
 const work = fs.mkdtempSync(path.join(os.tmpdir(), "native-external-core-"));
 try {
   fs.cpSync(args.stage, work, { recursive: true });
-  const build = spawnSync(argv0[0], [...argv0.slice(1), "build", "--lib", "--profile", "profile.json", "-o", args.name], {
+  // The exact matching compiler package's Node API co-emits the archive
+  // and sidecar for byte-bearing core contracts in one compile. The native
+  // binary supplies the version probe above; explicit compiler overrides
+  // keep their requested command.
+  const libraryHelper = path.join(path.dirname(fileURLToPath(import.meta.url)), "run_library_compiler.mjs");
+  const buildCommand = args["compiler-package-origin"] ? process.execPath : argv0[0];
+  const buildArgs = args["compiler-package-origin"]
+    ? [libraryHelper, "--profile", "profile.json", "--out", args.name, "--version", pin, "--origin", args["compiler-package-origin"]]
+    : [...argv0.slice(1), "build", "--lib", "--profile", "profile.json", "-o", args.name];
+  const build = spawnSync(buildCommand, buildArgs, {
     cwd: work,
     stdio: "inherit",
     env: compileEnv,

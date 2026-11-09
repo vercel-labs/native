@@ -5,11 +5,11 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
-import { automationProtocolFingerprint, journalFormatFingerprint, readDevhostJournal } from "../src/devhost_journal.mjs";
+import { automationProtocolFingerprint, journalFormatFingerprint, readDevhostJournal, DevhostJournalWriter } from "../src/devhost_journal.mjs";
 
 function runTemporaryDevhost(
   files: Record<string, string>,
-  options: { script?: readonly string[]; serviceCwd?: boolean; env?: NodeJS.ProcessEnv; timeout?: number } = {},
+  options: { script?: readonly string[]; serviceCwd?: boolean; record?: boolean; env?: NodeJS.ProcessEnv; timeout?: number } = {},
 ): { run: ReturnType<typeof spawnSync>; serviceCwd: string } {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-devhost-services-"));
@@ -29,6 +29,7 @@ function runTemporaryDevhost(
       script,
     ];
     if (options.serviceCwd) argv.push("--service-cwd", serviceCwd);
+    if (options.record) argv.push("--record-journal", path.join(root, "session.journal"));
     const run = spawnSync(process.execPath, argv, {
       cwd: root,
       encoding: "utf8",
@@ -46,6 +47,35 @@ function lastModel(stdout: string): Record<string, unknown> {
   assert.ok(line, stdout);
   return JSON.parse(line.slice("model ".length)) as Record<string, unknown>;
 }
+
+test("the devhost refuses native producer startup explicitly and requires native recording", () => {
+  const files = { "src/core.ts": `
+import { Cmd } from "@native-sdk/core";
+export interface Model { readonly failed: boolean; readonly closed: boolean; }
+export type ChannelState = "data" | "closed" | "rejected";
+export type SourceState = "started" | "skipped" | "failed";
+export type Msg =
+  | { readonly kind: "start" }
+  | { readonly kind: "started"; readonly key: number; readonly state: SourceState; readonly bytes: Uint8Array }
+  | { readonly kind: "event"; readonly key: number; readonly state: ChannelState; readonly bytes: Uint8Array; readonly droppedPending: number; readonly droppedTotal: number };
+export function initialModel(): Model { return { failed: false, closed: false }; }
+export function commandMsg(name: string): Msg | null { if (name === "start") return { kind: "start" }; return null; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  switch (msg.kind) {
+    case "start": return [model, Cmd.channelOpenSource(41, "native-sdk.process.samples", new Uint8Array(0), { event: "event", started: "started" })];
+    case "started": return [{ ...model, failed: msg.state === "failed" }, Cmd.channelClose(41)];
+    case "event": return { ...model, closed: msg.state === "closed" };
+  }
+}` };
+  const script = ['{"command":"start"}'];
+  const { run } = runTemporaryDevhost(files, { script });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /cmd channel_open_source key=41 source=native-sdk\.process\.samples state=failed/);
+  assert.deepEqual(lastModel(run.stdout), { failed: true, closed: true });
+  const recording = runTemporaryDevhost(files, { script, record: true }).run;
+  assert.notEqual(recording.status, 0);
+  assert.match(recording.stderr, /external producer recordings require the native runtime/);
+});
 
 test("the devhost keeps Cmd.persist in memory and restores it through the boot route", () => {
   const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -372,4 +402,39 @@ test("a devhost service recording replays without starting services and uses the
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+
+test("devhost journals declare absent chrome and validate complete native chrome counts", () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "native-devhost-chrome-"));
+  const file = path.join(scratch, "session.journal");
+  try {
+    const writer = new DevhostJournalWriter(file, "chrome", "canvas", 400, 300);
+    writer.appStart(); writer.finish();
+    const original = fs.readFileSync(file);
+    const headerLength = original.readUInt32LE(17);
+    const sourceOffset = 21 + headerLength - 1;
+    assert.equal(original[sourceOffset], 1, "logic-only recordings have no OS chrome capability");
+    assert.equal(readDevhostJournal(file).length, 1);
+    const endAt = original.length - 45;
+    const chrome = Buffer.alloc(47);
+    chrome[0] = 7; chrome.writeUInt32LE(42, 1);
+    chrome.writeBigUInt64LE(1n, 5);
+    chrome.writeFloatLE(66, 13); chrome.writeFloatLE(98, 25);
+    chrome[45] = 1; chrome[46] = 1;
+    const native = Buffer.concat([original.subarray(0, endAt), chrome, original.subarray(endAt)]);
+    native[sourceOffset] = 0;
+    native.writeBigUInt64LE(1n, native.length - 8);
+    fs.writeFileSync(file, native);
+    assert.equal(readDevhostJournal(file).length, 1, "logic-only replay validates native facts without applying renderer queries");
+    native.writeBigUInt64LE(0n, native.length - 8); fs.writeFileSync(file, native);
+    assert.throws(() => readDevhostJournal(file), /record counts disagree/);
+    native.writeBigUInt64LE(1n, native.length - 8);
+    native[sourceOffset] = 1; fs.writeFileSync(file, native);
+    assert.throws(() => readDevhostJournal(file), /chrome-less session/);
+    native[sourceOffset] = 0; native[endAt + 46] = 2; fs.writeFileSync(file, native);
+    assert.throws(() => readDevhostJournal(file), /invalid session chrome result/);
+    fs.writeFileSync(file, Buffer.concat([original, original.subarray(21 + headerLength, endAt)]));
+    assert.throws(() => readDevhostJournal(file), /records after its end/);
+  } finally { fs.rmSync(scratch, { recursive: true, force: true }); }
 });

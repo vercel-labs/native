@@ -1,3 +1,11 @@
+export interface ImageWordsCommand {
+  readonly operation: "load" | "cancel" | "unregister";
+  readonly identity: ImageIdentity;
+  readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number;
+}
+export { imageSourceIdentity, type ImageIdentity } from "./internal/image_identity.ts";
+export { markdownImageSources, type MarkdownImageSource } from "./internal/markdown_policy.ts";
+import { type ImageIdentity } from "./internal/image_identity.ts";
 // @native-sdk/core — the SDK module an app core imports. The subset program
 // maps the "@native-sdk/core" specifier onto this file, so stock tsc types
 // it; the transpiler lowers references to it onto the rt kernel and never
@@ -288,94 +296,13 @@
 // import "@native-sdk/core", so tsc-in-the-editor and `native check` agree.
 /// <reference path="./bytes_text_methods.d.ts" />
 
-/// The ASCII text intrinsic: turn a string literal or template whose code
-/// units are all 0x00..0x7f into bytes. The transpiler recognizes calls BY
-/// IDENTITY (this import, renames honored) and folds them at compile time —
-/// a literal argument becomes rodata, a template becomes frame-arena bytes
-/// via bufPrint — so no string ever exists at native runtime. Under node
-/// this body runs as-is, byte for byte the same result. Use `utf8Bytes` for
-/// user-visible text that may contain Unicode. Arguments must be literals
-/// or templates; dynamic text lives in the model as Uint8Array from the
-/// start.
-export function asciiBytes(s: string): Uint8Array {
-  for (let i = 0; i < s.length; i++) {
-    if (s.charCodeAt(i) > 0x7f) {
-      throw new RangeError("asciiBytes accepts ASCII only; use utf8Bytes for Unicode text");
-    }
-  }
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
-}
-
-/// The UTF-8 text intrinsic. Like `asciiBytes`, literals become rodata and
-/// templates become frame-arena bytes in a native core; under node this
-/// implementation performs the same encoding directly. Invalid lone UTF-16
-/// surrogates encode as U+FFFD, matching the platform TextEncoder contract.
-export function utf8Bytes(s: string): Uint8Array {
-  let byteLength = 0;
-  for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i);
-    if (code <= 0x7f) {
-      byteLength += 1;
-    } else if (code <= 0x7ff) {
-      byteLength += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
-      const next = s.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        byteLength += 4;
-        i += 1;
-      } else {
-        byteLength += 3;
-      }
-    } else {
-      byteLength += 3;
-    }
-  }
-
-  const out = new Uint8Array(byteLength);
-  let at = 0;
-  for (let i = 0; i < s.length; i++) {
-    let code = s.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
-      const next = s.charCodeAt(i + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        code = 0x10000 + ((code - 0xd800) << 10) + (next - 0xdc00);
-        i += 1;
-      } else {
-        code = 0xfffd;
-      }
-    } else if (code >= 0xd800 && code <= 0xdfff) {
-      code = 0xfffd;
-    }
-
-    if (code <= 0x7f) {
-      out[at] = code;
-      at += 1;
-    } else if (code <= 0x7ff) {
-      out[at] = 0xc0 | (code >> 6);
-      out[at + 1] = 0x80 | (code & 0x3f);
-      at += 2;
-    } else if (code <= 0xffff) {
-      out[at] = 0xe0 | (code >> 12);
-      out[at + 1] = 0x80 | ((code >> 6) & 0x3f);
-      out[at + 2] = 0x80 | (code & 0x3f);
-      at += 3;
-    } else {
-      out[at] = 0xf0 | (code >> 18);
-      out[at + 1] = 0x80 | ((code >> 12) & 0x3f);
-      out[at + 2] = 0x80 | ((code >> 6) & 0x3f);
-      out[at + 3] = 0x80 | (code & 0x3f);
-      at += 4;
-    }
-  }
-  return out;
-}
+import { utf8Bytes } from "./bytes.ts";
+export { asciiBytes, utf8Bytes } from "./bytes.ts";
 
 /// Every app Msg is a discriminated union on a string `kind` tag.
 export type Msgish = { readonly kind: string };
 
-import { type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
+import { type GlobalShortcutEvent, type GlobalShortcutState, type WindowDescriptor, type WindowDescriptorSpec } from "./events.ts";
 
 /// Fill the canonical defaults for a model-declared secondary window.
 export function windowDescriptor(spec: WindowDescriptorSpec): WindowDescriptor {
@@ -541,6 +468,28 @@ export type AudioEventArm = {
   readonly buffering: boolean;
   readonly bands: Uint8Array;
 };
+
+/** Complete native audio reports. Identities and millisecond counters are
+ * canonical unsigned decimal bytes, preserving every u64 value. */
+export type ExactAudioEventArm = {
+  readonly key: Uint8Array;
+  readonly state: AudioState;
+  readonly positionMs: Uint8Array;
+  readonly durationMs: Uint8Array;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly bands: Uint8Array;
+};
+
+export type ExactAudioEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ExactAudioEventArm]
+    ? [keyof ExactAudioEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ExactAudioEventArm
+        ? [AudioState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
 
 /// The Msg arms an audio event stream may target: arms whose payload is
 /// exactly the six AudioEventArm fields. The `state` check runs BOTH
@@ -729,6 +678,47 @@ export type ChannelEventKind<M extends Msgish> = M extends Msgish
 /// arm (the five-field ChannelEventArm record, matched by field name).
 export interface ChannelRoute<M extends Msgish> {
   readonly event: ChannelEventKind<M>;
+}
+
+/** The immediate outcome of starting an external producer. A refused open
+ * skips startup; a started producer alone may post. Failure bytes describe the
+ * native startup error. Replay supplies this outcome without starting a source.
+ */
+export type ChannelSourceState = "started" | "skipped" | "failed";
+export type ChannelSourceArm = {
+  readonly key: number;
+  readonly state: ChannelSourceState;
+  readonly bytes: Uint8Array;
+};
+export type ChannelSourceKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ChannelSourceArm]
+    ? [keyof ChannelSourceArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ChannelSourceArm
+        ? [ChannelSourceState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+export type GlobalShortcutKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof GlobalShortcutEvent]
+    ? [keyof GlobalShortcutEvent] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & GlobalShortcutEvent
+        ? [GlobalShortcutState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+
+/// A key from the app shortcut vocabulary plus modifiers. `primary` is
+/// Command on macOS and Control elsewhere.
+export interface GlobalShortcutBinding {
+  readonly key: Uint8Array;
+  readonly primary?: boolean;
+  readonly command?: boolean;
+  readonly control?: boolean;
+  readonly option?: boolean;
+  readonly shift?: boolean;
 }
 
 /// The native capture source. "microphone" captures the selected/default
@@ -994,6 +984,104 @@ export interface FetchStreamRoute<M extends Msgish> {
   readonly err: BytesKind<M>;
 }
 
+/// Complete subprocess and clipboard records retain loss and failure metadata.
+/// Keys echo the authored wire key as bytes; no native engine address crosses the ABI.
+export type SpawnExitReason = "exited" | "signaled" | "cancelled" | "rejected" | "spawn_failed";
+export type ClipboardOutcome = "ok" | "failed" | "rejected" | "cancelled";
+export type ClipboardOp = "read" | "write";
+export type VideoSourceKind = "local" | "stream";
+export interface SpawnLineEventArm {
+  readonly key: Uint8Array;
+  readonly line: Uint8Array;
+  readonly truncated: boolean;
+  readonly droppedBefore: number;
+}
+export interface SpawnExitEventArm {
+  readonly key: Uint8Array;
+  readonly code: number;
+  readonly reason: SpawnExitReason;
+  readonly droppedLines: number;
+  readonly output: Uint8Array;
+  readonly outputTruncated: boolean;
+  readonly stderrTail: Uint8Array;
+  readonly stderrTruncated: boolean;
+}
+export interface ClipboardEventArm {
+  readonly key: Uint8Array;
+  readonly operation: ClipboardOp;
+  readonly outcome: ClipboardOutcome;
+  readonly text: Uint8Array;
+  readonly droppedBefore: number;
+}
+/// A copied mirror of the single native playback channel, captured at command
+/// issue. The reply runs in the same dispatch, before returning to the host.
+/// Declarative/foreign playback has an empty key; ownership remains native.
+export interface VideoSnapshotArm {
+  readonly key: Uint8Array;
+  readonly active: boolean;
+  readonly surface: number;
+  readonly playing: boolean;
+  readonly buffering: boolean;
+  readonly completed: boolean;
+  readonly looping: boolean;
+  readonly muted: boolean;
+  readonly source: VideoSourceKind;
+  readonly positionMs: number;
+  readonly durationMs: number;
+  readonly width: number;
+  readonly height: number;
+  readonly volume: number;
+}
+/// A flat, exact capability record. Reverse assignability refuses missing enum
+/// states as well as extra/missing fields, before native dispatch is possible.
+export type CapabilityKind<M extends Msgish, P> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof P]
+    ? [keyof P] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & P
+        ? P extends Omit<M, "kind"> ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+export interface SpawnEventsRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly stdin?: Uint8Array;
+  readonly collect?: boolean;
+  readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+  readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+/** Native subprocess identity and complete results, without numeric rounding. */
+export interface ExactSpawnEventsRoute<M extends Msgish> {
+  readonly stdin?: Uint8Array;
+  readonly collect?: boolean;
+  readonly line?: CapabilityKind<M, SpawnLineEventArm>;
+  readonly exit: CapabilityKind<M, SpawnExitEventArm>;
+}
+/// Complete file terminals: byte counters and signed timestamps are decimal
+/// bytes so Node and compiled cores retain the full native integer domain.
+export type FileOperation = "read" | "write" | "append" | "stat" | "read_stream" | "write_stream_open" | "write_stream_chunk" | "write_stream_close" | "delete";
+export type FileEvent = "terminal" | "chunk" | "done";
+export type FileOutcome = "ok" | "not_found" | "io_failed" | "truncated" | "rejected" | "cancelled" | "sink_missing" | "out_of_order" | "disk_full";
+export interface FileResultArm {
+  readonly key: Uint8Array; readonly operation: FileOperation; readonly event: FileEvent;
+  readonly outcome: FileOutcome; readonly bytes: Uint8Array; readonly totalBytes: Uint8Array;
+  readonly mtimeMs: Uint8Array; readonly exists: boolean; readonly droppedBefore: number;
+}
+export type TimerOutcome = "fired" | "rejected";
+export interface TimerResultArm {
+  readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: TimerOutcome;
+}
+export interface FileResultRoute<M extends Msgish> { readonly key?: string; readonly replace?: boolean; readonly result: CapabilityKind<M, FileResultArm>; }
+export interface TimerResultRoute<M extends Msgish> { readonly result: CapabilityKind<M, TimerResultArm>; }
+
+export interface ClipboardResultRoute<M extends Msgish> {
+  readonly key?: string;
+  readonly result: CapabilityKind<M, ClipboardEventArm>;
+}
+export interface VideoSnapshotRoute<M extends Msgish> {
+  readonly snapshot: CapabilityKind<M, VideoSnapshotArm>;
+}
+
 /// `Cmd.spawn` routing, line mode: each stdout line dispatches the optional
 /// `line` arm (one bytes field; omitted = lines dropped), a clean exit the
 /// `exit` arm (one number field — the exit code), every other end the `err`
@@ -1036,6 +1124,21 @@ export interface AudioRoute<M extends Msgish> {
   readonly event: AudioEventKind<M>;
 }
 
+export interface ExactAudioSource extends AudioSource {
+  /** Derive a content-addressed path for the URL when cachePath is empty.
+   * Empty or omitted disables caching. */
+  readonly cacheDir?: Uint8Array;
+}
+
+export interface ExactAudioRoute<M extends Msgish> {
+  readonly event: ExactAudioEventKind<M>;
+}
+
+/** Controls for the single native player. Volume is remembered while idle;
+ * seek positions use canonical unsigned decimal bytes. */
+export { type AudioTransport } from "./events.ts";
+import { type AudioTransport } from "./events.ts";
+
 /// A `Cmd.videoLoad` source. `surface` is the model-owned media-surface id
 /// the markup binds — the texture channel the decoded frames feed. The
 /// local `path` is tried first; a missing file falls through to `url`
@@ -1076,6 +1179,22 @@ export interface ImageSource {
 
 /// `Cmd.imageLoad` routing: the ONE terminal result dispatches the `event`
 /// arm (the five-field ImageEventArm record, matched by field name).
+/** Complete image terminal with a lossless requested identity. */
+export type ImageWordsEventArm = {
+  readonly imageLower: number; readonly imageUpper: number;
+  readonly state: ImageState; readonly width: number; readonly height: number; readonly status: number;
+};
+export type ImageWordsEventKind<M extends Msgish> = M extends Msgish
+  ? [Exclude<keyof M, "kind">] extends [keyof ImageWordsEventArm]
+    ? [keyof ImageWordsEventArm] extends [Exclude<keyof M, "kind">]
+      ? M extends Msgish & ImageWordsEventArm
+        ? [ImageState] extends [M["state"]] ? M["kind"] : never
+        : never
+      : never
+    : never
+  : never;
+export interface ImageWordsRoute<M extends Msgish> { readonly event: ImageWordsEventKind<M>; }
+
 export interface ImageRoute<M extends Msgish> {
   readonly event: ImageEventKind<M>;
 }
@@ -1122,6 +1241,9 @@ export interface NotificationSpec {
 /// `date`/`time`/`datetime` functions (fixed UTC), this is intentionally an
 /// effect because the user's locale and time zone are ambient host state.
 export type LocalTimeStyle = "date" | "time" | "datetime";
+
+/// A chord to send, shaped like a global shortcut binding; it may have no modifier.
+export type KeyChord = GlobalShortcutBinding;
 
 /// An inert command value, parameterized by the app's Msg union so the
 /// factories can validate message targets. Opaque to app code: build with
@@ -1296,6 +1418,19 @@ export type Cmd<M extends Msgish> =
       readonly body: Uint8Array;
     }
   | { readonly op: "clip_write"; readonly bytes: Uint8Array }
+  | { readonly op: "wall_time"; readonly msgKind: string }
+  | { readonly op: "read_file_result_key"; readonly replace: boolean; readonly key: Uint8Array; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result_key"; readonly replace: boolean; readonly key: Uint8Array; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "cancel_key"; readonly key: Uint8Array }
+  | { readonly op: "read_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array }
+  | { readonly op: "write_file_result"; readonly replace: boolean; readonly key: string; readonly resultKind: string; readonly path: Uint8Array; readonly bytes: Uint8Array }
+  | { readonly op: "timer_result_exact"; readonly key: string; readonly afterMs: Uint8Array; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
+  | { readonly op: "timer_result"; readonly key: string; readonly afterMs: number; readonly mode: "one_shot" | "repeating"; readonly msgKind: string }
+  | { readonly op: "clip_write_result"; readonly key: string; readonly resultKind: string; readonly bytes: Uint8Array }
+  | { readonly op: "spawn_events"; readonly key: string; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "spawn_events_exact"; readonly key: Uint8Array; readonly lineKind: string; readonly exitKind: string; readonly collect: boolean; readonly argv: readonly Uint8Array[]; readonly stdin: Uint8Array }
+  | { readonly op: "cancel_exact"; readonly key: Uint8Array }
+  | { readonly op: "video_snapshot"; readonly snapshotKind: string }
   | { readonly op: "clip_read"; readonly key: string; readonly okKind: string; readonly errKind: string }
   | { readonly op: "show_notification"; readonly id: Uint8Array; readonly title: Uint8Array; readonly subtitle: Uint8Array; readonly body: Uint8Array; readonly actionLabel: Uint8Array; readonly actionCommand: Uint8Array }
   | { readonly op: "delay"; readonly key: string; readonly afterMs: number; readonly msgKind: string }
@@ -1327,6 +1462,8 @@ export type Cmd<M extends Msgish> =
       /// Seek position (ms) / volume (0..1); 0 for the value-less verbs.
       readonly value: number;
     }
+  | { readonly op: "audio_play_exact"; readonly key: Uint8Array; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly cacheDir: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "audio_transport"; readonly transport: AudioTransport }
   | {
       readonly op: "video_load";
       readonly key: string;
@@ -1341,13 +1478,15 @@ export type Cmd<M extends Msgish> =
   | {
       readonly op: "video_ctl";
       readonly key: string;
-      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop";
+      readonly verb: "play" | "pause" | "stop" | "seek" | "volume" | "muted" | "loop" | "restart";
       /// Seek position (ms) / volume (0..1) / the muted-loop switch
       /// (0 = off, 1 = on); 0 for the value-less verbs.
       readonly value: number;
     }
   | { readonly op: "window_show"; readonly label: string }
   | { readonly op: "window_hide"; readonly label: string }
+  | { readonly op: "window_close"; readonly label: string }
+  | { readonly op: "window_minimize"; readonly label: string }
   | { readonly op: "dock_presence"; readonly visible: boolean }
   | { readonly op: "quit_app" }
   | {
@@ -1359,9 +1498,13 @@ export type Cmd<M extends Msgish> =
       readonly cachePath: Uint8Array;
       readonly expectedBytes: number;
     }
+  | { readonly op: "image_load_words"; readonly identity: ImageIdentity; readonly eventKind: string; readonly path: Uint8Array; readonly url: Uint8Array; readonly cachePath: Uint8Array; readonly expectedBytes: number }
+  | { readonly op: "image_cancel_words"; readonly identity: ImageIdentity }
+  | { readonly op: "image_unregister_words"; readonly identity: ImageIdentity }
   | { readonly op: "image_cancel"; readonly id: number }
   | { readonly op: "image_unregister"; readonly id: number }
   | { readonly op: "channel_open"; readonly key: number; readonly eventKind: string; readonly maxPending: number }
+  | { readonly op: "channel_open_source"; readonly key: number; readonly eventKind: string; readonly startedKind: string; readonly maxPending: number; readonly source: string; readonly payload: Uint8Array }
   | { readonly op: "channel_close"; readonly key: number }
   | {
       readonly op: "audio_capture_start";
@@ -1420,6 +1563,11 @@ export function hostRecordBytes(payload: HostRecord): Uint8Array {
     }
   }
   return out;
+}
+
+function shortcutModifierBits(binding: GlobalShortcutBinding): number {
+  return ((binding.primary ?? false) ? 1 : 0) + ((binding.command ?? false) ? 2 : 0) + ((binding.control ?? false) ? 4 : 0) +
+    ((binding.option ?? false) ? 8 : 0) + ((binding.shift ?? false) ? 16 : 0);
 }
 
 function serviceU32(value: number): Uint8Array {
@@ -1564,6 +1712,36 @@ export const Cmd = {
   /// the timestamp (milliseconds, a plain number) as its single payload field.
   now<M extends Msgish>(msgKind: TimestampKind<M>): Cmd<M> {
     return { op: "now", msgKind };
+  },
+
+  /// Journaled signed-i64 milliseconds as canonical decimal bytes.
+  wallTime<M extends Msgish>(msgKind: BytesKind<M>): Cmd<M> { return { op: "wall_time", msgKind }; },
+
+  /// Read a whole file with every terminal field, including loss metadata.
+  /// Byte keys retain exact identities generated by app state, including u64 decimals.
+  readFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "read_file_result_key", replace: route.replace ?? true, key, resultKind: route.result, path };
+  },
+  writeFileResultKey<M extends Msgish>(key: Uint8Array, path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "write_file_result_key", replace: route.replace ?? true, key, resultKind: route.result, path, bytes };
+  },
+  cancelKey(key: Uint8Array): Cmd<never> { return { op: "cancel_key", key }; },
+  readFileResult<M extends Msgish>(path: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "read_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path };
+  },
+  /// Write with the complete terminal. Named keys follow readFile's replace
+  /// and silent-cancel policy; unrelated live capabilities refuse the request.
+  writeFileResult<M extends Msgish>(path: Uint8Array, bytes: Uint8Array, route: FileResultRoute<M>): Cmd<M> {
+    return { op: "write_file_result", replace: route.replace ?? true, key: route.key ?? "", resultKind: route.result, path, bytes };
+  },
+  /// One-shot or repeating timer with an observable host rejection. Re-arming replaces
+  /// the same key; cancellation remains silent, like Cmd.delay.
+  timerResult<M extends Msgish>(key: string, afterMs: number, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M> {
+    return { op: "timer_result", key, afterMs, mode, msgKind: route.result };
+  },
+  /// Canonical unsigned decimal milliseconds; zero and nanosecond overflow reject.
+  timerResultExact<M extends Msgish>(key: string, afterMs: Uint8Array, mode: "one_shot" | "repeating", route: TimerResultRoute<M>): Cmd<M> {
+    return { op: "timer_result_exact", key, afterMs, mode, msgKind: route.result };
   },
 
   host: hostCmd,
@@ -1788,6 +1966,12 @@ export const Cmd = {
     return { op: "clip_write", bytes };
   },
 
+  /// Write with one complete terminal result, including refusal/cancellation.
+  /// A duplicate live key is rejected; it never replaces a pending write.
+  clipboardWriteResult<M extends Msgish>(bytes: Uint8Array, route: ClipboardResultRoute<M>): Cmd<M> {
+    return { op: "clip_write_result", key: route.key ?? "", resultKind: route.result, bytes };
+  },
+
   /// Read the system clipboard. Exactly one terminal Msg: the `ok` arm with
   /// the text bytes, or the `err` arm with the reason bytes ("failed",
   /// "rejected").
@@ -1825,6 +2009,19 @@ export const Cmd = {
   /// Fire-and-forget; invalid or unavailable requests fail closed.
   revealPath(path: Uint8Array): Cmd<never> {
     return { op: "host_bytes", name: "native-sdk.os.revealPath", payload: path };
+  },
+
+  /// Keyboard input for whichever app has focus; requires the `keyboard_input` permission.
+  keyboard: {
+    /// Press one chord, such as `{ key: asciiBytes("v"), primary: true }` to paste; ok carries empty bytes.
+    sendChord<M extends Msgish>(chord: KeyChord, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.sendChord", { key: chord.key, modifiers: shortcutModifierBits(chord) }, route);
+    },
+
+    /// Ok carries `granted`, `denied`, or `not_required`; `prompt` lets the OS show its grant prompt.
+    accessStatus<M extends Msgish>(options: { readonly prompt?: boolean }, route: RequestRoute<M>): Cmd<M> {
+      return Cmd.request("native-sdk.keyboard.accessStatus", new Uint8Array([options.prompt === true ? 1 : 0]), route);
+    },
   },
 
   /// Format an epoch timestamp (milliseconds, the same unit as `Cmd.now`) in
@@ -1869,6 +2066,25 @@ export const Cmd = {
     };
   },
 
+  /// Stream complete line/exit records. Collect mode retains stdout, stderr
+  /// tails, truncation and drop counts even for unsuccessful exits.
+  spawnEvents<M extends Msgish>(argv: readonly Uint8Array[], route: SpawnEventsRoute<M>): Cmd<M> {
+    return { op: "spawn_events", key: route.key ?? "", lineKind: route.collect ? "" : (route.line ?? ""),
+      exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
+  /** Stream complete subprocess records under a canonical unsigned decimal key.
+   * Native admission owns duplicate-key refusal and the one terminal per request.
+   * A refused request retains its own completion route without replacing a live child.
+   * Malformed keys fail admission before any native operation. */
+  spawnEventsExact<M extends Msgish>(key: Uint8Array, argv: readonly Uint8Array[], route: ExactSpawnEventsRoute<M>): Cmd<M> {
+    return { op: "spawn_events_exact", key, lineKind: route.collect ? "" : (route.line ?? ""),
+      exitKind: route.exit, collect: route.collect ?? false, argv, stdin: route.stdin ?? new Uint8Array(0) };
+  },
+
+  /** Cancel an engine effect by its exact native identity. Its ordinary terminal remains routed. */
+  cancelExact(key: Uint8Array): Cmd<never> { return { op: "cancel_exact", key }; },
+
   /// Open (or replace — one player is the whole surface) the keyed audio
   /// event stream: resolve the source cascade (local path, then url, cached
   /// and integrity-gated) and start playback. Every playback event
@@ -1885,6 +2101,18 @@ export const Cmd = {
       cachePath: source.cachePath ?? new Uint8Array(0),
       expectedBytes: source.expectedBytes ?? 0,
     };
+  },
+
+  /** Open the single player with an exact caller-chosen u64 identity.
+   * Deferred rejections and failures retain their load's route and key after replacement.
+   * A rejected source reports its own key without replacing the active player.
+   * Malformed identities fail admission before any native operation. */
+  audioPlayExact<M extends Msgish>(key: Uint8Array, source: ExactAudioSource, route: ExactAudioRoute<M>): Cmd<M> {
+    return { op: "audio_play_exact", key, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), cacheDir: source.cacheDir ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+
+  audioTransport(transport: AudioTransport): Cmd<never> {
+    return { op: "audio_transport", transport };
   },
 
   /// Pause the keyed playback in place (no event echo — the caller
@@ -1940,6 +2168,17 @@ export const Cmd = {
       loop: source.loop ?? false,
       muted: source.muted ?? false,
     };
+  },
+
+  /// Read the native channel mirror as an explicit, deterministic reply.
+  /// This performs no OS operation and adds no effect journal entry.
+  videoSnapshot<M extends Msgish>(route: VideoSnapshotRoute<M>): Cmd<M> {
+    return { op: "video_snapshot", snapshotKind: route.snapshot };
+  },
+
+  /// Reload the same owned source from zero, including completed playback.
+  videoRestart(key: string): Cmd<never> {
+    return { op: "video_ctl", key, verb: "restart", value: 0 };
   },
 
   /// Start or resume the loaded playback — the poster-frame counterpart
@@ -2008,6 +2247,18 @@ export const Cmd = {
     return { op: "window_hide", label };
   },
 
+  /// Close the declared window through its native close policy. Closing
+  /// the last window follows the app's normal shutdown path.
+  closeWindow(label: string): Cmd<never> {
+    return { op: "window_close", label };
+  },
+
+  /// Minimize the declared window using the native window manager.
+  /// Both window verbs are fire-and-forget; unknown labels no-op.
+  minimizeWindow(label: string): Cmd<never> {
+    return { op: "window_minimize", label };
+  },
+
   /// Control whether the app appears in the macOS Dock and app switcher.
   /// Unsupported hosts ignore the command.
   setDockPresence(visible: boolean): Cmd<never> {
@@ -2060,6 +2311,21 @@ export const Cmd = {
     };
   },
 
+  /** Lossless 63-bit identities: a 32-bit lower word and a 31-bit upper word. */
+  imageLoadWords<M extends Msgish>(identity: ImageIdentity, source: ImageSource, route: ImageWordsRoute<M>): Cmd<M> {
+    return { op: "image_load_words", identity, eventKind: route.event, path: source.path ?? new Uint8Array(0), url: source.url ?? new Uint8Array(0), cachePath: source.cachePath ?? new Uint8Array(0), expectedBytes: source.expectedBytes ?? 0 };
+  },
+  imageCancelWords(identity: ImageIdentity): Cmd<never> { return { op: "image_cancel_words", identity }; },
+  imageUnregisterWords(identity: ImageIdentity): Cmd<never> { return { op: "image_unregister_words", identity }; },
+  imageBatchWords<M extends Msgish>(commands: readonly ImageWordsCommand[], route: ImageWordsRoute<M>): Cmd<M> {
+    const cmds: Cmd<M>[] = [];
+    for (const command of commands) {
+      if (command.operation === "load") cmds.push({ op: "image_load_words", identity: command.identity, eventKind: route.event, path: command.path, url: command.url, cachePath: command.cachePath, expectedBytes: command.expectedBytes });
+      else if (command.operation === "cancel") cmds.push({ op: "image_cancel_words", identity: command.identity });
+      else cmds.push({ op: "image_unregister_words", identity: command.identity });
+    }
+    return { op: "batch", cmds };
+  },
   /// End the in-flight image load under `id`, if any — LOUDLY: the load's
   /// one terminal arrives as its own `event` arm with state "cancelled"
   /// (ending an in-flight load is an observable event, the spawn cancel
@@ -2119,6 +2385,18 @@ export const Cmd = {
   /// starts, keeping replay fully offline.
   channelOpen<M extends Msgish>(key: number, route: ChannelRoute<M>): Cmd<M> {
     return { op: "channel_open", key, eventKind: route.event, maxPending: 64 };
+  },
+
+  /** Open a channel and attempt native producer startup in the same dispatch.
+   * The source name is 1–255 UTF-8 bytes and arguments are at most 4096 bytes.
+   * Startup runs only for this newly accepted occupancy; a refused open never
+   * starts an existing producer. The started arm runs before the settled view,
+   * while channel events retain their normal drain boundary. On failure the
+   * app closes the channel. The built-in native-sdk.process.samples source
+   * takes empty arguments and posts process readings every 500 ms.
+   */
+  channelOpenSource<M extends Msgish>(key: number, source: string, payload: Uint8Array, route: ChannelRoute<M> & { readonly started: ChannelSourceKind<M> }): Cmd<M> {
+    return { op: "channel_open_source", key, source, payload, eventKind: route.event, startedKind: route.started, maxPending: 64 };
   },
 
   /// Close the open channel under `key`: posts stop landing, the
@@ -2221,6 +2499,7 @@ export const Cmd = {
 export type Sub<M extends Msgish> =
   | { readonly op: "none" }
   | { readonly op: "timer"; readonly key: string; readonly everyMs: number; readonly msgKind: string }
+  | { readonly op: "global_shortcut"; readonly id: string; readonly key: Uint8Array; readonly modifiers: number; readonly msgKind: string }
   | {
       readonly op: "db_live";
       readonly key: string;
@@ -2242,6 +2521,13 @@ export const Sub = {
   /// its single number payload field.
   timer<M extends Msgish>(key: string, everyMs: number, msgKind: TimestampKind<M>): Sub<M> {
     return { op: "timer", key, everyMs, msgKind };
+  },
+
+  /// A system-wide shortcut that fires while other apps have focus. It is
+  /// registered while declared and re-registered when the binding changes;
+  /// every report dispatches the named arm with `id` and a GlobalShortcutState.
+  globalShortcut<M extends Msgish>(id: string, binding: GlobalShortcutBinding, msgKind: GlobalShortcutKind<M>): Sub<M> {
+    return { op: "global_shortcut", id, key: binding.key, modifiers: shortcutModifierBits(binding), msgKind };
   },
 
   // @native-sqlite-generated-subs

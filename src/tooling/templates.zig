@@ -1410,6 +1410,7 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    const trace_option = b.option(TraceOption, "trace", "Trace output: off, events, runtime, all") orelse .events;
         \\    const debug_overlay = b.option(bool, "debug-overlay", "Enable debug overlay output") orelse false;
         \\    const automation_enabled = b.option(bool, "automation", "Enable Native SDK automation artifacts") orelse false;
+        \\    const webview_inspection = b.option(bool, "webview-inspect", "Enable macOS system WebView inspection (default: Debug builds only)");
         \\    const js_bridge_enabled = b.option(bool, "js-bridge", "Enable optional JavaScript bridge stubs") orelse false;
         \\    const web_engine_override = b.option(WebEngineOption, "web-engine", "Override app.zon web engine: system, chromium");
         \\    const web_layer_override = b.option(WebLayerOption, "web-layer", "Override app.zon webview_layer: auto, include, exclude");
@@ -1460,6 +1461,9 @@ fn buildZig(allocator: std.mem.Allocator, names: TemplateNames, framework_path: 
         \\    options.addOption([]const u8, "web_engine", @tagName(web_engine));
         \\    options.addOption(bool, "debug_overlay", debug_overlay);
         \\    options.addOption(bool, "automation", automation_enabled);
+        \\    // Resolve the default inside each runner so the separate packaged
+        \\    // release binary never inherits the development binary's setting.
+        \\    options.addOption(?bool, "webview_inspection", webview_inspection);
         \\    options.addOption(bool, "js_bridge", js_bridge_enabled);
         \\    options.addOption(bool, "web_layer", web_layer);
         \\    const options_mod = options.createModule();
@@ -2399,6 +2403,8 @@ fn runnerZig() []const u8 {
     \\    relational_store: ?native_sdk.RelationalStoreBinding = null,
     \\    file_access: ?native_sdk.FileAccessBinding = null,
     \\    file_access_enforce: bool = true,
+    \\    /// Explicit compatibility capability for an app's former data identity.
+    \\    legacy_data_directory: bool = false,
     \\    relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
     \\
     \\    fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
@@ -2408,6 +2414,10 @@ fn runnerZig() []const u8 {
     \\            .version = manifestStringField("version"),
     \\            .description = manifestStringField("description"),
     \\            .has_web_content = manifestHasWebContent(),
+    \\            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+    \\                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+    \\            else
+    \\                @import("builtin").mode == .Debug,
     \\            .declares_tray = manifestDeclaresTrayCapability(),
     \\            .dock_visible = manifestDockVisible(),
     \\            .window_title = self.window_title,
@@ -2893,7 +2903,8 @@ fn runnerZig() []const u8 {
     \\    var record_store_open = false;
     \\    var resolved_options = options;
     \\    var file_root_buffers: [6][1024]u8 = undefined;
-    \\    var file_roots: [6][]const u8 = undefined;
+    \\    var file_roots: [7][]const u8 = undefined;
+    \\    var legacy_data_buffer: [1024]u8 = undefined;
     \\    const resolved_file_dirs = native_sdk.app_dirs.resolve(
     \\        .{ .name = options.bundle_id },
     \\        native_sdk.app_dirs.currentPlatform(),
@@ -2902,8 +2913,17 @@ fn runnerZig() []const u8 {
     \\    ) catch null;
     \\    var file_root_count: usize = 0;
     \\    if (resolved_file_dirs) |dirs| {
-    \\        file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
-    \\        file_root_count = file_roots.len;
+    \\        file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+    \\        file_root_count = 6;
+    \\    }
+    \\    if (options.legacy_data_directory) {
+    \\        if (native_sdk.app_dirs.resolveOne(
+    \\            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
+    \\            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
+    \\        )) |directory| {
+    \\            file_roots[file_root_count] = directory;
+    \\            file_root_count += 1;
+    \\        } else |_| {}
     \\    }
     \\    resolved_options.file_access = .{
     \\        .roots = file_roots[0..file_root_count],
@@ -3474,7 +3494,7 @@ fn nextPackageJson(allocator: std.mem.Allocator, names: TemplateNames) ![]const 
         \\    "@types/node": "^25.6.2",
         \\    "@types/react": "^19.2.14",
         \\    "@types/react-dom": "^19.2.3",
-        \\    "typescript": "^6.0.3"
+        \\    "typescript": "^7.0.2"
         \\  }
         \\}
         \\

@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "installationFormat": 2,
+  "version": "0.3.2",
+  "repository": "vercel-labs/scriptc",
+  "releases": {
+    "darwin-arm64": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-darwin-arm64.tar.gz",
+      "bytes": 61103733,
+      "sha256": "a915c1d5e1236b9b871e6b9f3eda4006486b147566af9a52b59aeeed09e2512f"
+    },
+    "darwin-x64": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-darwin-x64.tar.gz",
+      "bytes": 63256126,
+      "sha256": "dad6ff96e80473fdd612f5648c7697300860623cebdabb7a0ab02898f6c293b8"
+    },
+    "linux-arm64-gnu": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-arm64-gnu.tar.gz",
+      "bytes": 72765037,
+      "sha256": "33e380e0c7cff941eda57966b18c1be9f22da4fb5c6770f49f50af1b66868df4"
+    },
+    "linux-arm64-musl": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-arm64-musl.tar.gz",
+      "bytes": 63971343,
+      "sha256": "9fc6e33cdd54962c7c3f53f009a13a9ac2c67ae139b1ae306d5e647cfe3911ad"
+    },
+    "linux-x64-gnu": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-x64-gnu.tar.gz",
+      "bytes": 75664254,
+      "sha256": "b6255ab2456b7afaee384cfca54f94b1d9aa5e7d8d5e343be6c558a9dcf4c13b"
+    },
+    "linux-x64-musl": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-linux-x64-musl.tar.gz",
+      "bytes": 66837074,
+      "sha256": "33790ceac5227eb3f5bae6f04e17baba3e2f95db5ddc05bdb39b310d4180bbc2"
+    },
+    "win32-x64-msvc": {
+      "url": "https://github.com/vercel-labs/scriptc/releases/download/v0.3.2/scriptc-0.3.2-win32-x64-msvc.tar.gz",
+      "bytes": 74275594,
+      "sha256": "20af007e7b894ddcf22471c5f7b3a3e1a87f1c08e4e3d99baea3b7dd6e29285e"
+    }
+  },
+  "packages": {
+    "compiler": {
+      "name": "@scriptc/compiler",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/compiler/-/compiler-0.3.2.tgz",
+      "integrity": "sha512-mSBaJdJVRu1DvFAV/N06lilhwf8I0xiaW6+rRsvBn1ezG9uNXygVkyBD+WBVW2VGx7D6zd6KezzLiWI6QfHqEQ=="
+    },
+    "typescript": {
+      "name": "typescript",
+      "version": "7.0.2",
+      "url": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
+      "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA=="
+    },
+    "typescript5": {
+      "name": "typescript",
+      "version": "5.9.3",
+      "url": "https://registry.npmjs.org/typescript/-/typescript-5.9.3.tgz",
+      "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw=="
+    },
+    "runtime-ios-arm64": {
+      "name": "@scriptc/runtime-ios-arm64",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-arm64/-/runtime-ios-arm64-0.3.2.tgz",
+      "integrity": "sha512-rRqnQLoGzi0uUmJXe7nPyTxRt0vBzauoPQJPixQKK+LWKJPk2YsU0GMYcbLfCXHkZ8uVMeVoP9qD1Wzhvn+2qQ=="
+    },
+    "runtime-ios-simulator-arm64": {
+      "name": "@scriptc/runtime-ios-simulator-arm64",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-ios-simulator-arm64/-/runtime-ios-simulator-arm64-0.3.2.tgz",
+      "integrity": "sha512-+mTut4yurH/gxU4aMEaxUU6IfDAj9WTf6mqSdDudqs/kPhZ7bhg3hqSQe05Mwg4fB5KHPpYX5E7Rbj5nBp27GQ=="
+    },
+    "runtime-android-arm64": {
+      "name": "@scriptc/runtime-android-arm64",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-android-arm64/-/runtime-android-arm64-0.3.2.tgz",
+      "integrity": "sha512-x2bKlP3Qiy3A93MVWpqdUlX+klIjWIZYUt5Ucys7SxXQuWWIkt9qRYojn0Ni9XtstJ8n/ZCMQVi5Mol5Q1A7+w=="
+    },
+    "runtime-wasm32-wasi": {
+      "name": "@scriptc/runtime-wasm32-wasi",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/runtime-wasm32-wasi/-/runtime-wasm32-wasi-0.3.2.tgz",
+      "integrity": "sha512-J4tqKQYWS8pbqZ1YhydCmcf6/4rRoi9TMUMV6xJE3k5gJk0/nsKx4pashMZowXBOQ4CZsoVchlzwyB1kTxdsDg=="
+    },
+    "types": {
+      "name": "@scriptc/types",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/types/-/types-0.3.2.tgz",
+      "integrity": "sha512-cHoAZJOpJxfYDWcYsTIZvJGCtpQWbMqqO0Z+BBqk+dbkRtMrcRXiepPzN0vSsV9PMdAyBvYIdAIzdJ5X8jSLqA=="
+    },
+    "threads": {
+      "name": "@scriptc/threads",
+      "version": "0.3.2",
+      "url": "https://registry.npmjs.org/@scriptc/threads/-/threads-0.3.2.tgz",
+      "integrity": "sha512-CE3cvQ7LfgxX+9F9elf27ThGD2rArCI9C2ticx6WvqPsBsHWUYH9e4xNQ+Ci0dTFdJgwp0lplE2TdlkiqdPIKQ=="
+    }
+  },
+  "runtimeAbi": 20,
+  "typescriptNativeVersion": "7.0.2"
+}

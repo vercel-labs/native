@@ -1,0 +1,44 @@
+<!-- The habit tracker view. Embedded into the binary and hot-reloaded in
+     dev: edit this file while the app runs and the window updates without
+     losing streak state. -->
+<column background="background">
+  <!-- The header IS the titlebar (tall hidden-inset chrome): it is the
+       window's drag surface, leads with a spacer sized to the traffic
+       lights via chromeMsg, and matches its height to the titlebar band
+       so its controls and the lights share a centerline. -->
+  <!-- Band contents: the one primary action holds the trailing corner;
+       the rest of the band stays bare drag surface. -->
+  <row height="{header_height}" padding="12" gap="10" cross="center" background="surface" window-drag="true" label="Habits header">
+    <spacer width="{chrome_leading}" />
+    <spacer grow="1" />
+    <button variant="primary" on-press="add">New habit</button>
+  </row>
+  <separator />
+  <column grow="1" gap="12" padding="16">
+    <!-- Single selection is radio semantics: the group renders selection
+         from {f == filter} equalities, each radio's on-toggle sets the
+         model field, and the visible label is element content. -->
+    <radio-group gap="8" label="Filter">
+      <for each="filters" as="f">
+        <radio checked="{f == filter}" on-toggle="set_filter:{f}">{f}</radio>
+      </for>
+    </radio-group>
+    <if test="{habit_count > 0}">
+      <scroll grow="1">
+        <column gap="2">
+          <for each="visible" key="id" as="h">
+            <row global-key="{h.id}" gap="8" padding="6" cross="center" role="listitem" label="{h.name}">
+              <text grow="1">{h.name}</text>
+              <text>{h.streak} days</text>
+              <button size="sm" on-press="done:{h.id}">Done today</button>
+            </row>
+          </for>
+        </column>
+      </scroll>
+    </if>
+    <else>
+      <alert text="No habits yet - add your first habit." grow="1" />
+    </else>
+  </column>
+  <status-bar>{summaryLine}</status-bar>
+</column>

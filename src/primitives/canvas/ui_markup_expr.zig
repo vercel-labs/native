@@ -12,8 +12,10 @@
 //! at most `max_expression_nodes` nodes — termination is structural, not a
 //! property anyone has to prove per expression.
 //!
-//! Engine seam: the parser and type checker are comptime-callable and
-//! allocation-free (fixed arrays). Each engine resolves the tree's binding
+//! Engine seam: the reference parser and type checker are comptime-callable
+//! and allocation-free (fixed arrays). Runtime canonicalization uses the
+//! installed compiled grammar with exact native literal-conversion capabilities.
+//! Each engine resolves the tree's binding
 //! nodes to `Value`s its own way (interpreter: scope chain at runtime;
 //! compiled engine: comptime-unrolled field access), then hands them to the
 //! ONE `eval` below — identical inputs through identical arithmetic and
@@ -291,6 +293,13 @@ pub fn parse(source: []const u8, tree: *ExprTree, diagnostic: *Diagnostic) bool 
     }
     tree.root = root;
     return true;
+}
+
+/// Runtime compiled grammar with the original allocation-free parser retained
+/// for compile-time consumers and the independent native reference.
+pub fn parseWithPolicy(owner: ?Policy, source: []const u8, tree: *ExprTree, diagnostic: *Diagnostic) bool {
+    if (owner) |callback| return @import("ui_markup_parser.zig").parse(callback, source, tree, diagnostic);
+    return parse(source, tree, diagnostic);
 }
 
 const ExprParseError = error{ExprSyntax};
@@ -886,6 +895,187 @@ pub fn eval(tree: *const ExprTree, values: *[max_expression_nodes]Value, arena: 
         };
     }
     return .{ .value = values[tree.root] };
+}
+
+/// Compiled runtime programs carry only bounded metadata. Values and their
+/// byte lifetimes remain in the caller's arena; exact integers never pass
+/// through a floating-point transport. The original evaluator above remains
+/// the native reference and the path for native extensions without an owner.
+pub const Policy = *const fn ([]const u8, []u8) usize;
+
+pub fn equalWithPolicy(owner: ?Policy, a: Value, b: Value) bool {
+    const policy = owner orelse return Value.eql(a, b);
+    return @import("ui_markup_scalars.zig").evaluate(policy, 9, a, b).value.boolean;
+}
+
+pub fn truthyWithPolicy(owner: ?Policy, value: Value) bool {
+    const policy = owner orelse return value.truthy();
+    return @import("ui_markup_scalars.zig").evaluate(policy, 36, value, .{ .boolean = false }).value.boolean;
+}
+
+pub fn appendValueWithPolicy(owner: ?Policy, out: *std.ArrayListUnmanaged(u8), arena: std.mem.Allocator, value: Value) error{OutOfMemory}!void {
+    if (owner) |policy| return @import("ui_markup_display.zig").append(policy, out, arena, value);
+    return appendValue(out, arena, value);
+}
+
+pub fn evalWithPolicy(owner: ?Policy, tree: *const ExprTree, values: *[max_expression_nodes]Value, arena: std.mem.Allocator) error{OutOfMemory}!EvalOutcome {
+    const policy = owner orelse return eval(tree, values, arena);
+    if (tree.len == 0 or tree.len > max_expression_nodes or tree.root >= tree.len) @panic("invalid expression tree budget");
+    var input: [8 + max_expression_nodes * 12]u8 = @splat(0);
+    input[0..4].* = .{ 102, 1, @intCast(tree.len), @intCast(tree.root) };
+    for (tree.nodes[0..tree.len], 0..) |node, i| {
+        const at = 8 + i * 12;
+        input[at] = @intFromEnum(node.kind);
+        input[at + 1] = @intFromEnum(node.function);
+        input[at + 2] = node.arg_count;
+        if (node.kind == .binding) input[at + 3] = @as(u8, @intFromEnum(kindOf(values[i]))) + 1;
+        input[at + 4] = @intCast(node.lhs);
+        input[at + 5] = @intCast(node.rhs);
+        for (node.args, 0..) |arg, j| input[at + 6 + j] = @intCast(arg);
+    }
+    var output: [8 + max_expression_nodes * 2 * 4]u8 = undefined;
+    const size = policy(input[0 .. 8 + tree.len * 12], &output);
+    if (size < 8 or size > output.len or output[0] != 102 or output[1] != 1 or output[3] != tree.root or
+        size != 8 + @as(usize, output[2]) * 4 or std.mem.readInt(u32, output[4..8], .little) != 0)
+        @panic("invalid expression program header");
+    // Admit the complete program before allocating or touching any slot.
+    var cursor: usize = 0;
+    var digits = false;
+    var failed = false;
+    for (0..output[2]) |i| {
+        const at = 8 + i * 4;
+        const slot = output[at];
+        const capability = output[at + 1];
+        const teaching = output[at + 2];
+        const result_kind = output[at + 3];
+        if (failed or slot != cursor or slot >= tree.len or capability > 35) @panic("invalid expression program progress");
+        const node = tree.nodes[slot];
+        if (capability == 17) {
+            if (digits or teaching != 0 or result_kind != 0 or node.kind != .call or
+                !(node.function == .fixed or node.function == .pad or (node.function == .percent and node.arg_count > 1)))
+                @panic("invalid expression digits capability");
+            digits = true;
+        } else {
+            if (capability == 35) {
+                if (result_kind != 0 or !(teaching >= 1 and teaching <= 5 or teaching >= 16 and teaching <= 32))
+                    @panic("invalid expression teaching capability");
+                failed = true;
+            } else {
+                const expected: u8 = switch (node.kind) {
+                    .literal_int, .literal_float, .literal_string, .literal_bool => 0,
+                    .binding => 1,
+                    .call => 18 + @as(u8, @intFromEnum(node.function)),
+                    else => @as(u8, @intFromEnum(node.kind)) - 3,
+                };
+                if (capability != expected or teaching != 0 or result_kind < 1 or result_kind > 4)
+                    @panic("invalid expression storage capability");
+            }
+            cursor += 1;
+            digits = false;
+        }
+    }
+    if (digits or (!failed and cursor != tree.len)) @panic("incomplete expression program");
+    for (0..output[2]) |i| {
+        const at = 8 + i * 4;
+        const slot = output[at];
+        const node = tree.nodes[slot];
+        const capability = output[at + 1];
+        if (capability == 35) return .{ .fail = programMessage(output[at + 2]) };
+        if (capability == 17) {
+            if (digitsArg(values[node.args[1]]) == null) return .{ .fail = digits_range_message };
+            continue;
+        }
+        if (capability == 1) {
+            if (@as(u8, @intFromEnum(kindOf(values[slot]))) + 1 != output[at + 3]) @panic("invalid expression binding kind");
+            continue;
+        }
+        const outcome = try expressionCapability(policy, capability, node, values, arena);
+        switch (outcome) {
+            .fail => return outcome,
+            .value => |value| {
+                if (@as(u8, @intFromEnum(kindOf(value))) + 1 != output[at + 3]) @panic("invalid expression result kind");
+                values[slot] = value;
+            },
+        }
+    }
+    return .{ .value = values[tree.root] };
+}
+
+fn programMessage(code: u8) []const u8 {
+    return switch (code) {
+        1 => negate_type_message,
+        2 => logic_type_message,
+        3 => arithmetic_type_message,
+        4 => ordering_type_message,
+        5 => digits_range_message,
+        16...32 => signatureFor(@enumFromInt(code - 16)),
+        else => unreachable,
+    };
+}
+
+/// Explicit value/storage capabilities. The program selects their order;
+/// the scalar owner preserves exact integers through copied limbs, while
+/// native supplies original f32 primitives and deterministic formatting.
+fn expressionCapability(owner: Policy, capability: u8, node: ExprNode, values: *[max_expression_nodes]Value, arena: std.mem.Allocator) error{OutOfMemory}!EvalOutcome {
+    const value: Value = switch (capability) {
+        0 => switch (node.kind) {
+            .literal_int => .{ .integer = node.int },
+            .literal_float => .{ .float = node.float },
+            .literal_string => .{ .string = node.text },
+            .literal_bool => .{ .boolean = node.boolean },
+            else => unreachable,
+        },
+        2...7 => return @import("ui_markup_scalars.zig").evaluate(owner, capability, values[node.lhs], values[node.rhs]),
+        8 => blk: {
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            try appendValueWithPolicy(owner, &out, arena, values[node.lhs]);
+            try appendValueWithPolicy(owner, &out, arena, values[node.rhs]);
+            break :blk .{ .string = out.items };
+        },
+        9...16 => return @import("ui_markup_scalars.zig").evaluate(owner, capability, values[node.lhs], values[node.rhs]),
+        19, 21...26, 33, 34 => return textCapability(owner, node, values, arena),
+        18, 20 => blk: {
+            const digits = if (node.function == .percent and node.arg_count == 1) 0 else digitsArg(values[node.args[1]]) orelse return .{ .fail = digits_range_message };
+            const operand = values[node.args[0]];
+            if (operand != .integer and operand != .float) return .{ .fail = signatureFor(node.function) };
+            const bytes = (try @import("ui_markup_display.zig").fixed(owner, operand, digits, node.function == .percent, arena)) orelse
+                return .{ .fail = non_finite_message };
+            break :blk .{ .string = bytes };
+        },
+        27...32 => return @import("ui_markup_scalars.zig").evaluate(owner, capability, values[node.args[0]], values[node.args[1]]),
+        else => unreachable,
+    };
+    return .{ .value = value };
+}
+
+fn textCapability(owner: Policy, node: ExprNode, values: *[max_expression_nodes]Value, arena: std.mem.Allocator) error{OutOfMemory}!EvalOutcome {
+    const text = @import("ui_markup_text.zig");
+    const a = values[node.args[0]];
+    const signature = signatureFor(node.function);
+    const bytes = switch (node.function) {
+        .upper, .lower => if (a == .string)
+            try text.map(owner, if (node.function == .upper) 0 else 1, a.string, arena)
+        else
+            return .{ .fail = signature },
+        .trim => if (a == .string) text.trim(owner, a.string) else return .{ .fail = signature },
+        .thousands => if (a == .integer) try text.decimal(owner, 3, a.integer, 0, arena) else return .{ .fail = signature },
+        .pad => blk: {
+            const width = digitsArg(values[node.args[1]]) orelse return .{ .fail = digits_range_message };
+            if (a != .integer) return .{ .fail = signature };
+            break :blk try text.decimal(owner, 4, a.integer, width, arena);
+        },
+        .date, .time, .datetime => blk: {
+            if (a != .integer) return .{ .fail = signature };
+            const mode: u8 = if (node.function == .date) 5 else if (node.function == .time) 6 else 7;
+            break :blk (try text.timestamp(owner, mode, a.integer, arena)) orelse return .{ .fail = timestamp_range_message };
+        },
+        .plural => blk: {
+            if (a != .integer or values[node.args[1]] != .string or values[node.args[2]] != .string) return .{ .fail = signature };
+            break :blk values[node.args[text.plural(owner, a.integer)]].string;
+        },
+        else => unreachable,
+    };
+    return .{ .value = .{ .string = bytes } };
 }
 
 fn arithmetic(kind: NodeKind, left: Value, right: Value) error{OutOfMemory}!EvalOutcome {

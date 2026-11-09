@@ -1,0 +1,69 @@
+---
+title: "Radio"
+---
+
+import { ComponentPreview } from "@/components/component-preview";
+import { AttrTable } from "@/components/attr-table";
+import { CodeToggle } from "@/components/code-toggle";
+
+Use `radio` inside a `radio-group` to select one option. Give the group an accessible `label`, and provide each option’s visible label as content or `text`. Bind `checked` to the model’s choice.
+
+Descendant radios form one group regardless of nesting depth. The group has one Tab stop; arrow keys wrap through choices, and Home/End move to the first or last option. Focus and selection move together. A selection change dispatches `on-change` when bound, otherwise `on-toggle` or `on-press`. Activating an already selected radio does not dispatch `on-change`; legacy fallback handlers still receive the activation.
+
+<ComponentPreview name="radio-group" alt="A radio group rendered by the engine" caption="a radio group with one selected and one disabled option" />
+
+## Markup
+
+```html
+<radio-group gap="12" label="Density">
+  <radio checked="{density == 'default'}" on-change="set_default">Default</radio>
+  <row>
+    <radio checked="{density == 'comfortable'}" on-change="set_comfortable">Comfortable</radio>
+  </row>
+  <radio checked="{density == 'compact'}" disabled="true">Compact</radio>
+</radio-group>
+```
+
+One field holds the group's choice — a string-literal union in a TypeScript core, an enum in a Zig core — and each radio's arm sets it:
+
+<CodeToggle>
+
+```ts
+// model: { readonly density: "default" | "comfortable" | "compact" }
+case "set_comfortable":
+  return { ...model, density: "comfortable" };
+```
+
+```zig
+// model: density: enum { default, comfortable, compact } = .default,
+.set_comfortable => model.density = .comfortable,
+```
+
+</CodeToggle>
+
+## Programmatic construction (Zig)
+
+In a Zig view, the `canvas.Ui` builder constructs the same tree programmatically:
+
+```zig
+ui.el(.radio_group, .{ .gap = 12, .semantics = .{ .label = "Density" } }, .{
+    ui.el(.radio, .{ .text = "Default", .checked = model.density == .default, .on_change = .set_default }, .{}),
+    ui.row(.{}, .{
+        ui.el(.radio, .{ .text = "Comfortable", .checked = model.density == .comfortable, .on_change = .set_comfortable }, .{}),
+    }),
+    ui.el(.radio, .{ .text = "Compact", .checked = model.density == .compact, .disabled = true }, .{}),
+})
+```
+
+## Attributes
+
+<AttrTable
+  attrs={[
+    "text",
+    "checked",
+    "disabled",
+    "on-change",
+    "on-toggle",
+    "on-press",
+  ]}
+/>

@@ -69,17 +69,50 @@ const service_carrier = @import("service_carrier.zig");
 const relational_migrations = @import("migrations.zig");
 const app_sources = @import("app_sources.zig");
 const window_views = @import("window_views.zig");
+const ts_view = @import("compiled_view.zig");
 
 pub const panic = std.debug.FullPanic(native_sdk.debug.capturePanic);
 
-/// Re-exported so the model-contract step (and any test) reflects the
-/// core's real surface: `native check` verifies app.native against it.
-pub const Model = core.Model;
 pub const Msg = core.Msg;
 
 const dev = builtin.mode == .Debug;
-const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev });
+const Adapter = native_sdk.TsUiAppWithFeatures(core, .{ .runtime_markup = dev and !ts_view.enabled, .compiled_model = ts_view.enabled, .view_reload = view_reload_enabled });
 const App = Adapter.App;
+
+/// A Debug `native dev` build of compiled views (`-Dview-reload`)
+/// stages the development view exports; every other build has neither the
+/// exports nor this wiring.
+const view_reload_enabled = dev and @hasDecl(core, "nativeDevViewPrepare");
+var view_reload: if (view_reload_enabled) ViewReload else void = if (view_reload_enabled) .{} else {};
+
+const ViewReload = struct {
+    driver: ?native_sdk.view_reload.Driver(core) = null,
+
+    /// Announce this session to the markup watcher and hook the app's
+    /// watch timer to its updates. Replays keep the views they recorded.
+    fn arm(self: *ViewReload, init: std.process.Init) void {
+        const dir = init.environ_map.get(native_sdk.view_reload.env_var) orelse return;
+        if (init.environ_map.get("NATIVE_SDK_SESSION_REPLAY") != null) return;
+        var session: [8]u8 = undefined;
+        init.io.random(&session);
+        self.driver = native_sdk.view_reload.Driver(core).init(std.heap.page_allocator, init.io, dir, std.mem.readInt(u64, &session, .little)) catch |err| {
+            std.debug.print("markup reload is off: could not open {s} ({t})\n", .{ dir, err });
+            return;
+        };
+        self.driver.?.announce(@embedFile("view_reload_contract.json")) catch |err| {
+            std.debug.print("markup reload is off: could not write {s}/{s} ({t})\n", .{ dir, native_sdk.view_reload.build_file, err });
+            self.disarm();
+            return;
+        };
+        native_sdk.view_reload.installed = self.driver.?.hook();
+    }
+
+    fn disarm(self: *ViewReload) void {
+        native_sdk.view_reload.installed = null;
+        if (self.driver) |*driver| driver.deinit();
+        self.driver = null;
+    }
+};
 
 const shell_scene = native_sdk.app_manifest.shellConfigFrom(manifest);
 const canvas_label = native_sdk.app_manifest.firstGpuSurfaceLabel(shell_scene);
@@ -99,21 +132,33 @@ const app_markup_root = if (dev) void else @import("app_markup_root");
 const app_markup_sources = if (dev) void else [_]native_sdk.canvas.ui_markup.SourceFile{
     .{ .path = "app.native", .source = app_markup_root.source },
 } ++ app_sources.sources;
-const CompiledAppView = if (dev)
+const CompiledAppView = if (dev or ts_view.enabled)
     void
 else
     native_sdk.canvas.CompiledMarkupImports(core.Model, core.Msg, "app.native", &app_markup_sources);
 
 const app_permissions = manifestStringList(manifest, "permissions");
 const allowed_origins = manifestAllowedOrigins();
-const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
+/// A migration may explicitly request its former short-name data directory.
+/// The launcher supplies and grants that directory through the same owned
+/// environment capability, rather than trusting an ambient path override.
+const legacy_data_dir_env = "NATIVE_SDK_APP_LEGACY_DATA_DIR";
+fn requestsLegacyDataDirectory() bool {
+    if (comptime @hasDecl(core, "envMsgs")) inline for (core.envMsgs) |entry| {
+        if (std.mem.eql(u8, entry.env, legacy_data_dir_env)) return true;
+    };
+    return false;
+}
 
-pub fn main(init: std.process.Init) !void {
+const app_data_dir_env = "NATIVE_SDK_APP_DATA_DIR";
+const app_cache_dir_env = "NATIVE_SDK_APP_CACHE_DIR";
+
+fn appOptions(io: ?std.Io) Adapter.Options {
     var options: Adapter.Options = .{
         .name = manifest.name,
         .scene = shell_scene,
         .canvas_label = canvas_label,
-        .markup = if (dev) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = "src/app.native", .io = init.io } else null,
+        .markup = if (dev and !ts_view.enabled) .{ .source = appMarkup(), .sources = &app_sources.sources, .watch_path = if (io != null) "src/app.native" else null, .io = io } else null,
         // app.zon's theme pack; unthemed manifests get the house register.
         // The stock tokens compose the pack with the LIVE system
         // appearance, so TS apps follow the OS light/dark flip with no
@@ -123,16 +168,40 @@ pub fn main(init: std.process.Init) !void {
         .theme = comptime runner.manifestThemePack(),
         .theme_accent = comptime runner.manifestThemeAccent(),
     };
-    if (comptime !dev) options.view = CompiledAppView.build;
-    if (comptime @hasDecl(core.Model, "windows")) {
-        options.window_view = window_views.build;
-        options.fragment_watch = .{ .fragments = &window_views.fragments, .io = init.io };
+    if (comptime ts_view.enabled) options.view = ts_view.buildRuntime else if (comptime !dev) options.view = CompiledAppView.build;
+    if (comptime core.has_windows) {
+        if (comptime ts_view.enabled) {
+            options.window_view = ts_view.buildRuntimeWindow;
+        } else {
+            options.window_view = window_views.build;
+            if (io) |watch_io| options.fragment_watch = .{ .fragments = &window_views.fragments, .io = watch_io };
+        }
     }
     if (comptime @hasDecl(core, "commandMsg")) {
         // Menus, shortcuts, and chrome tabs dispatch through the core's
         // exported command mapper.
         options.on_command = core.commandMsg;
     }
+    return options;
+}
+
+/// A separate executable uses the same core, markup, theme and command routes.
+/// Test startup never enters production persistence, services or app directories.
+pub fn testMain(init: std.process.Init) !void {
+    var boot_fonts = try BootFonts.load(init.io);
+    defer boot_fonts.deinit();
+    var options = appOptions(null);
+    options.fonts = boot_fonts.entries[0..boot_fonts.len];
+    try native_sdk.native_testing.runWithSecurity(Adapter, init, options, .{
+        .service_results = if (comptime services.enabled) .{ .index_fn = services.indexOf, .streaming_fn = services.isStreaming, .decode_fn = services.resultDecoder(core) } else null,
+    }, .{
+        .permissions = app_permissions,
+        .navigation = .{ .allowed_origins = allowed_origins },
+    });
+}
+
+pub fn main(init: std.process.Init) !void {
+    var options = appOptions(init.io);
     // The platform caches directory for this app: when the core's
     // `Cmd.audioPlay` names a URL with no cachePath, the bridge derives
     // the conventional content-addressed path under this directory —
@@ -165,6 +234,16 @@ pub fn main(init: std.process.Init) !void {
         &data_dir_buffer,
     ) catch "";
     if (app_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, app_data_dir) catch {};
+
+    var legacy_data_dir_buffer: [512]u8 = undefined;
+    const legacy_data_dir = if (comptime requestsLegacyDataDirectory()) native_sdk.app_dirs.resolveOne(
+        .{ .name = manifest.name },
+        native_sdk.app_dirs.currentPlatform(),
+        native_sdk.debug.envFromMap(init.environ_map),
+        .data,
+        &legacy_data_dir_buffer,
+    ) catch "" else "";
+    if (legacy_data_dir.len > 0) std.Io.Dir.cwd().createDirPath(init.io, legacy_data_dir) catch {};
 
     // TypeScript services, on the build-selected carrier (service_carrier.zig).
     // In-process (explicit opt-in): the service archive is linked into this
@@ -222,17 +301,39 @@ pub fn main(init: std.process.Init) !void {
         } else |_| {}
     }
 
+    var boot_fonts = try BootFonts.load(init.io);
+    defer boot_fonts.deinit();
+    options.fonts = boot_fonts.entries[0..boot_fonts.len];
+
     // The core's launch-time environment channel (`envMsgs`): read each
     // named variable once, here at the boundary — never inside update —
     // and hand the present values to the adapter, which dispatches them
     // as ordinary journaled Msgs right after the boot command.
+    var launch_args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer launch_args.deinit();
+    _ = launch_args.next();
+    const first_launch_arg = launch_args.next();
     var env_values_buffer: [envMsgsLen()]Adapter.EnvValue = undefined;
     var env_value_count: usize = 0;
     if (comptime @hasDecl(core, "envMsgs")) {
         inline for (core.envMsgs) |entry| {
             if (std.mem.eql(u8, entry.env, app_data_dir_env)) {
-                if (app_data_dir.len > 0) {
-                    env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = app_data_dir };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, app_cache_dir_env)) {
+                // Supply the same OS-resolved cache root used by URL media.
+                // An ambient value cannot replace this app-owned capability.
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = audio_cache_dir };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, legacy_data_dir_env)) {
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = legacy_data_dir };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, "NATIVE_SDK_TARGET_OS")) {
+                env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = @tagName(builtin.os.tag) };
+                env_value_count += 1;
+            } else if (std.mem.eql(u8, entry.env, "NATIVE_SDK_ARG_1")) {
+                if (first_launch_arg) |value| {
+                    env_values_buffer[env_value_count] = .{ .msg = entry.msg, .value = value };
                     env_value_count += 1;
                 }
             } else if (init.environ_map.get(entry.env)) |value| {
@@ -301,6 +402,12 @@ pub fn main(init: std.process.Init) !void {
     defer if (comptime manifestDeclaresPersist()) persist_restore_value.deinit(std.heap.page_allocator);
     defer if (persist_coordinator_started) persist_coordinator_value.deinit();
 
+    // Markup reload from `native dev`: only a Debug build made with
+    // `-Dview-reload` has the development exports, and it arms only when
+    // the dev loop names its update directory.
+    if (comptime view_reload_enabled) view_reload.arm(init);
+    defer if (comptime view_reload_enabled) view_reload.disarm();
+
     // The app struct (and any real model) is multi-MB: `create`
     // heap-allocates and constructs in place, so neither rides the stack.
     const app_state = try Adapter.create(std.heap.page_allocator, .{
@@ -330,6 +437,7 @@ pub fn main(init: std.process.Init) !void {
         .app_name = manifest.name,
         .window_title = comptime windowTitle(),
         .bundle_id = manifest.id,
+        .legacy_data_directory = comptime requestsLegacyDataDirectory(),
         .icon_path = "assets/icon.png",
         .default_frame = comptime defaultFrame(),
         .restore_state = comptime startupRestoreState(),
@@ -435,6 +543,53 @@ fn manifestImages() []const ImageAsset {
         var out: []const ImageAsset = &.{};
         for (manifest.assets.images) |entry| {
             out = out ++ &[_]ImageAsset{.{ .id = entry.id, .path = entry.path }};
+        }
+        return out;
+    }
+}
+
+/// Native file access and font registration remain explicit capabilities.
+const BootFonts = struct {
+    entries: [manifestFonts().len]App.FontRegistration = undefined,
+    len: usize = 0,
+
+    fn load(io: std.Io) !BootFonts {
+        var result: BootFonts = .{};
+        errdefer result.deinit();
+        inline for (comptime manifestFonts()) |asset| {
+            const bytes = runner.app_assets.readFileAlloc(io, asset.path, std.heap.page_allocator, .limited(native_sdk.max_registered_canvas_font_bytes)) catch |err| {
+                std.log.err("font asset '{s}' (id {d}) could not be read: {s}", .{ asset.path, asset.id, @errorName(err) });
+                return err;
+            };
+            result.entries[result.len] = .{ .id = asset.id, .name = asset.path, .ttf = bytes };
+            result.len += 1;
+        }
+        return result;
+    }
+
+    fn deinit(self: *const BootFonts) void {
+        for (self.entries[0..self.len]) |font| std.heap.page_allocator.free(font.ttf);
+    }
+};
+
+const FontAsset = struct { id: native_sdk.canvas.FontId, path: []const u8 };
+
+fn manifestFonts() []const FontAsset {
+    comptime {
+        if (!@hasField(@TypeOf(manifest), "assets")) return &.{};
+        if (!@hasField(@TypeOf(manifest.assets), "fonts")) return &.{};
+        if (manifest.assets.fonts.len > native_sdk.max_registered_canvas_fonts) @compileError("too many declared font assets");
+        var out: []const FontAsset = &.{};
+        for (manifest.assets.fonts) |entry| {
+            if (entry.id < native_sdk.canvas.min_registered_font_id or entry.id > 9_007_199_254_740_991) @compileError("font asset id requires a safe whole id at or above 64");
+            if (!std.mem.startsWith(u8, entry.path, "assets/")) @compileError("font assets require a bundled assets/ path");
+            if (std.mem.indexOfScalar(u8, entry.path, '\\') != null or std.mem.indexOfScalar(u8, entry.path, 0) != null) @compileError("invalid font asset path");
+            var segments = std.mem.splitScalar(u8, entry.path, '/');
+            while (segments.next()) |segment| {
+                if (segment.len == 0 or std.mem.eql(u8, segment, ".") or std.mem.eql(u8, segment, "..")) @compileError("invalid font asset path segment");
+            }
+            for (out) |previous| if (previous.id == entry.id) @compileError("duplicate declared font asset id");
+            out = out ++ &[_]FontAsset{.{ .id = entry.id, .path = entry.path }};
         }
         return out;
     }

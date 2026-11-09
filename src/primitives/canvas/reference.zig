@@ -115,6 +115,7 @@ pub const ReferenceFont = struct {
 };
 
 pub const ReferenceRenderSurface = struct {
+    vector_policy: ?@import("vector_raster_policy.zig").Policy = null,
     width: usize,
     height: usize,
     pixels: []u8,
@@ -280,7 +281,9 @@ pub const ReferenceRenderSurface = struct {
             .clear => self.clear(clear_color),
             .load => if (scissor) |bounds| self.clearRect(bounds, clear_color),
         }
-        for (pass.commands) |command| try self.renderCommand(referenceScaleCommand(command, scale), scissor);
+        var owned = self;
+        owned.vector_policy = pass.gpu_plan_policy;
+        for (pass.commands) |command| try owned.renderCommand(referenceScaleCommand(command, scale), scissor);
     }
 
     pub fn pixelRgba8(self: ReferenceRenderSurface, x: usize, y: usize) [4]u8 {
@@ -434,13 +437,14 @@ pub const ReferenceRenderSurface = struct {
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
         };
-        vector.fillPath(
+        vector.fillPathWithPolicy(
             value.elements,
             command.transform,
             .even_odd,
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return error.ReferenceRenderUnsupportedCommand;
     }
 
@@ -462,13 +466,14 @@ pub const ReferenceRenderSurface = struct {
             .opacity = command.opacity,
             .coverage_blend = .linear_light,
         };
-        vector.strokePath(
+        vector.strokePathWithPolicy(
             value.elements,
             command.transform,
             .{ .width = stroke_width, .cap = value.cap, .join = .round },
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return error.ReferenceRenderUnsupportedCommand;
     }
 
@@ -897,14 +902,16 @@ pub const ReferenceRenderSurface = struct {
         // fallback triggers are a clip band wider than
         // `max_raster_width` (surface-shaped, not font-shaped) and
         // nothing else.
-        vector.fillGlyphPath(
-            &reference_glyph_raster_scratch.get().raster,
+        const raster = &reference_glyph_raster_scratch.get().raster;
+        vector.fillGlyphPathWithPolicy(
+            raster,
             builder.slice(),
             Affine.identity(),
             .nonzero,
             vector.default_tolerance,
             referenceVectorClip(pixel_rect),
             &sink,
+            self.vector_policy,
         ) catch return false;
         return true;
     }
@@ -1150,9 +1157,8 @@ fn isReferenceTextSpace(byte: u8) bool {
 /// The face a run's font id inks with: a runtime-registered face when
 /// the id matches one (validated at registration, so a registered id
 /// always resolves — no render-time fallback decision), otherwise the
-/// bundled mapping — the mono face for the reserved mono id, the sans
-/// face for everything else (the weight and italic span variants keep
-/// the regular outlines at their estimator advances, exactly as before).
+/// bundled mapping — Geist Mono for mono text, and the corresponding
+/// regular, medium or bold Geist face for reserved sans ids.
 /// Glyphs missing from whichever face wins draw that face's own glyph-0
 /// `.notdef` outline (or intentionally no ink); a registered face never
 /// cascades into the bundled faces mid-run.
@@ -1160,8 +1166,7 @@ fn referenceFaceForFontId(fonts: []const ReferenceFont, font_id: canvas.FontId) 
     for (fonts) |font| {
         if (font.id == font_id) return font.face;
     }
-    if (font_id == canvas.default_mono_font_id) return &font_ttf.geist_mono;
-    return &font_ttf.geist_regular;
+    return font_ttf.bundledFaceForFontId(font_id);
 }
 
 /// Decode the first codepoint of the cluster `text[start..start+len]`;

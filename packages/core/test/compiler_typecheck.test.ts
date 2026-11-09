@@ -53,14 +53,13 @@ test("an npm package outside the static tier fails check with the compiler note 
       name: "dynamic-only", version: "1.0.0", type: "module", types: "index.d.ts", exports: "./index.js",
     }));
     fs.writeFileSync(path.join(vendor, "index.d.ts"), "export default function probe(value: string): string;\n");
-    // randomFillSync is typed but has no static lowering in the pinned compiler.
+    // getCipherInfo is typed but has no static lowering in the pinned compiler.
     // The package itself remains marked "static" in coverage, so this pins
     // Native SDK's stricter requirement that the total be 100%.
     fs.writeFileSync(path.join(vendor, "index.js"), [
-      'import { randomFillSync } from "node:crypto";',
-      "const pool = new Uint8Array(8);",
+      'import { getCipherInfo } from "node:crypto";',
       "export default function probe(x) {",
-      "  randomFillSync(pool);",
+      '  getCipherInfo("aes-256-cbc");',
       "  return x;",
       "}",
       "",
@@ -74,4 +73,56 @@ test("an npm package outside the static tier fails check with the compiler note 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("complete file and timer routes require every callback field and outcome", () => {
+  const source = `
+import { Cmd, asciiBytes, type FileResultArm, type TimerResultArm } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "go" }
+  | ({ readonly kind: "file" } & FileResultArm)
+  | ({ readonly kind: "timer" } & TimerResultArm)
+  | { readonly kind: "clock"; readonly stamp: Uint8Array };
+export function initialModel(): Model { return { done: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  if (msg.kind !== "go") return { done: true };
+  return [model, Cmd.batch([
+    Cmd.readFileResult(asciiBytes("notes.txt"), { result: "file" }),
+    Cmd.readFileResult(asciiBytes("notes.txt"), { result: "file", replace: false }),
+    Cmd.writeFileResult(asciiBytes("notes.txt"), asciiBytes("body"), { result: "file" }),
+    Cmd.timerResult("save", 800, "one_shot", { result: "timer" }),
+    Cmd.timerResult("refresh", 30000, "repeating", { result: "timer" }),
+    Cmd.wallTime("clock"),
+  ])];
+}
+`;
+  let r = run(source); assert.equal(r.status, 0, r.out);
+  r = run(source.replace('({ readonly kind: "file" } & FileResultArm)', '{ readonly kind: "file"; readonly bytes: Uint8Array }'));
+  assert.equal(r.status, 1, r.out);
+  r = run(source.replace('({ readonly kind: "timer" } & TimerResultArm)', '{ readonly kind: "timer"; readonly key: Uint8Array; readonly timestampNs: Uint8Array; readonly outcome: "fired" }'));
+  assert.equal(r.status, 1, r.out);
+  r = run(source.replace('readonly stamp: Uint8Array', 'readonly stamp: number'));
+  assert.equal(r.status, 1, r.out);
+});
+
+test("exact image routes require all identity words and terminal metadata", () => {
+  const source = `
+import { Cmd, asciiBytes, imageSourceIdentity, type ImageWordsEventArm } from "@native-sdk/core";
+export interface Model { readonly done: boolean; }
+export type Msg = { readonly kind: "go" } | ({ readonly kind: "image" } & ImageWordsEventArm);
+export function initialModel(): Model { return { done: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  if (msg.kind !== "go") return { done: true };
+  const id = imageSourceIdentity(asciiBytes("image.png"));
+  return [model, Cmd.batch([
+    Cmd.imageLoadWords(id, { path: asciiBytes("image.png") }, { event: "image" }),
+    Cmd.imageCancelWords(id), Cmd.imageUnregisterWords(id),
+  ])];
+}
+`;
+  let r = run(source); assert.equal(r.status, 0, r.out);
+  r = run(source.replace('({ readonly kind: "image" } & ImageWordsEventArm)', '{ readonly kind: "image"; readonly imageLower: number; readonly imageUpper: number; readonly state: "loaded"; readonly width: number; readonly height: number }'));
+  assert.equal(r.status, 1, r.out);
+  r = run(source.replace('event: "image"', 'event: "go"'));
+  assert.equal(r.status, 1, r.out);
 });

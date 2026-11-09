@@ -23,20 +23,27 @@
 //   - an SC diagnostic code (SC0000..SC9999) appears in docs/, skills/,
 //     or skill-data/ outside the generated reference — compiler
 //     capability claims live in the generated table, never in prose;
-//   - a scriptc version literal (0.0.N) in those same trees names a
+//   - a scriptc version literal (X.Y.Z) in those same trees names a
 //     version other than the pin — the calibration/spike sentences the
 //     docs carry must move with the pin.
 //
 // Exit 2: the compiler manifest is not installed or unreadable.
 
 import fs from "node:fs";
+import { compilerSurfacePath } from "./scriptc_toolchain.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const KNOWN_SCHEMA_VERSION = 1;
+const KNOWN_SCHEMA_VERSIONS = [1, 2];
 const coreRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = path.resolve(coreRoot, "..", "..");
-const manifestPath = path.join(coreRoot, "node_modules", "@scriptc", "compiler", "surface-manifest.json");
+let manifestPath;
+try {
+  manifestPath = compilerSurfacePath(path.join(coreRoot, "package.json"));
+} catch (error) {
+  console.error(`gen_service_surface: ${error.message}`);
+  process.exit(2);
+}
 const outputRel = "skill-data/ts-services/references/service-surface.md";
 const outputPath = path.join(repoRoot, outputRel);
 
@@ -53,8 +60,13 @@ try {
   console.error(`gen_service_surface: cannot read ${manifestPath}: ${error.message}`);
   process.exit(2);
 }
-if (manifest.schemaVersion !== KNOWN_SCHEMA_VERSION) {
-  console.error(`gen_service_surface: manifest schemaVersion ${manifest.schemaVersion} is unknown (this tool knows ${KNOWN_SCHEMA_VERSION}) — update the tool before regenerating`);
+if (!KNOWN_SCHEMA_VERSIONS.includes(manifest.schemaVersion)) {
+  console.error(`gen_service_surface: manifest schemaVersion ${manifest.schemaVersion} is unknown (this tool knows ${KNOWN_SCHEMA_VERSIONS.join(", ")}) — update the tool before regenerating`);
+  process.exit(2);
+}
+const statuses = manifest.schemaVersion === 1 ? ["static", "dynamic-only", "unsupported"] : ["static", "unsupported"];
+if (!Array.isArray(manifest.entries) || manifest.entries.some(entry => !statuses.includes(entry.status))) {
+  console.error(`gen_service_surface: invalid entries or status for schemaVersion ${manifest.schemaVersion}`);
   process.exit(2);
 }
 
@@ -102,7 +114,7 @@ const constrainedCallRefusal = missingLoweringFence?.code
 const sections = [];
 sections.push(`<!-- GENERATED FILE — do not edit by hand.
      Derived byte-for-byte from the pinned compiler's surface manifest:
-       packages/core/node_modules/@scriptc/compiler/surface-manifest.json
+       resolved through packages/core/scripts/scriptc_toolchain.mjs
      Regenerate after any compiler pin move:
        node packages/core/scripts/gen_service_surface.mjs
      Verify without writing:
@@ -112,14 +124,14 @@ sections.push(`<!-- GENERATED FILE — do not edit by hand.
 
 What TypeScript under \`src/services/\` can use, as stated by the pinned
 compiler itself (surface manifest schema ${manifest.schemaVersion}, ${manifest.entries.length} entries:
-${counts.static} static, ${counts["dynamic-only"]} dynamic-only, ${counts.unsupported} unsupported).
+${counts.static} static, ${manifest.schemaVersion === 1 ? `${counts["dynamic-only"]} dynamic-only, ` : ""}${counts.unsupported} unsupported).
 
 How to read the tables:
 
 - **static** — compiles in the engine-free static tier services use.
-- **dynamic-only** — needs the embedded dynamic engine (\`--dynamic\`),
+${manifest.schemaVersion === 1 ? `- **dynamic-only** — needs the embedded dynamic engine (\`--dynamic\`),
   which Native SDK builds never pass, so for services this means
-  **unavailable** until the entry goes static.
+  **unavailable** until the entry goes static.` : "- Compilation is native-only; unsupported dependencies receive build diagnostics."}
 - **unsupported** — refused with the listed SC code. A status describes
   where the named code is *raised*: forms outside the supported subset
   refuse with that code, while supported forms appear as their own
@@ -201,7 +213,7 @@ if (existing === null) {
 
 // 2. Pin sanity: the installed manifest is the pinned compiler's.
 const pkg = JSON.parse(fs.readFileSync(path.join(coreRoot, "package.json"), "utf8"));
-const pin = pkg.dependencies?.scriptc;
+const pin = pkg.nativeToolchain?.scriptc ?? pkg.dependencies?.scriptc;
 if (manifest.compilerVersion !== pin) {
   problems.push(`installed compiler manifest is ${manifest.compilerVersion} but packages/core/package.json pins scriptc ${pin} — run \`npm ci --include=dev\` in packages/core`);
 }

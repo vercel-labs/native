@@ -1,0 +1,49 @@
+<column gap="16" padding="28">
+  <row cross="center" gap="12">
+    <column grow="1" gap="4">
+      <text size="display">Scratch Pad</text>
+      <text foreground="text_muted">Keep a small note. Read back exactly what you saved.</text>
+    </column>
+    <button variant="secondary" on-press="sample">Reset sample</button>
+  </row>
+  <panel padding="20" grow="1">
+    <column gap="12">
+      <text size="heading">Your note</text>
+      <text>{body}</text>
+    </column>
+  </panel>
+  <row gap="10">
+    <button variant="primary" on-press="save">Save note</button>
+    <button variant="secondary" on-press="load">Load note</button>
+    <button variant="secondary" on-press="append">Add a line</button>
+    <button variant="ghost" on-press="inspect">Inspect note</button>
+    <button variant="ghost" on-press="delete_note">Delete note</button>
+  </row>
+  <panel padding="16">
+    <column gap="12">
+      <text size="heading">Read controls</text>
+      <text foreground="text_muted">Try replacing a read or cancelling it before delivery.</text>
+      <row gap="10">
+        <button variant="secondary" on-press="replace">Replace read</button>
+        <button variant="secondary" on-press="cancel_read">Read and cancel</button>
+        <button variant="secondary" on-press="pair">Read two copies</button>
+      </row>
+      <row gap="10">
+        <button variant="ghost" on-press="copy">Copy note</button>
+        <button variant="ghost" on-press="paste">Paste note</button>
+        <button variant="ghost" on-press="fetch_note">Download example</button>
+      </row>
+    </column>
+  </panel>
+  <row cross="center" gap="16">
+    <text grow="1">{status}</text>
+    <text foreground="text_muted">{savedSize}</text>
+  </row>
+  <row gap="16">
+    <text foreground="text_muted">Reads: {reads}</text>
+    <text foreground="text_muted">Latest: {latestReads}</text>
+    <text foreground="text_muted">Writes: {writes}</text>
+    <text foreground="text_muted">Errors: {failures}</text>
+    <text foreground="text_muted">Clock reads: {clockReads}</text>
+  </row>
+</column>

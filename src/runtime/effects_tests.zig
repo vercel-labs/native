@@ -513,6 +513,34 @@ test "fake executor collect mode accumulates output and delivers it on the exit"
     try std.testing.expectError(error.EffectNotFound, fx.feedLine(stream_key, "late"));
 }
 
+test "recorded spawn terminals preserve output stderr and drop metadata without the discarded bytes" {
+    inline for (.{ false, true }) |collect| {
+        var h = try Harness.createWith(if (collect) collectUpdate else streamUpdate);
+        defer h.destroy();
+        const fx = &h.app_state.effects;
+        fx.executor = .fake;
+        test_argv = &.{"recorded-process"};
+        test_stdin = null;
+        try h.app_state.dispatch(&h.harness.runtime, 1, .start);
+        if (collect) {
+            try fx.feedOutput(stream_key, "kept output");
+            try fx.feedStderr(stream_key, "kept tail");
+        }
+        try fx.feedExitWithMetadata(stream_key, 7, .exited, .{ .output_truncated = true, .stderr_truncated = true, .dropped_lines = 19 });
+        try h.drainWakes();
+        try std.testing.expectEqual(@as(usize, 1), h.app_state.model.exit_count);
+        try std.testing.expectEqual(@as(i32, 7), h.app_state.model.exit_code);
+        try std.testing.expectEqual(@as(u32, 19), h.app_state.model.exit_dropped_lines);
+        try std.testing.expect(h.app_state.model.output_truncated);
+        try std.testing.expect(h.app_state.model.stderr_truncated);
+        if (collect) {
+            try std.testing.expectEqualStrings("kept output", h.app_state.model.outputPrefix());
+            try std.testing.expectEqualStrings("kept tail", h.app_state.model.stderrPrefix());
+        }
+        try std.testing.expectEqual(@as(usize, 0), fx.activeCount());
+    }
+}
+
 test "fake executor collect mode truncates over-bound output and stderr loudly" {
     var h = try Harness.createWith(collectUpdate);
     defer h.destroy();
