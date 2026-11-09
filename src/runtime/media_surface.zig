@@ -61,6 +61,7 @@
 //! session replays fingerprint-identical with NO producer attached.
 
 const std = @import("std");
+const registry_policy = @import("image_registry_policy.zig");
 const builtin = @import("builtin");
 const canvas = @import("canvas");
 const platform = @import("../platform/root.zig");
@@ -480,6 +481,15 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         /// seams and never-uploaded ids are no-ops), and views repaint.
         /// Loop-thread-only, like the entry table it edits.
         fn purgeRetainedMediaSurfaceTexture(self: *Runtime, surface_id: u64) void {
+            if (self.image_registry_policy) |policy| {
+                var scratch: [max_media_surface_channels]registry_policy.Record = undefined;
+                const program = registry_policy.plan(policy, .media_purge, registry_policy.mediaRecords(self, &scratch), max_media_surface_channels, .{ .id = surface_id });
+                if (program.action == 0) return;
+                self.media_surface_entries[program.selected.?] = .{ .surface_id = surface_id };
+                self.options.platform.services.removeGpuSurfaceImage(canvas.mediaSurfaceTextureImageId(surface_id)) catch {};
+                runtime_canvas_images.RuntimeCanvasImages(Runtime).noteCanvasImagesChanged(self);
+                return;
+            }
             for (self.media_surface_entries[0..self.media_surface_count]) |*entry| {
                 if (entry.surface_id != surface_id or entry.fingerprint == 0) continue;
                 entry.* = .{ .surface_id = surface_id };
@@ -543,7 +553,11 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
                     }
                     continue;
                 };
-                if (self.media_surface_entries[entry_index].fingerprint == slot.staged_fingerprint) {
+                const unchanged = if (self.image_registry_policy) |policy|
+                    registry_policy.plan(policy, .media_equal, &.{}, max_media_surface_channels, .{ .fingerprint = slot.staged_fingerprint, .previous_fingerprint = self.media_surface_entries[entry_index].fingerprint }).action != 0
+                else
+                    self.media_surface_entries[entry_index].fingerprint == slot.staged_fingerprint;
+                if (unchanged) {
                     // Adoption-boundary damage short-circuit: the staged
                     // frame IS the adopted texture.
                     slot.staged = false;
@@ -742,6 +756,11 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         /// while no producer frame has been adopted (the placeholder
         /// state). Test and diagnostics seam.
         pub fn adoptedMediaSurfaceTexture(self: *const Runtime, surface_id: u64) ?MediaSurfaceTextureEntry {
+            if (self.image_registry_policy) |policy| {
+                var scratch: [max_media_surface_channels]registry_policy.Record = undefined;
+                const program = registry_policy.plan(policy, .media_lookup, registry_policy.mediaRecords(self, &scratch), max_media_surface_channels, .{ .id = surface_id });
+                return if (program.selected) |index| self.media_surface_entries[index] else null;
+            }
             for (self.media_surface_entries[0..self.media_surface_count]) |entry| {
                 if (entry.surface_id == surface_id and entry.fingerprint != 0) return entry;
             }
@@ -766,6 +785,26 @@ pub fn RuntimeMediaSurfaces(comptime Runtime: type) type {
         /// rotate, and a widget still drawing the reclaimed id could
         /// resolve the stale host image instead of its placeholder).
         fn mediaSurfaceEntryIndex(self: *Runtime, surface_id: u64, reclaimed_texture_id: *u64) ?usize {
+            if (self.image_registry_policy) |policy| {
+                var scratch: [max_media_surface_channels]registry_policy.Record = undefined;
+                var program = registry_policy.plan(policy, .media_entry, registry_policy.mediaRecords(self, &scratch), max_media_surface_channels, .{ .id = surface_id });
+                while (program.action == 16) {
+                    const cursor = program.next.?;
+                    // Preserve lazy ordered lock-free observations: do not
+                    // snapshot later owners before the original scan reaches them.
+                    const active = mediaSurfaceHasActiveSlot(self.media_surface_runtime_tag, self.media_surface_entries[cursor].surface_id);
+                    program = registry_policy.plan(policy, .media_entry, registry_policy.mediaRecords(self, &scratch), max_media_surface_channels, .{ .id = surface_id, .cursor = cursor, .facts = 1 | (@as(u32, @intFromBool(active)) << 1) });
+                }
+                const index = program.selected orelse return null;
+                if (program.action == 8) {
+                    self.media_surface_count += 1;
+                    self.media_surface_entries[index] = .{ .surface_id = surface_id };
+                } else if (program.action == 32) {
+                    reclaimed_texture_id.* = canvas.mediaSurfaceTextureImageId(self.media_surface_entries[index].surface_id);
+                    self.media_surface_entries[index] = .{ .surface_id = surface_id };
+                }
+                return index;
+            }
             for (self.media_surface_entries[0..self.media_surface_count], 0..) |entry, index| {
                 if (entry.surface_id == surface_id) return index;
             }

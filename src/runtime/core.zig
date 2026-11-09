@@ -27,6 +27,7 @@ const runtime_frame_profile = @import("frame_profile.zig");
 const runtime_gpu_surface_events = @import("gpu_surface_events.zig");
 const runtime_flow = @import("flow.zig");
 const runtime_session_state = @import("session_state.zig");
+const session_journal = @import("session_journal.zig");
 const runtime_state = @import("state.zig");
 const runtime_system_services = @import("system_services.zig");
 const runtime_builtin_bridge = @import("builtin_bridge.zig");
@@ -205,6 +206,14 @@ pub const Runtime = struct {
     max_image_pixel_bytes: usize = canvas_limits.max_registered_canvas_image_pixel_bytes,
     surface: platform.Surface,
     appearance: platform.Appearance = .{},
+    /// Synchronous OS facts queued only while replaying. One event must
+    /// consume the complete sequence before the next event can begin.
+    replay_window_chrome_active: bool = false,
+    replay_window_chrome_source: session_journal.WindowChromeSource = .native_queries,
+    replay_window_chrome_failed: bool = false,
+    replay_window_chrome: [session_journal.max_session_window_chrome_queries]session_journal.WindowChromeRecord = undefined,
+    replay_window_chrome_count: usize = 0,
+    replay_window_chrome_index: usize = 0,
     windows: [platform.max_windows]RuntimeWindow = undefined,
     window_count: usize = 0,
     views: [platform.max_views]RuntimeView = undefined,
@@ -258,6 +267,28 @@ pub const Runtime = struct {
     video_height: u64 = 0,
     shell_layouts: [platform.max_windows]RuntimeShellLayout = undefined,
     shell_layout_count: usize = 0,
+    shell_layout_policy: ?*const fn ([]const u8, []u8) usize = null,
+    view_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+    window_lifecycle_policy: ?*const fn ([]const u8, []u8) usize = null,
+    image_registry_policy: ?*const fn ([]const u8, []u8) usize = null,
+    font_registry_policy: ?*const fn ([]const u8, []u8) usize = null,
+    shell_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+    shell_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
+    system_admission_policy: ?*const fn ([]const u8, []u8) usize = null,
+    bridge_descriptor_policy: ?*const fn ([]const u8, []u8) usize = null,
+    authorization_policy: ?*const fn ([]const u8, []u8) usize = null,
+    builtin_coordination_policy: ?*const fn ([]const u8, []u8) usize = null,
+    automation_command_policy: ?*const fn ([]const u8, []u8) usize = null,
+    automation_interaction_policy: ?*const fn ([]const u8, []u8) usize = null,
+    snapshot_policy: ?*const fn ([]const u8, []u8) usize = null,
+    host_flow_policy: ?*const fn ([]const u8, []u8) usize = null,
+    command_policy: ?*const fn ([]const u8, []u8) usize = null,
+    context_menu_policy: ?*const fn ([]const u8, []u8) usize = null,
+    text_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_cache_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_plan_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_override_policy: ?*const fn ([]const u8, []u8) usize = null,
+    render_damage_policy: ?*const fn ([]const u8, []u8) usize = null,
     /// Reused by runtime-created window restoration. `Store.loadWindow`
     /// needs the whole bounded state file plus decoded-string scratch; keep
     /// that 64-KiB workspace on the already heap-owned Runtime instead of
@@ -523,6 +554,15 @@ pub const Runtime = struct {
         // The profile rings exceed the small-default copy bound above;
         // assign explicitly so the disabled state is never undefined.
         self.frame_profile = .{};
+        // Status rows exceed the small-default copy bound. Initialize their
+        // ownership metadata without touching unused menu payload buffers.
+        for (&self.status_items) |*item| {
+            item.id = 0;
+            item.active = false;
+            item.visible = true;
+            item.title = "";
+            item.item_count = 0;
+        }
         self.started_timestamp_ns = timestampToU64(nowNanoseconds());
         self.text_measure_provider = if (options.platform.services.measure_text_fn) |measure_fn|
             .{
@@ -691,6 +731,8 @@ pub const Runtime = struct {
     pub const listWindows = WindowViewMethods.listWindows;
     pub const focusWindow = WindowViewMethods.focusWindow;
     pub const closeWindow = WindowViewMethods.closeWindow;
+    pub const restoreWindowCapabilityResult = WindowViewMethods.restoreWindowCapabilityResult;
+    pub const restoreWindowShow = WindowViewMethods.restoreWindowShow;
     pub const minimizeWindow = WindowViewMethods.minimizeWindow;
     pub const hideWindow = WindowViewMethods.hideWindow;
     pub const showWindow = WindowViewMethods.showWindow;
@@ -792,6 +834,8 @@ pub const Runtime = struct {
     pub const getCredential = SystemServiceMethods.getCredential;
     pub const deleteCredential = SystemServiceMethods.deleteCredential;
     pub const formatLocalTime = SystemServiceMethods.formatLocalTime;
+    pub const sendKeyChord = SystemServiceMethods.sendKeyChord;
+    pub const keyboardInputAccess = SystemServiceMethods.keyboardInputAccess;
     pub const createTray = SystemServiceMethods.createTray;
     pub const createStatusItem = SystemServiceMethods.createStatusItem;
     pub const updateStatusItemShell = SystemServiceMethods.updateStatusItemShell;
@@ -846,6 +890,14 @@ pub const Runtime = struct {
     /// pointers are stable for the runtime's lifetime and tokens stamped
     /// with them compare equal frame to frame.
     pub fn textMeasureProvider(self: *const Runtime) ?*const canvas.TextMeasureProvider {
+        if (self.font_registry_policy) |policy| {
+            const choice = @import("font_registry_policy.zig").plan(policy, .provider, &.{}, self.canvas_font_count, .{ .facts = @intFromBool(self.text_measure_provider != null) }).action;
+            return switch (choice) {
+                1 => if (self.text_measure_provider) |*provider| provider else unreachable,
+                2 => &self.canvas_font_measure_provider,
+                else => null,
+            };
+        }
         if (self.text_measure_provider) |*provider| return provider;
         if (self.canvas_font_count > 0) return &self.canvas_font_measure_provider;
         return null;
@@ -884,6 +936,29 @@ pub const Runtime = struct {
         return self.surface.safe_area_insets;
     }
 
+    /// Query native chrome live, or consume the recorded OS result on
+    /// replay. Missing, extra and differently targeted queries diverge
+    /// loudly; replay never consults the current host for this fact.
+    pub fn windowChrome(self: *Runtime, window_id: platform.WindowId) !platform.WindowChrome {
+        if (self.replay_window_chrome_active) {
+            if (self.replay_window_chrome_source == .unavailable) return .{};
+            if (self.replay_window_chrome_index == self.replay_window_chrome_count) {
+                self.replay_window_chrome_failed = true;
+                return error.ReplayChromeDivergence;
+            }
+            const record = self.replay_window_chrome[self.replay_window_chrome_index];
+            if (record.window_id != window_id) {
+                self.replay_window_chrome_failed = true;
+                return error.ReplayChromeDivergence;
+            }
+            self.replay_window_chrome_index += 1;
+            return record.chrome;
+        }
+        const chrome = self.options.platform.services.windowChrome(window_id);
+        if (self.options.session_recorder) |recorder| recorder.recordWindowChrome(.{ .window_id = window_id, .chrome = chrome });
+        return chrome;
+    }
+
     /// The OS window-control cluster's frame in a canvas view's LOCAL
     /// coordinates (Windows: the DWM min/max/close buttons; macOS: the
     /// traffic lights), from the platform's live chrome report. Zero-sized
@@ -892,9 +967,9 @@ pub const Runtime = struct {
     /// view's window-content frame so a docked canvas judges the overlap
     /// in its own space. This is the geometry `UiApp` consults to keep a
     /// drag header's content out from under the cluster.
-    pub fn windowControlsForView(self: *const Runtime, window_id: platform.WindowId, label: []const u8) geometry.RectF {
+    pub fn windowControlsForView(self: *Runtime, window_id: platform.WindowId, label: []const u8) !geometry.RectF {
         const zero = geometry.RectF.init(0, 0, 0, 0);
-        const buttons = self.options.platform.services.windowChrome(window_id).buttons.normalized();
+        const buttons = (try self.windowChrome(window_id)).buttons.normalized();
         if (buttons.width <= 0 or buttons.height <= 0) return zero;
         const view_frame = (self.absoluteViewFrame(window_id, label, 0) catch return buttons).normalized();
         return geometry.RectF.init(buttons.x - view_frame.x, buttons.y - view_frame.y, buttons.width, buttons.height);
@@ -995,7 +1070,11 @@ pub const Runtime = struct {
 
     const CanvasWidgetEventMethods = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime);
     pub const advanceCanvasTooltipIntentForFrame = CanvasWidgetEventMethods.advanceCanvasTooltipIntentForFrame;
+    pub const reconcileCanvasTooltipIntent = CanvasWidgetEventMethods.reconcileCanvasTooltipIntent;
+    pub const captureCanvasTooltipAdoptionBindings = CanvasWidgetEventMethods.captureCanvasTooltipAdoptionBindings;
+    pub const canvasWidgetPressTargetForRoute = CanvasWidgetEventMethods.canvasWidgetPressTargetForRoute;
     pub const routeCanvasWidgetPointerInput = CanvasWidgetEventMethods.routeCanvasWidgetPointerInput;
+    pub const canvasWidgetKeyboardFocusParticipation = CanvasWidgetEventMethods.canvasWidgetKeyboardFocusParticipation;
     pub const routeCanvasWidgetKeyboardInput = CanvasWidgetEventMethods.routeCanvasWidgetKeyboardInput;
     pub const routeCanvasWidgetTextInput = CanvasWidgetEventMethods.routeCanvasWidgetTextInput;
     pub const routeCanvasWidgetFileDrop = CanvasWidgetEventMethods.routeCanvasWidgetFileDrop;
@@ -1015,9 +1094,10 @@ pub const Runtime = struct {
     const updateCanvasWidgetControlFromKeyboard = CanvasWidgetEventMethods.updateCanvasWidgetControlFromKeyboard;
     const dismissCanvasWidgetSurfaceFromPointerInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromPointerInput;
     const dismissCanvasWidgetSurfaceFromKeyboardInput = CanvasWidgetEventMethods.dismissCanvasWidgetSurfaceFromKeyboardInput;
-    const dispatchCanvasWidgetCommandForId = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandForId;
-    const dispatchCanvasWidgetCommandFromPointer = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromPointer;
-    const dispatchCanvasWidgetCommandFromKeyboard = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromKeyboard;
+    pub const updateCanvasWidgetClickCountFromPointer = CanvasWidgetEventMethods.updateCanvasWidgetClickCountFromPointer;
+    pub const dispatchCanvasWidgetCommandForId = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandForId;
+    pub const dispatchCanvasWidgetCommandFromPointer = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromPointer;
+    pub const dispatchCanvasWidgetCommandFromKeyboard = CanvasWidgetEventMethods.dispatchCanvasWidgetCommandFromKeyboard;
     const updateCanvasWidgetFocusFromKeyboardInput = CanvasWidgetEventMethods.updateCanvasWidgetFocusFromKeyboardInput;
     const setCanvasWidgetFocusFromKeyboard = CanvasWidgetEventMethods.setCanvasWidgetFocusFromKeyboard;
     const invalidateForWidgetInvalidations = CanvasWidgetEventMethods.invalidateForWidgetInvalidations;
@@ -1029,7 +1109,7 @@ pub const Runtime = struct {
     const dispatchGpuSurfaceInput = GpuSurfaceEventMethods.dispatchGpuSurfaceInput;
 
     const AutomationWidgetMethods = runtime_automation_widget_dispatch.RuntimeAutomationWidgetDispatch(Runtime);
-    const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
+    pub const dispatchAutomationWidgetAction = AutomationWidgetMethods.dispatchAutomationWidgetAction;
     const dispatchAutomationWidgetClick = AutomationWidgetMethods.dispatchAutomationWidgetClick;
     const dispatchAutomationWidgetHold = AutomationWidgetMethods.dispatchAutomationWidgetHold;
     const dispatchAutomationWidgetContextPress = AutomationWidgetMethods.dispatchAutomationWidgetContextPress;
@@ -1258,6 +1338,90 @@ const testingBuiltinBridgeErrorCode = builtinBridgeErrorCode;
 const testingBuiltinBridgeErrorMessage = builtinBridgeErrorMessage;
 
 pub const testing = struct {
+    pub const scroll_mutation_methods = @import("view_widget_scroll.zig");
+    pub const scroll_mutation_policy = @import("scroll_mutation_policy.zig");
+    pub const virtual_window_policy = @import("virtual_window_policy.zig");
+    pub const context_menu_policy = @import("context_menu_policy.zig");
+    pub const web_pane_test_cases = @import("web_pane_test_cases.zig");
+    pub const web_pane_policy = @import("web_pane_policy.zig");
+    pub const context_menu_test_cases = @import("canvas_widget_context_menu_test_cases.zig");
+    pub const widget_retention_policy = @import("widget_retention_policy.zig");
+    pub const widget_retention_runtime = runtime_canvas_widget_runtime;
+    pub const widget_retention_view = runtime_view.RuntimeView;
+    pub const markup_development_policy = @import("markup_development_policy.zig");
+    pub const markup_provenance = @import("ui_app_provenance.zig");
+    pub const markup_provenance_reference = @import("ui_app_provenance_reference.zig");
+    pub const host_flow_reference = @import("flow_reference.zig");
+    pub const host_event_pump = @import("host_event_pump.zig");
+    pub const host_event_pump_reference = @import("host_event_pump_reference.zig");
+    pub const journal_policy = @import("journal_policy.zig");
+    pub const blob_policy = @import("blob_policy.zig");
+    pub const blob_reference_store = @import("session_blobs_reference.zig");
+    pub const snapshot_policy = @import("snapshot_policy.zig");
+    pub const frame_profile = runtime_frame_profile;
+    pub const replay_progress_policy = @import("replay_progress_policy.zig");
+    pub const recording_policy = @import("recording_policy.zig");
+    pub const syncHostInputDrivers = runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime).syncCanvasWidgetScrollDriversForView;
+    pub const stampHostInputRegions = runtime_canvas_widget_scroll_drivers.RuntimeCanvasWidgetScrollDrivers(Runtime).stampCanvasWidgetNativeScroll;
+    pub const syncHostInputDragRegions = runtime_canvas_widget_events.RuntimeCanvasWidgetEvents(Runtime).syncCanvasWidgetWindowDragRegionsForView;
+    pub const host_input_regions_policy = @import("host_input_regions_policy.zig");
+    pub const view_coordination_policy = @import("view_coordination_policy.zig");
+    pub const view_coordination_methods = @import("window_view_runtime.zig").RuntimeWindowViewRuntime(Runtime);
+    pub const window_lifecycle_policy = @import("window_lifecycle_policy.zig");
+    pub const image_registry_policy = @import("image_registry_policy.zig");
+    pub const font_registry_policy = @import("font_registry_policy.zig");
+    pub const shell_coordination_policy = @import("shell_coordination_policy.zig");
+    pub const shell_admission_policy = @import("shell_admission_policy.zig");
+    pub const system_admission_policy = @import("system_admission_policy.zig");
+    pub const bridge_descriptor_policy = @import("bridge_descriptor_policy.zig");
+    pub const authorization_policy = @import("authorization_policy.zig");
+    pub const automation_commands = @import("automation_commands.zig");
+    pub const automation_command_policy = @import("automation_command_policy.zig");
+    pub const automation_interaction_policy = @import("automation_interaction_policy.zig");
+    pub const builtin_coordination_policy = @import("builtin_coordination_policy.zig");
+    pub const reference_bridge_payload = @import("bridge_payload.zig");
+    pub const reference_descriptor_validation = @import("validation.zig");
+    pub const shell_view_methods = @import("window_views.zig").RuntimeWindowViews(Runtime);
+    pub const window_storage_methods = @import("window_storage.zig").RuntimeWindowStorage(Runtime);
+    pub const referenceWindowDragRegions = @import("canvas_widget_events.zig").collectCanvasWidgetWindowDragRegions;
+    pub const input_composition_policy = @import("input_composition_policy.zig");
+    pub const clearInputCompositionOnBlur = runtime_view.clearImeGraceOnViewBlur;
+    pub const referenceInputPointer = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
+    pub const referenceInputKeyboard = canvas_frame_helpers.canvasWidgetKeyboardEventFromGpuInput;
+    pub const referenceInputText = canvas_frame_helpers.canvasWidgetTextInputEventFromGpuInput;
+    pub const referenceInputEscape = canvas_frame_helpers.canvasWidgetEscapeKey;
+    pub const referenceInputCommandModifier = canvas_frame_helpers.gpuInputHasTextCommandModifier;
+    pub const scene_observation_policy = @import("canvas_scene_observation_policy.zig");
+    pub const presentation_lifecycle_policy = @import("canvas_presentation_lifecycle_policy.zig");
+    pub const referencePresentationFallback = @import("canvas_frame.zig").referencePresentationFallback;
+    pub const compiledPresentationFallback = @import("canvas_frame.zig").compiledPresentationFallback;
+    pub const referenceSceneDirtyProjection = @import("canvas_frame.zig").canvasDirtyRegionForView;
+    pub const referenceSceneBlurExtent = @import("canvas_frame.zig").backdropBlurSampleExtentMultiplier;
+    pub const referenceSceneColor = canvas_frame_helpers.canvasColorToRgba8;
+    pub const referenceFrameBounds = canvas_frame_helpers.canvasFullRepaintBounds;
+    pub const referenceFrameScale = canvas_frame_helpers.normalizedCanvasPresentationScale;
+    pub const referenceFrameBudgetUnset = canvas_frame_helpers.canvasFrameBudgetIsUnset;
+    pub const render_animation_policy = @import("render_animation_policy.zig");
+    pub const motion_sampling_policy = @import("motion_sampling_policy.zig");
+    pub const referenceAnimationScheduleDirtyBounds = @import("canvas_frame.zig").referenceAnimationScheduleDirtyBounds;
+    pub const command_policy = @import("command_policy.zig");
+    pub const status_validation = @import("status_validation.zig");
+    pub const native_validation = @import("validation.zig");
+    pub const command_services = runtime_system_services.RuntimeSystemServices(Runtime);
+    pub const builtin_bridge_methods = @import("builtin_bridge.zig").RuntimeBuiltinBridge(Runtime);
+    pub const accessibility_policy = @import("accessibility_policy.zig");
+    pub const accessibility_publication = runtime_canvas_widget_display.RuntimeCanvasWidgetDisplay(Runtime);
+    pub const DamageCurrentCommand = @import("canvas_frame.zig").DamageCurrentCommand;
+    pub const referenceDamageSnap = @import("canvas_frame.zig").referenceDamageSnap;
+    pub const referenceDamageWiden = @import("canvas_frame.zig").referenceDamageWiden;
+    pub const referenceDamagePatch = @import("canvas_frame.zig").referenceDamagePatch;
+    pub fn mergeCanvasRenderOverrides(scheduled: []const canvas.CanvasRenderOverride, explicit: []const canvas.CanvasRenderOverride, output: []canvas.CanvasRenderOverride) ![]const canvas.CanvasRenderOverride {
+        return canvas_frame_helpers.mergeCanvasRenderOverrides(scheduled, explicit, output);
+    }
+
+    pub const nativeShellPlan = shell_layout.referenceShellPlan;
+    pub const compiledShellPlan = shell_layout.compiledShellPlan;
+    pub const encodeShellPlanRequest = shell_layout.encodeShellPlanRequest;
     pub fn copyInto(buffer: []u8, value: []const u8) ![]const u8 {
         return testingCopyInto(buffer, value);
     }

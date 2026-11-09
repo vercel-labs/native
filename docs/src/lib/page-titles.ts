@@ -4,7 +4,7 @@ export const PAGE_TITLES: Record<string, string> = {
   components: "Components",
   // One title per component page, from the shared inventory.
   ...Object.fromEntries(componentPages.map((page) => [`components/${page.slug}`, page.name])),
-  "": "The Complete Toolkit\nfor Native Apps",
+  "": "Build native\ndesktop apps",
   introduction: "Introduction",
   "quick-start": "Quick Start",
   "app-model": "App Model",

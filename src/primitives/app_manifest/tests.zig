@@ -773,12 +773,15 @@ test "bridge validation catches duplicate commands and invalid origins" {
 test "security validation catches invalid navigation and external policies" {
     try validateSecurity(.{ .navigation = .{
         .allowed_origins = &.{ "zero://app", "https://example.com" },
-        .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{"https://example.com/*"} },
+        .external_links = .{ .action = .open_system_browser, .allowed_urls = &.{ "https://example.com/docs", "https://example.com/*", "*" } },
     } });
 
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .allowed_origins = &.{"bad origin"} } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"ssh://example.com"} } } }));
     try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{"https://example.com*"} } } }));
+    for ([_][]const u8{ "https://*.example.com/*", "https://*/*", "https://*/", "https://example.com/*/docs" }) |pattern| {
+        try std.testing.expectError(error.InvalidUrl, validateSecurity(.{ .navigation = .{ .external_links = .{ .allowed_urls = &.{pattern} } } }));
+    }
 }
 
 test "package metadata validation catches empty authors and invalid keywords" {

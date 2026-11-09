@@ -47,5 +47,6 @@ packages/core/node_modules/
 # The CLI-materialized editor copy of @native-sdk/core inside the TS example
 # apps (node_modules is editor surface, never source — the same entry the
 # TS scaffold writes into a new app's .gitignore)
-examples/soundboard-ts/node_modules/
-examples/system-monitor-ts/node_modules/
+examples/soundboard/node_modules/
+examples/system-monitor/node_modules/
+examples/habits/node_modules/

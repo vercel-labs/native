@@ -34,7 +34,8 @@
 //! lives at markup level, where an author can still choose; here the
 //! tree is what ships.
 //!
-//! The audit is deterministic, allocates nothing, and reads no globals —
+//! The native reference is deterministic and allocation-free; a selected
+//! compiled owner uses copied native-owned request/result buffers —
 //! the same shape as the layout audit (layout_audit.zig), and adopted
 //! the same way: `expectA11yAuditSweepClean` in every example suite.
 
@@ -91,6 +92,7 @@ pub const A11yAuditIssues = struct {
 /// same build the app would mount (real model, real tokens), or dynamic
 /// labels will not be the ones the bridges announce.
 pub fn auditWidgetA11y(layout: WidgetLayoutTree, storage: []A11yAuditFinding) A11yAuditIssues {
+    if (layout.audit_policy) |policy| return @import("widget_audit_policy.zig").auditA11y(std.heap.page_allocator, policy, layout, storage) catch @panic("compiled accessibility audit failed");
     var sink = FindingSink{ .storage = storage };
     const node_count = @min(layout.nodes.len, max_a11y_audit_nodes);
 

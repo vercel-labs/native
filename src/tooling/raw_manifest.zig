@@ -119,6 +119,12 @@ pub const RawSecurity = struct {
 /// reference.
 pub const RawAssets = struct {
     images: []const RawImageAsset = &.{},
+    fonts: []const RawFontAsset = &.{},
+};
+
+pub const RawFontAsset = struct {
+    id: u64,
+    path: []const u8,
 };
 
 pub const RawImageAsset = struct {

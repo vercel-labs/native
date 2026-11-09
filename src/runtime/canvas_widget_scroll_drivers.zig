@@ -24,6 +24,7 @@
 //! the OTHER axis along for the ride — would snap the OS scroller back
 //! mid-gesture.
 
+const host_regions = @import("host_input_regions_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
@@ -49,8 +50,12 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
         /// engine's drawn scrollbar and kinetic stepper stand down. Runs
         /// on the reconciled nodes before they are copied into the view,
         /// so rebuild-time clamping sees the flag too.
-        pub fn stampCanvasWidgetNativeScroll(self: *const Runtime, nodes: []canvas.WidgetLayoutNode) void {
+        pub fn stampCanvasWidgetNativeScroll(self: *const Runtime, nodes: []canvas.WidgetLayoutNode, policy: host_regions.Policy) void {
             if (!canvasWidgetScrollDriversSupported(self)) return;
+            if (host_regions.plan(policy, .stamp, .{ .nodes = nodes, .supported = true })) |program| {
+                program.stamp(nodes);
+                return;
+            }
             for (nodes) |*node| {
                 if (canvasWidgetScrollDriverEligible(node.*)) node.widget.runtime_flags.native_scroll = true;
             }
@@ -65,6 +70,27 @@ pub fn RuntimeCanvasWidgetScrollDrivers(comptime Runtime: type) type {
             if (self.views[view_index].kind != .gpu_surface or !self.views[view_index].open) return;
             if (!canvasWidgetScrollDriversSupported(self)) return;
             const view = &self.views[view_index];
+            if (host_regions.plan(view.canvas_widget_surface_scope_policy, .drivers, .{
+                .nodes = view.widget_layout_nodes[0..view.widget_layout_node_count],
+                .tokens = view.widget_tokens,
+                .frame = view.frame,
+                .supported = true,
+                .measure_view = view,
+                .tracked_ids = view.scroll_driver_ids[0..view.scroll_driver_count],
+                .tracked_offsets = view.scroll_driver_offsets[0..view.scroll_driver_count],
+            })) |program| {
+                program.stamp(view.widget_layout_nodes[0..view.widget_layout_node_count]);
+                self.options.platform.services.setGpuSurfaceScrollDrivers(view.window_id, view.label, program.drivers[0..program.driver_count], program.occluders[0..program.occluder_count]) catch |err| {
+                    if (err != error.UnsupportedService) scroll_driver_log.warn("scroll driver sync failed for view '{s}': {s}", .{ view.label, @errorName(err) });
+                    return;
+                };
+                for (program.drivers[0..program.driver_count], 0..) |driver, i| {
+                    view.scroll_driver_ids[i] = driver.id;
+                    view.scroll_driver_offsets[i] = .init(driver.offset_x, driver.offset_y);
+                }
+                view.scroll_driver_count = program.driver_count;
+                return;
+            }
 
             var drivers: [platform.max_gpu_surface_scroll_drivers]platform.GpuSurfaceScrollDriver = undefined;
             var ids: [platform.max_gpu_surface_scroll_drivers]u64 = undefined;
@@ -309,6 +335,18 @@ fn trackedScrollDriverOffset(view: anytype, driver_id: u64) ?geometry.OffsetF {
 }
 
 fn recordScrollDriverOffset(view: anytype, driver_id: u64, offset: geometry.OffsetF) void {
+    if (host_regions.plan(view.canvas_widget_surface_scope_policy, .record, .{
+        .record_id = driver_id,
+        .tracked_ids = view.scroll_driver_ids[0..view.scroll_driver_count],
+        .tracked_offsets = view.scroll_driver_offsets[0..view.scroll_driver_count],
+    })) |program| {
+        if (program.detail == std.math.maxInt(u32)) return;
+        const index = program.detail;
+        view.scroll_driver_ids[index] = driver_id;
+        view.scroll_driver_offsets[index] = offset;
+        if (index == view.scroll_driver_count) view.scroll_driver_count += 1;
+        return;
+    }
     for (view.scroll_driver_ids[0..view.scroll_driver_count], 0..) |id, index| {
         if (id != driver_id) continue;
         view.scroll_driver_offsets[index] = offset;

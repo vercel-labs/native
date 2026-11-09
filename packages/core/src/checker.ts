@@ -4,7 +4,7 @@
 // checker adds the subset rules on the typed AST; the emitter re-derives every
 // rule during emission and turns any gap into a loud internal error.
 
-import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, sdkCoreModulePath, type ExportListBinding } from "./typed_ast.ts";
+import { ts, TypedAst, lineColumn, hasExportModifier, exportListBindings, sdkCoreModulePath, sdkBytesModulePath, type ExportListBinding } from "./typed_ast.ts";
 import path from "node:path";
 import { makeDiagnostic, type SubsetDiagnostic, type RuleId } from "./diagnostics.ts";
 import type { TypeTable } from "./types.ts";
@@ -508,9 +508,15 @@ export class SubsetChecker {
     this.checkMigrationHook();
     this.checkThemePackHelper();
     this.checkThemeStateHelper();
+    this.checkTokenOverridesHelper();
     this.checkStatusItemHelper();
     this.checkStatusItemsHelper();
     this.checkWindowsHelper();
+    this.checkWebPanesHelper();
+    this.checkLayoutTweensHelper();
+    this.checkCanvasHelpers();
+    this.checkBootImageHelper();
+    this.checkSliderStateHelper();
     this.checkViewUnbound();
     this.checkReservedContractConsts();
     this.checkValueRecordAliases();
@@ -625,7 +631,7 @@ export class SubsetChecker {
       if (!ts.isStringLiteral(spec)) continue;
       if (stmt.importClause?.isTypeOnly) continue;
       const bindings = stmt.importClause?.namedBindings;
-      if (spec.text !== "@native-sdk/core") {
+      if (spec.text !== "@native-sdk/core" && spec.text !== "@native-sdk/core/bytes") {
         // NS1039 (half 1): `import * as ns` over an in-graph module is the
         // supported dot-syntax alias; record the local name for the
         // bare-value check in walk().
@@ -738,13 +744,24 @@ export class SubsetChecker {
     if (!ts.isPropertyAccessExpression(node.parent) || node.parent.expression !== node) return false;
     let cur: ts.Node = node;
     while (cur.parent && !ts.isReturnStatement(cur.parent)) {
-      if (
-        ts.isFunctionDeclaration(cur.parent) ||
-        ts.isArrowFunction(cur.parent) ||
-        ts.isFunctionExpression(cur.parent)
-      ) {
-        return false;
+      if (ts.isArrowFunction(cur.parent)) {
+        // An array map consumed immediately by Cmd.batch cannot retain its
+        // callback or commands. Keep this exception local to the returned
+        // command expression; stored maps and arbitrary callbacks still fail.
+        const arrow = cur.parent;
+        const map = arrow.parent;
+        const batch = map.parent;
+        if (!tupleSlot || !ts.isCallExpression(map) || map.arguments.length !== 1 || map.arguments[0] !== arrow ||
+            !ts.isPropertyAccessExpression(map.expression) || map.expression.name.text !== "map" ||
+            !this.tast.isArrayLikeType(this.tast.typeOf(map.expression.expression)) ||
+            !ts.isCallExpression(batch) || batch.arguments.length !== 1 || batch.arguments[0] !== map ||
+            !ts.isPropertyAccessExpression(batch.expression) || batch.expression.name.text !== "batch" ||
+            !ts.isIdentifier(batch.expression.expression) || !this.cmdNames.has(batch.expression.expression.text) ||
+            !this.isSdkReference(batch.expression.expression)) return false;
+        cur = map;
+        continue;
       }
+      if (ts.isFunctionDeclaration(cur.parent) || ts.isFunctionExpression(cur.parent)) return false;
       cur = cur.parent;
     }
     const ret = cur.parent;
@@ -820,7 +837,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "themePack" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`themePack` is not a single-Model-parameter helper with an explicit return type.",
@@ -858,7 +875,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "themeState" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`themeState` is not a single-Model-parameter helper with an explicit return type.",
@@ -880,16 +897,33 @@ export class SubsetChecker {
       return found.join(",") === expected.slice().sort().join(",");
     };
     const valid =
-      names.join(",") === "accent,colorScheme,pack" &&
+      names.join(",") === "accent,colorScheme,highContrast,pack,reduceMotion" &&
       optionalEnumMembersAre(pack, ["house", "geist"]) &&
       optionalEnumMembersAre(colorScheme, ["light", "dark", "system"]) &&
-      accent?.type.k === "optional" && accent.type.inner.k === "string";
+      accent?.type.k === "optional" && accent.type.inner.k === "string" &&
+      field("highContrast")?.type.k === "optional" && field("highContrast")?.type.inner.k === "bool" &&
+      field("reduceMotion")?.type.k === "optional" && field("reduceMotion")?.type.inner.k === "bool";
     if (!valid) {
       this.report(
         "NS1033",
-        "`themeState` must return the exact canonical `ThemeState` record (`pack?`, `colorScheme?`, `accent?`); import it from `@native-sdk/core/events`.",
+        "`themeState` must return the exact canonical `ThemeState` record (`pack?`, `colorScheme?`, `accent?`, `highContrast?`, `reduceMotion?`); import it from `@native-sdk/core/events`.",
         decl.type,
       );
+    }
+  }
+
+  private checkTokenOverridesHelper(): void {
+    const decl = this.entryExportedFunction("tokenOverrides");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "tokenOverrides" && candidate.decl === decl && decl.parameters.length === 1);
+    const returns = decl.type ? this.table.resolveTypeNode(decl.type) : undefined;
+    // The canonical declaration is complete: importing it gives every
+    // consumer one optional field for every register member, even when an
+    // app returns a small override. Partial hand-authored shapes cannot
+    // silently drop a token from generated projection or native validation.
+    if (!helper || returns?.k !== "struct" || returns.name !== "ThemeDesignTokenOverrides" ||
+        this.table.structs.get(returns.name)?.decl.getSourceFile().fileName !== path.join(path.dirname(sdkCoreModulePath), "theme.ts")) {
+      this.report("NS1033", "`tokenOverrides` must be a single-Model helper returning `ThemeDesignTokenOverrides` imported from `@native-sdk/core/theme`.", decl.type ?? decl);
     }
   }
 
@@ -965,7 +999,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "statusItem" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`statusItem` is not a single-Model-parameter helper with an explicit return type.",
@@ -1373,7 +1407,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "statusItems" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`statusItems` must be a single-Model-parameter helper with an explicit return type.",
@@ -1508,6 +1542,117 @@ export class SubsetChecker {
   /// `windows(model)` is the TypeScript launcher's model-declared secondary
   /// window set. Keep the descriptor exact: the Zig adapter projects it into
   /// UiApp.WindowDescriptor, including close-command routing and closePolicy.
+  private checkWebPanesHelper(): void {
+    const decl = this.entryExportedFunction("webPanes");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "webPanes" && candidate.decl === decl && decl.parameters.length === 1);
+    const returns = decl.type === undefined ? null : this.table.resolveTypeNode(decl.type);
+    const descriptor = returns?.k === "slice" && returns.elem.k === "struct" ? this.table.structs.get(returns.elem.name) : undefined;
+    const fields = descriptor?.fields ?? [];
+    const field = (name: string) => fields.find(candidate => candidate.tsName === name)?.type;
+    const numeric = (name: string) => ["number", "i64", "f64", "numAlias"].includes(field(name)?.k ?? "");
+    const anchor = field("anchor");
+    if (helper === undefined || fields.map(candidate => candidate.tsName).sort().join(",") !== "anchor,height,label,reloadToken,url,width,x,y" ||
+        field("label")?.k !== "bytes" || field("url")?.k !== "bytes" ||
+        anchor?.k !== "optional" || anchor.inner.k !== "bytes" ||
+        !["x", "y", "width", "height"].every(numeric) || !(numeric("reloadToken") || field("reloadToken")?.k === "bytes")) {
+      this.report("NS1033", "`webPanes` must be a single-Model helper returning `readonly WebViewPane[]` or `readonly ExactWebViewPane[]`; import the descriptor from `@native-sdk/core/events`.", decl.type ?? decl);
+    }
+  }
+
+  private checkLayoutTweensHelper(): void {
+    const decl = this.entryExportedFunction("layoutTweens");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "layoutTweens" && candidate.decl === decl && decl.parameters.length === 1);
+    const returns = decl.type === undefined ? null : this.table.resolveTypeNode(decl.type);
+    const descriptor = returns?.k === "slice" && returns.elem.k === "struct" ? this.table.structs.get(returns.elem.name) : undefined;
+    const fields = descriptor?.fields ?? [];
+    const field = (name: string) => fields.find(candidate => candidate.tsName === name)?.type;
+    const label = field("label"), easing = field("easing");
+    const members = easing?.k === "enum" ? this.table.enums.get(easing.name)?.members.slice().sort().join(",") : "";
+    if (helper === undefined || fields.map(candidate => candidate.tsName).sort().join(",") !== "durationMs,easing,index,label,to" ||
+        label?.k !== "optional" || label.inner.k !== "bytes" || members !== "emphasized,linear,spring,standard" ||
+        !["index", "to", "durationMs"].every(name => ["number", "i64", "f64", "numAlias"].includes(field(name)?.k ?? "")))
+      this.report("NS1033", "`layoutTweens` must be a single-Model helper returning `readonly LayoutTween[]`; import the descriptor from `@native-sdk/core/events`.", decl.type ?? decl);
+  }
+
+  private checkBootImageHelper(): void {
+    const decl = this.entryExportedFunction("bootImageMsg");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "bootImageMsg" && candidate.decl === decl);
+    const input = decl.parameters[1]?.type;
+    const record = input ? this.table.resolveTypeNode(input) : null;
+    const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
+    const result = returns?.k === "optional" && returns.inner.k === "union" ? this.table.unions.get(returns.inner.name) : undefined;
+    const root = this.table.unions.get("Msg");
+    const valid = helper !== undefined && decl.parameters.length === 2 &&
+      record?.k === "struct" && record.name === "BootImageResult" &&
+      this.table.structs.get(record.name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts") &&
+      returns?.k === "optional" && returns.inner.k === "union" && returns.inner.name !== "Msg" && !!result &&
+      result.arms.every(arm => {
+        const matching = root?.arms.find(candidate => candidate.tag === arm.tag);
+        return !!matching && arm.fields.length === matching.fields.length && arm.fields.every((field, index) =>
+          field.tsName === matching.fields[index]!.tsName && JSON.stringify(field.type) === JSON.stringify(matching.fields[index]!.type));
+      });
+    if (!valid) this.report("NS1033", "bootImageMsg must take (Model, BootImageResult) from @native-sdk/core/events and return a dedicated Msg subset union | null with identical dispatch payloads.", decl.type ?? decl);
+  }
+
+  private checkSliderStateHelper(): void {
+    const decl = this.entryExportedFunction("sliderStateMsg");
+    if (decl === null) return;
+    const helper = this.table.modelHelperDecls().find(candidate => candidate.name === "sliderStateMsg" && candidate.decl === decl);
+    const input = decl.parameters[1]?.type;
+    const samples = input ? this.table.resolveTypeNode(input) : null;
+    const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
+    const result = returns?.k === "optional" && returns.inner.k === "union" ? this.table.unions.get(returns.inner.name) : undefined;
+    const root = this.table.unions.get("Msg");
+    const valid = helper !== undefined && decl.parameters.length === 2 && samples?.k === "slice" &&
+      samples.elem.k === "struct" && samples.elem.name === "SliderState" &&
+      this.table.structs.get(samples.elem.name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts") &&
+      returns?.k === "optional" && returns.inner.k === "union" && returns.inner.name !== "Msg" && !!result &&
+      result.arms.every(arm => {
+        const matching = root?.arms.find(candidate => candidate.tag === arm.tag);
+        return !!matching && arm.fields.length === matching.fields.length && arm.fields.every((field, index) =>
+          field.tsName === matching.fields[index]!.tsName && JSON.stringify(field.type) === JSON.stringify(matching.fields[index]!.type));
+      });
+    if (!valid) this.report("NS1033", "sliderStateMsg must take (Model, readonly SliderState[]) from @native-sdk/core/events and return a dedicated Msg subset union | null with identical payloads. Its update must return no commands.", decl.type ?? decl);
+  }
+
+  private checkCanvasHelpers(): void {
+    const canonicalRecord = (type: import("./types.ts").ZType, name: string): boolean =>
+      type.k === "struct" && type.name === name &&
+      this.table.structs.get(name)?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
+    for (const name of ["canvasIcons", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg"]) {
+      const decl = this.entryExportedFunction(name);
+      if (decl === null) continue;
+      const helper = this.table.modelHelperDecls().find(candidate => candidate.name === name && candidate.decl === decl);
+      const returns = decl.type ? this.table.resolveTypeNode(decl.type) : null;
+      const context = decl.parameters[1]?.type;
+      let valid = helper !== undefined;
+      if (name === "canvasIcons") {
+        valid &&= decl.parameters.length === 1 && returns?.k === "slice" && canonicalRecord(returns.elem, "CanvasIconDefinition");
+      } else if (name === "canvasAnimations") {
+        valid &&= decl.parameters.length === 1 && returns?.k === "slice" && canonicalRecord(returns.elem, "CanvasAnimation");
+      } else if (name === "canvasChrome" || name === "canvasChromeSuffix") {
+        valid &&= decl.parameters.length === 2 && !!context && canonicalRecord(this.table.resolveTypeNode(context), "CanvasChromeContext") &&
+          returns?.k === "slice" && returns.elem.k === "union" && returns.elem.name === "CanvasChromeCommand" &&
+          this.table.unions.get("CanvasChromeCommand")?.decl.getSourceFile().fileName === path.join(path.dirname(sdkCoreModulePath), "events.ts");
+      } else {
+        const result = returns?.k === "optional" && returns.inner.k === "union" ? this.table.unions.get(returns.inner.name) : undefined;
+        const root = this.table.unions.get("Msg");
+        valid &&= decl.parameters.length === 2 && !!context && canonicalRecord(this.table.resolveTypeNode(context), "CanvasFrameEvent") &&
+          returns?.k === "optional" && returns.inner.k === "union" && returns.inner.name !== "Msg" && !!result &&
+          result.arms.every(arm => {
+            const matching = root?.arms.find(candidate => candidate.tag === arm.tag);
+            return !!matching && arm.fields.length === matching.fields.length && arm.fields.every((field, index) =>
+              field.tsName === matching.fields[index]!.tsName && JSON.stringify(field.type) === JSON.stringify(matching.fields[index]!.type));
+          });
+        if (this.entryExportedFunction("frameMsg")) valid = false;
+      }
+      if (!valid) this.report("NS1033", `${name} must use its canonical @native-sdk/core/events declaration: canvasIcons(Model): readonly CanvasIconDefinition[]; canvasChrome/canvasChromeSuffix(Model, CanvasChromeContext): readonly CanvasChromeCommand[]; canvasAnimations(Model): readonly CanvasAnimation[]; canvasFrameMsg(Model, CanvasFrameEvent): a dedicated Msg subset union | null (instead of frameMsg), sharing the exact dispatch payload types.`, decl.type ?? decl);
+    }
+  }
+
   private checkWindowsHelper(): void {
     let decl: ts.FunctionDeclaration | null = null;
     for (const stmt of this.entry.statements) {
@@ -1534,7 +1679,7 @@ export class SubsetChecker {
     const helper = this.table.modelHelperDecls().find(
       (candidate) => candidate.name === "windows" && candidate.decl === decl,
     );
-    if (helper === undefined || decl.type === undefined) {
+    if (helper === undefined || decl.parameters.length !== 1 || decl.type === undefined) {
       this.report(
         "NS1033",
         "`windows` must be a single-Model-parameter helper with an explicit `readonly WindowDescriptor[]` return type.",
@@ -2017,7 +2162,7 @@ export class SubsetChecker {
   /// entry points, but the exports themselves live in the entry module.
   private static readonly entryOnlyExports = new Set([
     "update", "initialModel", "subscriptions", "migrate",
-    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "statusItem", "statusItems", "windows",
+    "commandMsg", "keyMsg", "frameMsg", "pinchMsg", "dropMsg", "appearanceMsg", "chromeMsg", "envMsgs", "themePack", "themeState", "tokenOverrides", "statusItem", "statusItems", "windows", "webPanes", "layoutTweens", "canvasIcons", "canvasChrome", "canvasChromeSuffix", "canvasAnimations", "canvasFrameMsg", "bootImageMsg", "sliderStateMsg",
     "viewUnbound", "modelUnbound", "msgUnbound",
   ]);
 
@@ -2524,7 +2669,9 @@ export class SubsetChecker {
     if (!ts.isIdentifier(expr)) return null;
     const decl = this.tast.declarationOf(expr);
     if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return null;
-    if (path.resolve(decl.getSourceFile().fileName) !== path.resolve(this.sdkCorePath)) return null;
+    const source = path.resolve(decl.getSourceFile().fileName);
+    if (source !== path.resolve(this.sdkCorePath) &&
+        !(source === path.resolve(sdkBytesModulePath) && ["asciiBytes", "utf8Bytes"].includes(decl.name.text))) return null;
     return decl.name.text;
   }
 
@@ -3116,7 +3263,7 @@ export class SubsetChecker {
       if (
         ts.isCallExpression(node) &&
         ts.isPropertyAccessExpression(node.expression) &&
-        ["readFile", "writeFile", "appendFile", "statFile", "deleteFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
+        ["readFile", "writeFile", "readFileResult", "writeFileResult", "appendFile", "statFile", "deleteFile", "readFileStream", "writeFileStream"].includes(node.expression.name.text) &&
         ts.isIdentifier(node.expression.expression) &&
         this.cmdNames.has(node.expression.expression.text) &&
         this.isSdkReference(node.expression.expression) &&
@@ -3188,6 +3335,26 @@ export class SubsetChecker {
         if (!this.permissions.has("credentials")) {
           this.report("NS1072", "`Cmd.credentials.*` requires the `credentials` permission in app.zon.", node);
         }
+      }
+
+      if (
+        !this.permissions.has("keyboard_input") &&
+        ((ts.isPropertyAccessExpression(node) &&
+          node.name.text === "keyboard" &&
+          ts.isIdentifier(node.expression) &&
+          this.cmdNames.has(node.expression.text) &&
+          this.isSdkReference(node.expression)) ||
+          (ts.isCallExpression(node) &&
+            ts.isPropertyAccessExpression(node.expression) &&
+            node.expression.name.text === "request" &&
+            ts.isIdentifier(node.expression.expression) &&
+            this.cmdNames.has(node.expression.expression.text) &&
+            this.isSdkReference(node.expression.expression) &&
+            node.arguments[0] !== undefined &&
+            ts.isStringLiteralLike(node.arguments[0]) &&
+            node.arguments[0].text.startsWith("native-sdk.keyboard.")))
+      ) {
+        this.report("NS1075", "`Cmd.keyboard.*` and `native-sdk.keyboard.*` requests require the `keyboard_input` permission in app.zon.", node);
       }
 
       // NS1073 — the core credential wire names belong to the typed factory.

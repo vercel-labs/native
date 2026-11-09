@@ -1,13 +1,16 @@
+const builtin_coordination = @import("builtin_coordination_policy.zig");
+const authorization = @import("authorization_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const trace = @import("trace");
 const json = @import("json");
 const validation = @import("validation.zig");
+const command_policy = @import("command_policy.zig");
 const runtime_api = @import("api.zig");
 const runtime_async_bridge = @import("async_bridge.zig");
 const runtime_automation_snapshot = @import("automation_snapshot.zig");
 const runtime_automation_widget_dispatch = @import("automation_widget_dispatch.zig");
-const automation_commands = @import("automation_commands.zig");
+const automation_commands = @import("automation_command_policy.zig");
 const launch_timing = @import("launch_timing.zig");
 const runtime_clock = @import("clock.zig");
 const runtime_state = @import("state.zig");
@@ -25,6 +28,9 @@ const bridge = @import("../bridge/root.zig");
 const extensions = @import("../extensions/root.zig");
 const app_manifest = @import("app_manifest");
 const platform = @import("../platform/root.zig");
+const host_flow = @import("host_flow_policy.zig");
+const native_reference = @import("flow_reference.zig");
+const HostEventPump = @import("host_event_pump.zig").HostEventPump;
 const security = @import("../security/root.zig");
 
 const validateCommandName = validation.validateCommandName;
@@ -59,6 +65,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         const RunContext = struct {
             runtime: *Runtime,
             app: App,
+            host_events: HostEventPump,
         };
 
         fn WindowViewMethods() type {
@@ -90,6 +97,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn run(self: *Runtime, app: App) anyerror!void {
+            const policy = app.host_flow_policy orelse return native_reference.RuntimeFlow(Runtime).run(self, app);
             var init_fields: [3]trace.Field = undefined;
             init_fields[0] = trace.string("app", app.name);
             init_fields[1] = trace.string("platform", self.options.platform.name);
@@ -99,81 +107,58 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 init_field_count += 1;
             }
             log(self, "runtime.init", "runtime initialized", init_fields[0..init_field_count]);
-            try app_manifest.validateCommands(self.options.commands);
-            try self.options.platform.services.configureSecurityPolicy(self.options.security);
-            try self.options.platform.services.configureMenus(self.options.menus);
-            try self.options.platform.services.configureShortcuts(self.options.shortcuts);
-            // Automation liveness: the drain (`consumeAutomationCommand`,
-            // in `frame` below) runs at most once per frame_requested
-            // turn, and an idle app produces no frames — so a queued
-            // command must WAKE the loop the way user input does. The
-            // arrival watcher polls the dropbox slot on its own thread
-            // and asks the platform for one coalesced frame tick through
-            // its thread-safe `request_frame_fn` whenever a command is
-            // pending. Consumption itself stays on the frame boundary,
-            // so command order, one-command-per-frame, and session
-            // recording/replay (commands nest inside recorded
-            // frame_requested events) are unchanged; only the frame's
-            // ARRIVAL time moves. No automation server (any non-dev
-            // build) means no thread and no polls at all.
             var command_watcher: automation.Watcher = undefined;
             var command_watcher_running = false;
-            if (self.options.automation) |server| {
-                if (self.options.platform.services.request_frame_fn) |request_fn| {
-                    command_watcher_running = command_watcher.start(server, .{
-                        .context = self.options.platform.services.context,
-                        .request_fn = request_fn,
-                    });
-                    if (!command_watcher_running) {
-                        log(self, "automation.watcher_failed", "automation command watcher thread did not start; commands drain on the next unrelated frame", &.{});
-                    }
-                } else {
-                    // A platform without the cross-thread frame request
-                    // keeps the old behavior (commands drain on whatever
-                    // frame arrives next); say so once instead of wedging
-                    // silently.
-                    log(self, "automation.watcher_unsupported", "platform has no cross-thread frame request; automation commands drain on the next unrelated frame", &.{});
-                }
-            }
-            // Stopped (joined) before the platform loop's resources go
-            // away, so the watcher can never call into a dead host.
-            defer if (command_watcher_running) command_watcher.stop();
-
-            // Media-surface wake teardown: producers a slow app forgot
-            // to release may push (and try to wake this platform) at
-            // any later time from their own threads. Disarm their wake
-            // bindings before the caller's later-declared defers tear
-            // the host down — declared BEFORE the app-stop defer below
-            // so it runs AFTER the stop hook (LIFO), letting the hook
-            // join producer threads first. The same run-exit ordering
-            // that stops the automation arrival watcher.
-            defer self.disarmMediaSurfaceWakes();
-
-            // Teardown ordering contract: everything the app must do
-            // against the live platform — silencing an active audio
-            // player, disarming platform timers, joining effect workers
-            // that post through the platform's wake service — happens in
-            // the app's stop hook, and that hook is guaranteed to run
-            // before run() returns. The app's OWN deinit cannot serve
-            // this purpose: it is typically a `defer` in main that runs
-            // only after the runner's later-declared defers have already
-            // destroyed the platform host and freed the runtime, so any
-            // platform service call from there dereferences freed memory
-            // (the quit-while-audio-plays use-after-free). The platform's
-            // `.app_shutdown` event delivers the stop hook on the normal
-            // quit path; this defer delivers it when the loop exits any
-            // other way (an error unwind, a host that stops without a
-            // shutdown event) — exactly once either way, gated by
-            // `app_stop_delivered`.
-            defer if (!self.app_stop_delivered) {
-                self.app_stop_delivered = true;
-                app.stop(self) catch |err| log(self, "app.stop.failed", @errorName(err), &.{trace.string("app", app.name)});
+            var cleanup_armed = false;
+            var context: RunContext = .{ .runtime = self, .app = app, .host_events = .{ .allocator = self.owned_allocator, .policy = policy } };
+            defer if (cleanup_armed) {
+                const cleanup = host_flow.plan(policy, .cleanup, .{ .a = @intFromBool(self.app_stop_delivered), .b = @intFromBool(command_watcher_running) });
+                for (cleanup) |action| switch (action) {
+                    0 => break,
+                    1 => context.host_events.deinit(),
+                    2 => {
+                        self.app_stop_delivered = true;
+                        app.stop(self) catch |err| log(self, "app.stop.failed", @errorName(err), &.{trace.string("app", app.name)});
+                    },
+                    3 => self.disarmMediaSurfaceWakes(),
+                    4 => command_watcher.stop(),
+                    else => unreachable,
+                };
             };
-
-            var context: RunContext = .{ .runtime = self, .app = app };
-            try self.options.platform.run(handlePlatformEvent, &context);
-
-            log(self, "runtime.done", "runtime finished", &.{});
+            const program = host_flow.plan(policy, .run, .{});
+            for (program) |action| switch (action) {
+                0 => break,
+                1 => if (app.command_policy) |commands| try command_policy.catalog(commands, self.options.commands) else try app_manifest.validateCommands(self.options.commands),
+                2 => try self.options.platform.services.configureSecurityPolicy(self.options.security),
+                3 => try self.options.platform.services.configureMenus(self.options.menus),
+                4 => try self.options.platform.services.configureShortcuts(self.options.shortcuts),
+                5 => {
+                    const watcher_admission = host_flow.gate(policy, 4, @intFromBool(self.options.automation != null), @intFromBool(self.options.platform.services.request_frame_fn != null));
+                    if (watcher_admission != 0) {
+                        const server = self.options.automation.?;
+                        if (watcher_admission == 1) {
+                            const request_fn = self.options.platform.services.request_frame_fn.?;
+                            command_watcher_running = command_watcher.start(server, .{
+                                .context = self.options.platform.services.context,
+                                .request_fn = request_fn,
+                            });
+                            if (host_flow.gate(policy, 5, @intFromBool(command_watcher_running), 0) != 0) {
+                                log(self, "automation.watcher_failed", "automation command watcher thread did not start; commands drain on the next unrelated frame", &.{});
+                            }
+                        } else {
+                            // A platform without the cross-thread frame request
+                            // keeps the old behavior (commands drain on whatever
+                            // frame arrives next); say so once instead of wedging
+                            // silently.
+                            log(self, "automation.watcher_unsupported", "platform has no cross-thread frame request; automation commands drain on the next unrelated frame", &.{});
+                        }
+                    }
+                    cleanup_armed = true;
+                },
+                6 => try self.options.platform.run(handlePlatformEvent, &context),
+                7 => log(self, "runtime.done", "runtime finished", &.{}),
+                else => unreachable,
+            };
         }
 
         fn reservePrimaryStartupWindow(self: *Runtime) anyerror!void {
@@ -202,93 +187,140 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         pub fn dispatchPlatformEvent(self: *Runtime, app: App, event_value: platform.Event) anyerror!void {
-            // Session recording: stage the event on entry, commit it on
-            // exit — so effect results drained DURING dispatch precede
-            // the event record in the journal (replay feeds them before
-            // dispatching), and nested dispatches (automation commands
-            // inside frame_requested) commit innermost-first. One state
-            // fingerprint checkpoint follows each published frame.
-            if (self.options.session_recorder) |recorder| recorder.stageEvent(event_value);
-            defer if (self.options.session_recorder) |recorder| {
-                recorder.commitEvent();
-                if (recorder.wantsCheckpoint(self.frame_index)) {
-                    recorder.recordCheckpoint(self.frame_index, self.sessionStateFingerprint());
-                }
-                // Seal on shutdown, here rather than only at run() exit:
-                // a host that terminates without unwinding the platform
-                // loop still leaves a whole journal behind.
-                if (event_value == .app_shutdown) recorder.finish();
+            const policy = app.host_flow_policy orelse return native_reference.RuntimeFlow(Runtime).dispatchPlatformEvent(self, app, event_value);
+            const kind = host_flow.eventKind(event_value);
+            const entry = host_flow.plan(policy, .journal_enter, .{ .kind = kind, .a = @intFromBool(self.options.session_recorder != null), .b = @intFromBool(self.invalidated) });
+            for (entry) |action| switch (action) {
+                0 => break,
+                1 => self.options.session_recorder.?.stageEvent(event_value),
+                2 => log(self, "platform.event", null, &.{trace.string("event", event_value.name())}),
+                else => unreachable,
             };
-
-            if ((event_value != .frame_requested and event_value != .gpu_surface_frame) or self.invalidated) {
-                const event_fields = [_]trace.Field{trace.string("event", event_value.name())};
-                log(self, "platform.event", null, &event_fields);
+            defer {
+                const exit = host_flow.plan(policy, .journal_exit, .{ .kind = kind, .a = @intFromBool(self.options.session_recorder != null) });
+                for (exit) |action| switch (action) {
+                    0 => break,
+                    1 => self.options.session_recorder.?.commitEvent(),
+                    2 => {
+                        const recorder = self.options.session_recorder.?;
+                        if (recorder.wantsCheckpoint(self.frame_index)) recorder.recordCheckpoint(self.frame_index, self.sessionStateFingerprint());
+                    },
+                    3 => self.options.session_recorder.?.finish(),
+                    else => unreachable,
+                };
             }
-
-            switch (event_value) {
-                .app_start => {
-                    // A startup failure must be loud and attributable.
-                    // Without this record the error unwinds into the
-                    // platform stop path and the only trace is a bare
-                    // `app.stop` right after `start` — which reads like a
-                    // clean exit while the main window sits blank.
-                    errdefer |err| recordDispatchError(self, "app_start", err);
+            errdefer |err| if (host_flow.gate(policy, 9, kind, 0) != 0) recordDispatchError(self, "app_start", err);
+            const program = host_flow.plan(policy, .platform_event, .{ .kind = kind });
+            var scene_value: ?app_manifest.ShellConfig = null;
+            var was_open = false;
+            var routed_drop: ?runtime_api.CanvasWidgetFileDropEvent = null;
+            for (program) |byte| switch (@as(host_flow.Action, @enumFromInt(byte))) {
+                .end => break,
+                .install => {
+                    self.shell_layout_policy = app.shell_layout_policy;
+                    self.view_coordination_policy = app.view_coordination_policy;
+                    self.window_lifecycle_policy = app.window_lifecycle_policy;
+                    self.image_registry_policy = app.image_registry_policy;
+                    self.font_registry_policy = app.font_registry_policy;
+                    self.shell_coordination_policy = app.shell_coordination_policy;
+                    self.shell_admission_policy = app.shell_admission_policy;
+                    self.system_admission_policy = app.system_admission_policy;
+                    self.bridge_descriptor_policy = app.bridge_descriptor_policy;
+                    self.authorization_policy = app.authorization_policy;
+                    self.builtin_coordination_policy = app.builtin_coordination_policy;
+                    self.automation_command_policy = app.automation_command_policy;
+                    self.automation_interaction_policy = app.automation_interaction_policy;
+                    self.snapshot_policy = app.snapshot_policy;
+                    self.frame_profile.policy = app.snapshot_policy;
+                    self.command_policy = app.command_policy;
+                    self.context_menu_policy = app.context_menu_policy;
+                    self.text_cache_policy = app.text_cache_policy;
+                    self.render_cache_policy = app.render_cache_policy;
+                    self.render_plan_policy = app.render_plan_policy;
+                    self.render_override_policy = app.render_override_policy;
+                    self.render_damage_policy = app.render_damage_policy;
+                    self.host_flow_policy = app.host_flow_policy;
+                },
+                .lap_start => {
                     launch_timing.lap("app_start");
+                },
+                .reserve => {
                     try reservePrimaryStartupWindow(self);
+                },
+                .start => {
                     try app.start(self);
+                },
+                .extensions_start => {
                     if (self.options.extensions) |registry| try registry.startAll(extensionContext(self));
+                },
+                .lifecycle_start => {
                     try dispatchEvent(self, app, .{ .lifecycle = .start });
+                },
+                .lap_started => {
                     launch_timing.lap("app_started");
-                    if (try app.scene()) |scene| {
-                        try loadScene(self, app, scene);
-                    } else {
-                        try loadStartupWindows(self, app);
-                    }
+                },
+                .scene => {
+                    scene_value = try app.scene();
+                },
+                .load => {
+                    if (host_flow.gate(policy, 8, @intFromBool(scene_value != null), 0) != 0) try loadScene(self, app, scene_value.?) else try loadStartupWindows(self, app);
+                },
+                .lap_loaded => {
                     launch_timing.lap("scene_loaded");
+                },
+                .startup_dirty => {
                     self.invalidateFor(.startup, null);
+                },
+                .start_log => {
                     log(self, "app.start", "app started", &.{trace.string("app", app.name)});
                 },
-                .app_activated => {
+                .activate => {
                     try WindowViewMethods().setAppActive(self, true);
+                },
+                .deactivate => {
+                    try WindowViewMethods().setAppActive(self, false);
+                },
+                .tooltip_reset => {
+                    try CanvasWidgetEventMethods().resetCanvasTooltipIntentForAppDeactivation(self);
+                },
+                .lifecycle_activate => {
                     try dispatchEvent(self, app, .{ .lifecycle = .activate });
+                },
+                .lifecycle_deactivate => {
+                    try dispatchEvent(self, app, .{ .lifecycle = .deactivate });
+                },
+                .emit_activate => {
                     emitAppLifecycleEvent(self, "app:activate") catch |err| log(self, "app.activate.emit_failed", @errorName(err), &.{});
                 },
-                .app_deactivated => {
-                    // The app-active register flips FIRST — before the
-                    // tooltip reset and before the app hears the
-                    // lifecycle event — so a model that rebuilds FROM
-                    // its deactivation callback adopts under a runtime
-                    // that already knows the app is inactive: the
-                    // adoption arm's reveal/arm paths are gated on this
-                    // register and stay silent.
-                    try WindowViewMethods().setAppActive(self, false);
-                    // Deactivation drops every tooltip conversation in
-                    // every window (see the seam's own rationale) BEFORE
-                    // the app hears the lifecycle event, so a model that
-                    // rebuilds on deactivate adopts against clean
-                    // tooltip state instead of a stale shown slot.
-                    try CanvasWidgetEventMethods().resetCanvasTooltipIntentForAppDeactivation(self);
-                    try dispatchEvent(self, app, .{ .lifecycle = .deactivate });
+                .emit_deactivate => {
                     emitAppLifecycleEvent(self, "app:deactivate") catch |err| log(self, "app.deactivate.emit_failed", @errorName(err), &.{});
                 },
-                .appearance_changed => |appearance| {
-                    self.appearance = appearance;
-                    // Appearance flips re-resolve theme typography (and a
-                    // host may re-resolve its fonts with it): cached
-                    // advance batches and retained wrap results must miss
-                    // rather than serve metrics measured under the
-                    // previous appearance.
-                    canvas.bumpTextMeasureGeneration();
-                    try dispatchEvent(self, app, .{ .appearance_changed = appearance });
+                .appearance => {
+                    self.appearance = event_value.appearance_changed;
                 },
-                .surface_resized => |surface_value| {
-                    self.surface = surface_value;
+                .text_generation => {
+                    canvas.bumpTextMeasureGeneration();
+                },
+                .appearance_event => {
+                    try dispatchEvent(self, app, .{ .appearance_changed = event_value.appearance_changed });
+                },
+                .surface => {
+                    self.surface = event_value.surface_resized;
+                },
+                .surface_window => {
+                    const surface_value = event_value.surface_resized;
                     if (WindowViewMethods().findWindowIndexById(self, surface_value.id)) |index| {
                         self.windows[index].info.frame.width = surface_value.size.width;
                         self.windows[index].info.frame.height = surface_value.size.height;
                         self.windows[index].info.scale_factor = surface_value.scale_factor;
                     }
+                },
+                .surface_layout => {
+                    const surface_value = event_value.surface_resized;
                     WindowViewMethods().relayoutShellViews(self, surface_value.id) catch |err| log(self, "shell.relayout_failed", @errorName(err), &.{trace.uint("window_id", surface_value.id)});
+                },
+                .surface_emit => {
+                    const surface_value = event_value.surface_resized;
                     var detail_buffer: [512]u8 = undefined;
                     var detail_writer = std.Io.Writer.fixed(&detail_buffer);
                     try detail_writer.print("{{\"width\":{d},\"height\":{d},\"scale\":{d},\"safeAreaInsets\":{{\"top\":{d},\"right\":{d},\"bottom\":{d},\"left\":{d}}},\"keyboardInsets\":{{\"top\":{d},\"right\":{d},\"bottom\":{d},\"left\":{d}}}}}", .{
@@ -305,7 +337,12 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         surface_value.keyboard_insets.left,
                     });
                     emitWindowEvent(self, surface_value.id, "resize", detail_writer.buffered()) catch |err| log(self, "window.resize.emit_failed", @errorName(err), &.{});
-                    self.invalidateFor(.surface_resize, geometry.RectF.fromSize(surface_value.size));
+                },
+                .surface_dirty => {
+                    self.invalidateFor(.surface_resize, geometry.RectF.fromSize(event_value.surface_resized.size));
+                },
+                .surface_log => {
+                    const surface_value = event_value.surface_resized;
                     const fields = [_]trace.Field{
                         trace.float("width", surface_value.size.width),
                         trace.float("height", surface_value.size.height),
@@ -313,18 +350,26 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     };
                     log(self, "surface.resize", "surface updated", &fields);
                 },
-                .window_frame_changed => |state| {
-                    // A user (or host) close arrives as open=false on a
-                    // window the runtime knew as open; a close the app
-                    // itself made through `closeWindow` already flipped
-                    // the flag, so the echo never re-fires. Capture the
-                    // transition BEFORE the update.
-                    const was_open = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.open else false;
+                .capture_open => {
+                    const state = event_value.window_frame_changed;
+                    was_open = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.open else false;
+                },
+                .window_update => {
+                    const state = event_value.window_frame_changed;
                     WindowViewMethods().updateWindowState(self, state) catch |err| log(self, "window.state.update_failed", @errorName(err), &.{trace.string("label", state.label)});
+                },
+                .window_layout => {
+                    const state = event_value.window_frame_changed;
                     WindowViewMethods().relayoutShellViews(self, state.id) catch |err| log(self, "shell.relayout_failed", @errorName(err), &.{trace.uint("window_id", state.id)});
+                },
+                .window_save => {
+                    const state = event_value.window_frame_changed;
                     if (self.options.window_state_store) |store| {
                         store.saveWindow(WindowViewMethods().runtimeWindowStateForPersistence(self, state)) catch |err| log(self, "window.state.save_failed", @errorName(err), &.{trace.string("label", state.label)});
                     }
+                },
+                .window_log => {
+                    const state = event_value.window_frame_changed;
                     log(self, "window.frame", "window frame updated", &.{
                         trace.string("label", state.label),
                         trace.float("x", state.frame.x),
@@ -332,83 +377,47 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         trace.float("width", state.frame.width),
                         trace.float("height", state.frame.height),
                     });
-                    if (was_open and !state.open) {
-                        // The model owns the consequence (the dismissal
-                        // precedent): the app maps this to a Msg and its
-                        // next declared window set is truth. The label
-                        // comes from runtime storage, which outlives the
-                        // event's transient slices.
+                },
+                .window_close => {
+                    const state = event_value.window_frame_changed;
+                    if (host_flow.gate(policy, 1, @intFromBool(was_open), @intFromBool(state.open)) != 0) {
                         const label = if (WindowViewMethods().findWindowIndexById(self, state.id)) |index| self.windows[index].info.label else state.label;
                         try dispatchEvent(self, app, .{ .window_closed = .{ .window_id = state.id, .label = label } });
                     }
                 },
-                .window_focused => |window_id| {
-                    // setFocusedIndex is the window-key seam: the
-                    // window LOSING key here also drops its views'
-                    // tooltip conversations there.
+                .focus_window => {
+                    const window_id = event_value.window_focused;
                     if (WindowViewMethods().findWindowIndexById(self, window_id)) |index| try WindowViewMethods().setFocusedIndex(self, index);
+                },
+                .dirty => {
                     self.invalidated = true;
                 },
-                .view_focused => |focus| {
-                    // Native children (notably embedded webviews) own
-                    // their pointer stream, so the host reports the
-                    // focus edge explicitly. Keep the canvas widget id
-                    // as per-view focus memory while its view blurs:
-                    // inactive terminal/text carets paint honestly, and
-                    // clicking back into the canvas resumes its normal
-                    // pointer-driven widget focus path.
+                .focus_view => {
+                    const focus = event_value.view_focused;
                     try WindowViewMethods().setFocusedView(self, focus.window_id, focus.label);
-                    self.invalidated = true;
                 },
-                .frame_requested => try frame(self, app),
-                .bridge_message => |message| try handleBridgeMessage(self, app, message),
-                .tray_action => |action| {
+                .frame => {
+                    try frame(self, app);
+                },
+                .bridge => {
+                    try handleBridgeMessage(self, app, event_value.bridge_message);
+                },
+                .tray_log => {
+                    const action = event_value.tray_action;
                     log(self, "tray.action", "tray item selected", &.{ trace.uint("status_item_id", action.status_item_id), trace.uint("item_id", action.item_id) });
-                    try dispatchCommand(self, app, .{
-                        .name = SystemServiceMethods().statusItemCommandNameForItem(self, action.status_item_id, action.item_id),
-                        .source = .tray,
-                        .status_item_id = action.status_item_id,
-                        .tray_item_id = action.item_id,
-                    });
                 },
-                .shortcut => |shortcut| {
-                    try dispatchCommand(self, app, .{
-                        .name = shortcut.id,
-                        .source = .shortcut,
-                        .window_id = shortcut.window_id,
-                    });
-                    try dispatchEvent(self, app, .{ .shortcut = shortcut });
+                .shortcut_event => {
+                    try dispatchEvent(self, app, .{ .shortcut = event_value.shortcut });
+                },
+                .shortcut_emit => {
+                    const shortcut = event_value.shortcut;
                     emitShortcutEvent(self, shortcut) catch |err| log(self, "shortcut.emit_failed", @errorName(err), &.{trace.string("id", shortcut.id)});
+                },
+                .command_dirty => {
                     self.invalidateFor(.command, null);
                 },
-                .native_command => |command| {
-                    try dispatchCommand(self, app, .{
-                        .name = command.name,
-                        .source = WindowViewMethods().commandSourceForNativeView(self, command.window_id, command.view_label),
-                        .window_id = command.window_id,
-                        .view_label = command.view_label,
-                    });
-                },
-                // The interactive-surface family below degrades on error
-                // instead of propagating: an error that escapes
-                // `dispatchPlatformEvent` reaches the platform callback,
-                // latches its failure flag, and exits the whole app — so a
-                // runtime-side capacity or render fault on a keystroke,
-                // click, scroll, resize, or frame tick must land in the
-                // dispatch-error ring (loud, queryable, traced at `.err`)
-                // while the app keeps running. The failing interaction is
-                // refused; the next one starts clean. The TestHarness's
-                // `.propagate` policy still returns the error so tests
-                // fail loud instead of leaving silent stale frames.
-                .gpu_surface_frame => |frame_event| GpuSurfaceEventMethods().dispatchGpuSurfaceFrame(self, app, frame_event) catch |err| {
-                    recordDispatchError(self, "gpu_surface_frame", err);
-                    if (self.dispatch_error_policy == .propagate) return err;
-                },
-                .gpu_surface_resized => |resize_event| {
-                    GpuSurfaceEventMethods().dispatchGpuSurfaceResized(self, app, resize_event) catch |err| {
-                        recordDispatchError(self, "gpu_surface_resized", err);
-                        if (self.dispatch_error_policy == .propagate) return err;
-                    };
+                .gpu_resize_log => {
+                    const resize_event = event_value.gpu_surface_resized;
                     log(self, "gpu_surface.resize", "gpu surface resized", &.{
                         trace.string("label", resize_event.label),
                         trace.float("width", resize_event.frame.width),
@@ -416,37 +425,80 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         trace.float("scale", resize_event.scale_factor),
                     });
                 },
-                .gpu_surface_input => |input_event| GpuSurfaceEventMethods().dispatchGpuSurfaceInput(self, app, input_event) catch |err| {
-                    recordDispatchError(self, "gpu_surface_input", err);
-                    if (self.dispatch_error_policy == .propagate) return err;
-                },
-                .gpu_surface_scroll_driver => |driver_event| ScrollDriverMethods().dispatchGpuSurfaceScrollDriver(self, app, driver_event) catch |err| {
-                    recordDispatchError(self, "gpu_surface_scroll_driver", err);
-                    if (self.dispatch_error_policy == .propagate) return err;
-                },
-                .context_menu_action => |action_event| ContextMenuMethods().dispatchContextMenuAction(self, app, action_event) catch |err| {
-                    recordDispatchError(self, "context_menu_action", err);
-                    if (self.dispatch_error_policy == .propagate) return err;
-                },
-                .widget_accessibility_action => |action_event| {
-                    _ = self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
-                        .id = action_event.id,
-                        .action = canvasWidgetAccessibilityActionKindFromPlatform(action_event.action),
-                        .text = action_event.text,
-                        .selection = if (action_event.selection) |selection| .{ .anchor = selection.start, .focus = selection.end } else null,
-                    }) catch |err| {
-                        recordDispatchError(self, "widget_accessibility_action", err);
-                        if (self.dispatch_error_policy == .propagate) return err;
+                .drop_route => {
+                    const drop = event_value.files_dropped;
+                    routed_drop = self.routeCanvasWidgetFileDrop(drop, &self.widget_event_route_entries) catch |err| blk: {
+                        const refusal: u8 = switch (err) {
+                            error.WindowNotFound => 1,
+                            error.ViewNotFound => 2,
+                            error.InvalidViewOptions => 3,
+                            else => 4,
+                        };
+                        if (host_flow.gate(policy, 7, refusal, 0) == 0) return @as(anyerror!void, err);
+                        break :blk null;
                     };
                 },
-                .menu_command => |command| {
+                .drop_widget => {
+                    if (host_flow.gate(policy, 8, @intFromBool(routed_drop != null), 0) != 0) try dispatchEvent(self, app, .{ .canvas_widget_file_drop = routed_drop.? });
+                },
+                .drop_event => {
+                    try dispatchEvent(self, app, .{ .files_dropped = event_value.files_dropped });
+                },
+                .drop_emit => {
+                    const drop = event_value.files_dropped;
+                    emitFileDropEvent(self, drop) catch |err| log(self, "drop.files.emit_failed", @errorName(err), &.{trace.uint("window_id", drop.window_id)});
+                },
+                .lifecycle_stop => {
+                    try dispatchEvent(self, app, .{ .lifecycle = .stop });
+                },
+                .extensions_stop => {
+                    if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
+                },
+                .mark_stop => {
+                    self.app_stop_delivered = true;
+                },
+                .stop => {
+                    try app.stop(self);
+                },
+                .stop_log => {
+                    log(self, "app.stop", "app stopped", &.{trace.string("app", app.name)});
+                },
+                .command_tray_action => {
+                    const action = event_value.tray_action;
+                    try dispatchCommand(self, app, .{
+                        .name = SystemServiceMethods().statusItemCommandNameForItem(self, action.status_item_id, action.item_id),
+                        .source = .tray,
+                        .status_item_id = action.status_item_id,
+                        .tray_item_id = action.item_id,
+                    });
+                },
+                .command_shortcut => {
+                    const shortcut = event_value.shortcut;
+                    try dispatchCommand(self, app, .{
+                        .name = shortcut.id,
+                        .source = .shortcut,
+                        .window_id = shortcut.window_id,
+                    });
+                },
+                .command_native_command => {
+                    const command = event_value.native_command;
+                    try dispatchCommand(self, app, .{
+                        .name = command.name,
+                        .source = WindowViewMethods().commandSourceForNativeView(self, command.window_id, command.view_label),
+                        .window_id = command.window_id,
+                        .view_label = command.view_label,
+                    });
+                },
+                .command_menu_command => {
+                    const command = event_value.menu_command;
                     try dispatchCommand(self, app, .{
                         .name = command.name,
                         .source = .menu,
                         .window_id = command.window_id,
                     });
                 },
-                .tray_command => |command| {
+                .command_tray_command => {
+                    const command = event_value.tray_command;
                     try dispatchCommand(self, app, .{
                         .name = command.name,
                         .source = .tray,
@@ -454,126 +506,103 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                         .status_item_id = command.status_item_id,
                     });
                 },
-                .notification_command => |command| {
+                .command_notification_command => {
+                    const command = event_value.notification_command;
                     try dispatchCommand(self, app, .{
                         .name = command.name,
                         .source = .notification,
                         .window_id = command.window_id,
                     });
                 },
-                .timer => |timer_event| {
-                    try dispatchEvent(self, app, .{ .timer = timer_event });
+                .event_timer => {
+                    try dispatchEvent(self, app, .{ .timer = event_value.timer });
                 },
-                .audio => |audio_event| {
-                    try dispatchEvent(self, app, .{ .audio = audio_event });
+                .event_audio => {
+                    try dispatchEvent(self, app, .{ .audio = event_value.audio });
                 },
-                .video => |video_event| {
-                    try dispatchEvent(self, app, .{ .video = video_event });
+                .event_video => {
+                    try dispatchEvent(self, app, .{ .video = event_value.video });
                 },
-                .wake => {
+                .event_wake => {
                     try dispatchEvent(self, app, .effects_wake);
                 },
-                .files_dropped => |drop| {
-                    const widget_drop_event = self.routeCanvasWidgetFileDrop(drop, &self.widget_event_route_entries) catch |err| switch (err) {
-                        error.WindowNotFound,
-                        error.ViewNotFound,
-                        error.InvalidViewOptions,
-                        => null,
-                        else => return err,
+                .capability_gpu_surface_frame => {
+                    GpuSurfaceEventMethods().dispatchGpuSurfaceFrame(self, app, event_value.gpu_surface_frame) catch |err| {
+                        recordDispatchError(self, "gpu_surface_frame", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
                     };
-                    if (widget_drop_event) |drop_event| {
-                        try dispatchEvent(self, app, .{ .canvas_widget_file_drop = drop_event });
-                    }
-                    try dispatchEvent(self, app, .{ .files_dropped = drop });
-                    emitFileDropEvent(self, drop) catch |err| log(self, "drop.files.emit_failed", @errorName(err), &.{trace.uint("window_id", drop.window_id)});
-                    self.invalidateFor(.command, null);
                 },
-                .app_shutdown => {
-                    try dispatchEvent(self, app, .{ .lifecycle = .stop });
-                    if (self.options.extensions) |registry| try registry.stopAll(extensionContext(self));
-                    // Marked delivered BEFORE the call: if the hook itself
-                    // errors, the run loop's exit path must not invoke it a
-                    // second time (the hook contract is exactly-once).
-                    self.app_stop_delivered = true;
-                    try app.stop(self);
-                    log(self, "app.stop", "app stopped", &.{trace.string("app", app.name)});
+                .capability_gpu_surface_resized => {
+                    GpuSurfaceEventMethods().dispatchGpuSurfaceResized(self, app, event_value.gpu_surface_resized) catch |err| {
+                        recordDispatchError(self, "gpu_surface_resized", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                    };
                 },
-            }
+                .capability_gpu_surface_input => {
+                    GpuSurfaceEventMethods().dispatchGpuSurfaceInput(self, app, event_value.gpu_surface_input) catch |err| {
+                        recordDispatchError(self, "gpu_surface_input", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                    };
+                },
+                .capability_gpu_surface_scroll_driver => {
+                    ScrollDriverMethods().dispatchGpuSurfaceScrollDriver(self, app, event_value.gpu_surface_scroll_driver) catch |err| {
+                        recordDispatchError(self, "gpu_surface_scroll_driver", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                    };
+                },
+                .capability_context_menu_action => {
+                    ContextMenuMethods().dispatchContextMenuAction(self, app, event_value.context_menu_action) catch |err| {
+                        recordDispatchError(self, "context_menu_action", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                    };
+                },
+                .capability_widget_context_menu_action => {
+                    AutomationWidgetMethods().dispatchWidgetContextMenuItem(self, app, event_value.widget_context_menu_action) catch |err| {
+                        recordDispatchError(self, "widget_context_menu_action", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                    };
+                },
+                .capability_widget_accessibility_action => {
+                    const action_event = event_value.widget_accessibility_action;
+                    _ = self.dispatchCanvasWidgetAccessibilityAction(app, action_event.window_id, action_event.label, .{
+                        .id = action_event.id,
+                        .action = canvasWidgetAccessibilityActionKindFromPlatform(action_event.action),
+                        .text = action_event.text,
+                        .selection = if (action_event.selection) |selection| .{ .anchor = selection.start, .focus = selection.end } else null,
+                    }) catch |err| {
+                        recordDispatchError(self, "widget_accessibility_action", err);
+                        if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                    };
+                },
+            };
         }
 
         pub fn dispatchEvent(self: *Runtime, app: App, event_value: Event) anyerror!void {
-            const event_fields = [_]trace.Field{trace.string("event", event_value.name())};
-            log(self, "runtime.event", null, &event_fields);
-            // A handler/update error degrades — recorded and observable,
-            // never fatal. Propagating it would reach the platform
-            // callback, set `failed`, and exit the whole app. The tag
-            // name (not `Event.name()`, which for commands aliases
-            // transient command-name storage) keeps ring records static.
-            // Under the TestHarness's `.propagate` policy the recorded
-            // error additionally returns, so capacity errors fail tests
-            // instead of leaving silent stale frames.
-            app.event(self, event_value) catch |err| {
-                recordDispatchError(self, @tagName(event_value), err);
-                if (self.dispatch_error_policy == .propagate) return err;
+            const policy = app.host_flow_policy orelse return native_reference.RuntimeFlow(Runtime).dispatchEvent(self, app, event_value);
+            const program = host_flow.plan(policy, .app_event, .{ .kind = host_flow.appKind(event_value) });
+            for (program) |action| switch (action) {
+                0 => break,
+                1 => if (self.options.extensions) |registry| {
+                    registry.dispatchCommand(extensionContext(self), .{ .name = event_value.command.name }) catch |err| recordDispatchError(self, "extension.command", err);
+                },
+                2 => self.invalidateFor(.command, null),
+                3 => self.invalidateFor(.state, null),
+                4 => log(self, "runtime.event", null, &.{trace.string("event", event_value.name())}),
+                5 => app.event(self, event_value) catch |err| {
+                    recordDispatchError(self, @tagName(event_value), err);
+                    if (host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0) return @as(anyerror!void, err);
+                },
+                else => unreachable,
             };
-
-            switch (event_value) {
-                .command => {
-                    if (self.options.extensions) |registry| {
-                        registry.dispatchCommand(extensionContext(self), .{ .name = event_value.command.name }) catch |err| {
-                            recordDispatchError(self, "extension.command", err);
-                        };
-                    }
-                    self.invalidateFor(.command, null);
-                },
-                .shortcut => {
-                    self.invalidateFor(.command, null);
-                },
-                .appearance_changed => {
-                    self.invalidateFor(.state, null);
-                },
-                .timer => {},
-                .effects_wake => {},
-                .audio => {},
-                .video => {},
-                .files_dropped => {},
-                .gpu_surface_frame => {},
-                .gpu_surface_resized => {},
-                .gpu_surface_input => {},
-                .canvas_widget_pointer => {},
-                .canvas_widget_keyboard => {},
-                .canvas_widget_scroll => {},
-                .canvas_widget_file_drop => {},
-                .canvas_widget_drag => {},
-                .canvas_widget_context_menu => {
-                    self.invalidateFor(.command, null);
-                },
-                // The shown notice only arms UiApp's selection snapshot:
-                // no visual change (the popover is an OS surface).
-                .canvas_widget_context_menu_shown => {},
-                // The dismissal notice only disarms UiApp's snapshot and
-                // pin: no visual change either.
-                .canvas_widget_context_menu_dismissed => {},
-                .canvas_widget_context_menu_request => {
-                    // The app loop answers by mounting the anchored
-                    // fallback surface: a visual change.
-                    self.invalidateFor(.command, null);
-                },
-                .canvas_widget_dismiss => {},
-                .canvas_widget_context_press => {},
-                .canvas_widget_resize => {},
-                .canvas_widget_change => {},
-                .window_closed => {
-                    self.invalidateFor(.state, null);
-                },
-                .automation_provenance => {},
-                .lifecycle => {},
-            }
         }
 
         pub fn dispatchCommand(self: *Runtime, app: App, command: CommandEvent) anyerror!void {
-            try validateCommandName(command.name);
-            if (std.mem.eql(u8, command.name, platform.update_check_command)) {
+            const plan: command_policy.Dispatch = if (self.command_policy) |policy| command_policy.dispatch(policy, command.name) else native: {
+                try validateCommandName(command.name);
+                break :native if (std.mem.eql(u8, command.name, platform.update_check_command)) .updater else .app;
+            };
+            if (plan == .invalid) return error.InvalidCommand;
+            if (plan == .updater) {
                 self.options.platform.services.checkForUpdates(true) catch |err| switch (err) {
                     error.UnsupportedService => return dispatchEvent(self, app, .{ .command = command }),
                     else => return err,
@@ -618,7 +647,8 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
             });
             app.event(self, .{ .lifecycle = .frame }) catch |err| {
                 recordDispatchError(self, "lifecycle", err);
-                if (self.dispatch_error_policy == .propagate) return err;
+                const propagate = if (app.host_flow_policy) |policy| host_flow.gate(policy, 2, @intFromBool(self.dispatch_error_policy == .propagate), 0) != 0 else self.dispatch_error_policy == .propagate;
+                if (propagate) return err;
             };
         }
 
@@ -643,6 +673,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         fn handlePlatformEvent(context: *anyopaque, event_value: platform.Event) anyerror!void {
+            const run_context: *RunContext = @ptrCast(@alignCast(context));
+            try run_context.host_events.dispatch(context, dispatchHostEvent, event_value);
+        }
+
+        fn dispatchHostEvent(context: *anyopaque, event_value: platform.Event) anyerror!void {
             const run_context: *RunContext = @ptrCast(@alignCast(context));
             try run_context.runtime.dispatchPlatformEvent(run_context.app, event_value);
         }
@@ -704,21 +739,30 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         }
 
         fn loadScene(self: *Runtime, app: App, scene: app_manifest.ShellConfig) anyerror!void {
-            try app_manifest.validateShell(scene, &.{});
+            if (self.shell_admission_policy) |policy|
+                try @import("shell_admission_policy.zig").scene(policy, scene, &.{})
+            else
+                try app_manifest.validateShell(scene, &.{});
             if (scene.windows.len == 0) {
                 log(self, "scene.load", "loaded empty app scene", &.{trace.string("app", app.name)});
                 return;
             }
 
             const uses_default_empty_source = appUsesDefaultEmptyWebViewSource(App, app);
-            const source = if (sceneNeedsMainWebView(scene) or !uses_default_empty_source)
+            const source = if (if (self.shell_coordination_policy) |policy|
+                @import("shell_coordination_policy.zig").scene(policy, scene.windows, uses_default_empty_source).decisions != 0
+            else
+                sceneNeedsMainWebView(scene) or !uses_default_empty_source)
                 try WindowViewMethods().copyLoadedSource(self, try app.webViewSource())
             else
                 null;
             if (source != null and !self.options.web_layer) return error.WebViewLayerNotBuilt;
             self.loaded_source = source;
 
-            const startup_uses_source = sceneWindowUsesAppSource(scene.windows[0], uses_default_empty_source);
+            const startup_uses_source = if (self.shell_coordination_policy) |policy|
+                @import("shell_coordination_policy.zig").scene(policy, scene.windows[0..1], uses_default_empty_source).choices[0] & 4 != 0
+            else
+                sceneWindowUsesAppSource(scene.windows[0], uses_default_empty_source);
             try loadStartupSceneWindow(
                 self,
                 scene.windows[0],
@@ -726,7 +770,11 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 if (startup_uses_source) .allow_source_less else .never_source,
             );
             for (scene.windows[1..]) |window| {
-                if (sceneWindowUsesAppSource(window, uses_default_empty_source)) {
+                if (if (self.shell_coordination_policy) |policy|
+                    @import("shell_coordination_policy.zig").scene(policy, &.{window}, uses_default_empty_source).choices[0] & 4 != 0
+                else
+                    sceneWindowUsesAppSource(window, uses_default_empty_source))
+                {
                     _ = try WindowViewMethods().createShellWindowWithSourceMode(self, window, source, source != null);
                 } else {
                     _ = try WindowViewMethods().createSourcelessShellWindow(self, window);
@@ -840,7 +888,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                 self.invalidateFor(.command, null);
                 return;
             }
-            const response = dispatcher.dispatch(message.bytes, .{ .origin = message.origin, .window_id = message.window_id, .webview_label = message.webview_label }, &response_buffer);
+            const response = authorization.dispatch(self.authorization_policy, dispatcher, message.bytes, .{ .origin = message.origin, .window_id = message.window_id, .webview_label = message.webview_label }, &response_buffer);
             try completeBridgeResponse(self, message.window_id, message.webview_label, response);
             self.invalidateFor(.command, null);
             log(self, "bridge.dispatch", "bridge request handled", &.{
@@ -852,7 +900,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         fn handleAsyncBridgeMessage(self: *Runtime, dispatcher: bridge.Dispatcher, message: platform.BridgeMessage) anyerror!bool {
             const request = bridge.parseRequest(message.bytes) catch return false;
             const handler = dispatcher.async_registry.find(request.command) orelse return false;
-            if (!dispatcher.policy.allows(request.command, message.origin)) {
+            if (!authorization.bridgeAllows(self.authorization_policy, dispatcher.policy, request.command, message.origin)) {
                 var response_buffer: [bridge.max_response_bytes]u8 = undefined;
                 const response = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, "Bridge command is not permitted");
                 try completeBridgeResponse(self, message.window_id, message.webview_label, response);
@@ -951,7 +999,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     try handleBridgeMessage(self, app, .{ .bytes = command.value, .origin = "zero://inline", .window_id = 1, .webview_label = "main" });
                 },
                 .resize => {
-                    const parsed = try parseAutomationResizeCommand(command.value);
+                    const parsed = try parseAutomationResizeCommand(self.automation_command_policy, command.value);
                     try dispatchPlatformEvent(self, app, .{ .surface_resized = .{
                         .id = 1,
                         .size = geometry.SizeF.init(parsed.width, parsed.height),
@@ -964,7 +1012,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     };
                 },
                 .native_command => {
-                    const parsed = try parseAutomationNativeCommand(command.value);
+                    const parsed = try parseAutomationNativeCommand(self.automation_command_policy, command.value);
                     try dispatchPlatformEvent(self, app, .{ .native_command = .{
                         .name = parsed.name,
                         .window_id = 1,
@@ -972,41 +1020,41 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     } });
                 },
                 .widget_action => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetAction(self, app, try parseAutomationWidgetAction(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetAction(self, app, try parseAutomationWidgetAction(self.automation_command_policy, command.value));
                 },
                 .widget_click => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, try parseAutomationWidgetTarget(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetClick(self, app, try parseAutomationWidgetTarget(self.automation_command_policy, command.value));
                 },
                 .widget_hold => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetHold(self, app, try parseAutomationWidgetTarget(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetHold(self, app, try parseAutomationWidgetTarget(self.automation_command_policy, command.value));
                 },
                 .widget_context_press => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetContextPress(self, app, try parseAutomationWidgetTarget(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetContextPress(self, app, try parseAutomationWidgetTarget(self.automation_command_policy, command.value));
                 },
                 .widget_context_menu => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetContextMenuItem(self, app, try parseAutomationWidgetContextMenuItem(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetContextMenuItem(self, app, try parseAutomationWidgetContextMenuItem(self.automation_command_policy, command.value));
                 },
                 .widget_drag => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetPointerDrag(self, app, try parseAutomationWidgetPointerDrag(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetPointerDrag(self, app, try parseAutomationWidgetPointerDrag(self.automation_command_policy, command.value));
                 },
                 .widget_wheel => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetWheel(self, app, try parseAutomationWidgetWheel(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetWheel(self, app, try parseAutomationWidgetWheel(self.automation_command_policy, command.value));
                 },
                 .widget_key => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetKeyInput(self, app, try parseAutomationWidgetKey(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetKeyInput(self, app, try parseAutomationWidgetKey(self.automation_command_policy, command.value));
                 },
                 .widget_pinch => {
-                    try AutomationWidgetMethods().dispatchAutomationWidgetPinch(self, app, try parseAutomationWidgetPinch(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationWidgetPinch(self, app, try parseAutomationWidgetPinch(self.automation_command_policy, command.value));
                 },
                 .menu_command => {
                     try dispatchPlatformEvent(self, app, .{ .menu_command = .{
-                        .name = try parseAutomationCommandName(command.value),
+                        .name = try parseAutomationCommandName(self.automation_command_policy, command.value),
                         .window_id = 1,
                     } });
                 },
                 .shortcut => {
                     try dispatchPlatformEvent(self, app, .{ .shortcut = .{
-                        .id = try parseAutomationCommandName(command.value),
+                        .id = try parseAutomationCommandName(self.automation_command_policy, command.value),
                         .key = "",
                         .window_id = 1,
                     } });
@@ -1018,7 +1066,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     // UiApp's window fallback are all the real path. A
                     // stale or unknown item id is loud driver misuse,
                     // like widget-click on an unmounted widget.
-                    const target = try parseAutomationTrayTarget(command.value);
+                    const target = try parseAutomationTrayTarget(self.automation_command_policy, command.value);
                     if (!SystemServiceMethods().statusItemMenuItemActionable(self, target.status_item_id, target.item_id)) return error.InvalidCommand;
                     try dispatchPlatformEvent(self, app, .{ .tray_action = .{
                         .status_item_id = target.status_item_id,
@@ -1026,7 +1074,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     } });
                 },
                 .focus_view => {
-                    try WindowViewMethods().focusView(self, 1, try parseAutomationViewLabel(command.value));
+                    try WindowViewMethods().focusView(self, 1, try parseAutomationViewLabel(self.automation_command_policy, command.value));
                 },
                 .focus_next_view => {
                     _ = try WindowViewMethods().focusNextView(self, 1);
@@ -1053,7 +1101,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
                     self.invalidateFor(.command, null);
                 },
                 .provenance => {
-                    try AutomationWidgetMethods().dispatchAutomationProvenance(self, app, try parseAutomationProvenanceTarget(command.value));
+                    try AutomationWidgetMethods().dispatchAutomationProvenance(self, app, try parseAutomationProvenanceTarget(self.automation_command_policy, command.value));
                 },
                 .wait => {},
             }
@@ -1067,7 +1115,7 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         /// artifacts across captures.
         pub fn publishAutomationScreenshot(self: *Runtime, value: []const u8) anyerror!void {
             const server = self.options.automation orelse return;
-            const parsed = try parseAutomationScreenshotCommand(value);
+            const parsed = try parseAutomationScreenshotCommand(self.automation_command_policy, value);
             // Screenshots address a gpu_surface view by label across ALL
             // open windows, like the widget verbs — a secondary window's
             // canvas captures the same way the main one does.
@@ -1141,7 +1189,37 @@ pub fn RuntimeFlow(comptime Runtime: type) type {
         const resolveWindowSelector = BuiltinBridgeMethods.resolveWindowSelector;
         const writeWindowListJson = BuiltinBridgeMethods.writeWindowListJson;
 
+        fn handleCompiledBuiltinBridgeMessage(self: *Runtime, app: App, message: platform.BridgeMessage) anyerror!bool {
+            const request = bridge.parseRequest(message.bytes) catch return false;
+            const plan = builtin_coordination.route(self.builtin_coordination_policy.?, .none, request.command);
+            if (plan.family() == .none) return false;
+            var response_buffer: [bridge.max_response_bytes]u8 = undefined;
+            var result_buffer: [bridge.max_result_bytes]u8 = undefined;
+            if (!allowsBuiltinBridgeCommand(self, request.command, message.origin, plan.permission())) {
+                const response = bridge.writeErrorResponse(&response_buffer, request.id, .permission_denied, plan.deniedMessage());
+                try completeBridgeResponse(self, message.window_id, message.webview_label, response);
+                self.invalidateFor(.command, null);
+                return true;
+            }
+            const response = switch (plan.family()) {
+                .none => unreachable,
+                .command => dispatchCommandBridgeCommand(self, app, request, message.window_id, message.webview_label, &result_buffer, &response_buffer),
+                .window => dispatchWindowBridgeCommand(self, request, &result_buffer, &response_buffer),
+                .view => dispatchViewBridgeCommand(self, request, message.window_id, &result_buffer, &response_buffer),
+                .webview => dispatchWebViewBridgeCommand(self, request, message.window_id, &result_buffer, &response_buffer),
+                .platform => dispatchPlatformBridgeCommand(self, request, &result_buffer, &response_buffer),
+                .dialog => dispatchDialogBridgeCommand(self, request, &result_buffer, &response_buffer),
+                .os => dispatchOsBridgeCommand(self, request, message.origin, &result_buffer, &response_buffer),
+                .clipboard => dispatchClipboardBridgeCommand(self, request, &result_buffer, &response_buffer),
+                .credentials => dispatchCredentialBridgeCommand(self, request, &result_buffer, &response_buffer),
+            };
+            try completeBridgeResponse(self, message.window_id, message.webview_label, response);
+            self.invalidateFor(.command, null);
+            return true;
+        }
+
         fn handleBuiltinBridgeMessage(self: *Runtime, app: App, message: platform.BridgeMessage) anyerror!bool {
+            if (self.builtin_coordination_policy != null) return handleCompiledBuiltinBridgeMessage(self, app, message);
             const request = bridge.parseRequest(message.bytes) catch return false;
             const is_command = std.mem.startsWith(u8, request.command, "native-sdk.command.");
             const is_window = std.mem.startsWith(u8, request.command, "native-sdk.window.");

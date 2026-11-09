@@ -1,3 +1,4 @@
+const composition = @import("input_composition_policy.zig");
 const std = @import("std");
 const canvas = @import("canvas");
 const runtime_view = @import("view.zig");
@@ -18,6 +19,24 @@ const sizesEqual = canvas_frame_helpers.sizesEqual;
 
 pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
     return struct {
+        const CompositionFacts = struct {
+            dismissed: bool = false,
+            composition_keys: bool = false,
+            claimed: bool = false,
+            latch: ?bool = null,
+            routed_id: u64 = 0,
+        };
+        fn inputPlan(self: *const Runtime, mode: composition.Mode, input: platform.GpuSurfaceInputEvent, extra: CompositionFacts) ?composition.Program {
+            const index = runtimeFindViewIndex(self, input.window_id, input.label) orelse return null;
+            const view = &self.views[index];
+            var facts = if (mode == .normalize) composition.Facts{} else composition.observations(self, view);
+            facts.dismissed = extra.dismissed;
+            facts.composition_keys = extra.composition_keys;
+            facts.claimed = extra.claimed;
+            facts.routed_id = extra.routed_id;
+            if (extra.latch) |value| facts.latch = value;
+            return composition.plan(view.canvas_widget_surface_scope_policy, mode, input, facts);
+        }
         pub fn dispatchGpuSurfaceFrame(self: *Runtime, app: runtime_api.App(Runtime), frame_event: platform.GpuSurfaceFrameEvent) anyerror!void {
             // Media-surface adoption rides the compositor's
             // presented-frame clock: staged producer frames (latest
@@ -226,13 +245,6 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // a right-drag (the mouseenter/mouseleave
                     // convention), exactly as the wash does for the
                     // same journaled moves.
-                    if (input_event.kind == .pointer_cancel and
-                        self.views[index].canvas_widget_hover_pointer_live and
-                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id)
-                    {
-                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
-                        self.views[index].canvas_widget_hover_pointer_live = false;
-                    }
                     // A consumed secondary RELEASE outside the view is
                     // the gesture ending with the pointer already gone —
                     // hosts hold an implicit grab through a right-drag,
@@ -240,14 +252,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // re-entry: retire containment like the cancel
                     // above, matching the primary path whose outside
                     // release re-hit-tests to nothing.
-                    if (input_event.kind == .pointer_up and
-                        self.views[index].canvas_widget_hover_pointer_live and
-                        self.views[index].canvas_widget_hover_pointer_id == input_event.pointer_id and
-                        !gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y))
-                    {
-                        self.views[index].canvas_widget_hover_msg_chain_len = 0;
-                        self.views[index].canvas_widget_hover_pointer_live = false;
-                    }
+                    CanvasWidgetEventMethods().retireCanvasWidgetHoverForConsumedPointer(&self.views[index], input_event, gpuViewContainsPoint(&self.views[index], input_event.x, input_event.y));
                 }
                 // The whole consumed stream still feeds the tooltip
                 // intent choke point: every pointer-carrying event
@@ -383,7 +388,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // it belongs to is still open. Chorded keys stay live —
             // input methods never consume command chords, so those are
             // genuine shortcuts even mid-composition.
-            const targetless_composition_owns_keys = (input_event.kind == .key_down or input_event.kind == .key_up) and
+            const targetless_composition_owns_keys = if (inputPlan(self, .keys, input_event, .{})) |program| program.has(4) else (input_event.kind == .key_down or input_event.kind == .key_up) and
                 !canvas_frame_helpers.gpuInputHasTextCommandModifier(input_event) and
                 self.targetless_ime_preedit_len > 0 and
                 self.targetless_ime_preedit_window == input_event.window_id and
@@ -504,7 +509,13 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // routing its commit or cancel to the newly focused editor
             // would resolve a composition that editor never saw, and the
             // target-less consumer's composed text would be lost.
-            const ime_continuation_owned_targetless = switch (input_event.kind) {
+            const compiled_resolution = inputPlan(self, .resolve, input_event, .{ .dismissed = widget_surface_dismissed });
+            if (compiled_resolution) |program| {
+                const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label).?;
+                composition.installWidget(&self.views[index], program);
+                if (program.has(2048)) self.targetless_ime_commit_grace = false;
+            }
+            const ime_continuation_owned_targetless = if (compiled_resolution) |program| program.has(8) else switch (input_event.kind) {
                 .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => self.targetless_ime_preedit_len > 0 and
                     self.targetless_ime_preedit_window == input_event.window_id and
                     std.mem.eql(
@@ -520,7 +531,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // to the cancelled sequence; any other event disarms the
             // grace (a plain Escape cancel is chased by its own
             // key_down, so ordinary typing never inherits it).
-            const ime_grace: runtime_view.ImeCommitGrace = grace: {
+            const ime_grace: runtime_view.ImeCommitGrace = if (compiled_resolution) |program| if (program.has(32)) .swallow else .none else grace: {
                 const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :grace .none;
                 if (self.views[index].kind != .gpu_surface) break :grace .none;
                 const armed = self.views[index].canvas_widget_ime_commit_grace;
@@ -564,7 +575,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // still open) and clears only when its commit or cancel
             // closes it; an orphaned cancel arms the swallow grace so a
             // converted commit's trailing text_input is swallowed too.
-            const ime_widget_owner_orphaned = switch (input_event.kind) {
+            const ime_widget_owner_orphaned = if (compiled_resolution) |program| program.has(16) else switch (input_event.kind) {
                 .ime_set_composition, .ime_commit_composition, .ime_cancel_composition => blk: {
                     const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
                     if (self.views[index].kind != .gpu_surface) break :blk false;
@@ -593,7 +604,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // composition's converted commit — it delivers TARGET-LESS
             // on the owning surface, never into whichever text widget
             // holds focus by now. One-shot: any other event disarms.
-            const targetless_commit_grace = grace: {
+            const targetless_commit_grace = if (compiled_resolution) |program| program.has(64) else grace: {
                 if (!self.targetless_ime_commit_grace) break :grace false;
                 self.targetless_ime_commit_grace = false;
                 break :grace input_event.kind == .text_input and
@@ -626,7 +637,9 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 // releases the pin instead when anything else follows a
                 // plain cancel).
                 if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                    switch (input_event.kind) {
+                    if (inputPlan(self, .routed, input_event, .{ .routed_id = text_input_event.keyboard.focused_id orelse 0 })) |program| {
+                        composition.installWidget(&self.views[index], program);
+                    } else switch (input_event.kind) {
                         .ime_set_composition => self.views[index].canvas_widget_ime_owner_id =
                             text_input_event.keyboard.focused_id orelse 0,
                         // Arm ONLY while an owner is pinned: a cancel of
@@ -654,6 +667,18 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             // through `on_text`.
             const committed_text_claimed = blk: {
                 const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse break :blk false;
+                if (inputPlan(self, .claim, input_event, .{ .composition_keys = targetless_composition_owns_keys })) |split| {
+                    // The first stage preserves short-circuiting: a carried
+                    // claim needs no focused-widget intent observation.
+                    if (split.has(256) or targetless_composition_owns_keys) {
+                        composition.installWidget(&self.views[index], split);
+                        break :blk split.has(256);
+                    }
+                    const claimed = targetlessCommittedTextClaimedByFocusedWidget(self, index, input_event);
+                    const program = inputPlan(self, .claim, input_event, .{ .claimed = claimed }).?;
+                    composition.installWidget(&self.views[index], program);
+                    break :blk program.has(256);
+                }
                 // Consume the split-event claim carry first: hosts that
                 // deliver the claimed key_down and its committed text as
                 // SEPARATE events would otherwise recompute the claim
@@ -787,7 +812,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     // composition keys at the source, so a key_down
                     // arriving after the resolution is a genuine
                     // keystroke on every host and always flows.
-                    if (self.views[index].kind == .gpu_surface and self.views[index].focused and !targetless_composition_owns_keys) {
+                    if (if (inputPlan(self, .key_delivery, input_event, .{ .composition_keys = targetless_composition_owns_keys })) |program| program.has(4096) else self.views[index].kind == .gpu_surface and self.views[index].focused and !targetless_composition_owns_keys) {
                         // Target-less, but the FOCUSED widget's id still
                         // rides along (0 = nothing focused): consumers
                         // that own focused input without editor state —
@@ -802,7 +827,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                                 .focused_id = if (focused_id != 0) focused_id else null,
                                 .key = input_event.key,
                                 .text = input_event.text,
-                                .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                                .modifiers = if (inputPlan(self, .normalize, input_event, .{})) |program| program.keyboardModifiers() else canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
                             },
                         } });
                     }
@@ -835,7 +860,36 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                         self.targetless_ime_preedit_label[0..self.targetless_ime_preedit_label_len],
                         input_event.label,
                     );
-                const committed: ?[]const u8 = switch (input_event.kind) {
+                const committed: ?[]const u8 = if (inputPlan(self, .fallback, input_event, .{})) |program| compiled: {
+                    const text = switch (program.source) {
+                        0 => "",
+                        1 => input_event.text,
+                        2 => self.targetless_ime_preedit[0..self.targetless_ime_preedit_len],
+                        3 => {
+                            var accepted = true;
+                            if (input_event.text.len > self.targetless_ime_preedit.len) {
+                                if (self.owned_allocator.realloc(self.targetless_ime_preedit, input_event.text.len)) |grown| {
+                                    self.targetless_ime_preedit = grown;
+                                } else |_| accepted = false;
+                            }
+                            const installed = inputPlan(self, .buffer, input_event, .{ .claimed = accepted }).?;
+                            if (installed.has(512)) self.targetless_ime_preedit_len = 0;
+                            if (installed.has(1024)) {
+                                @memcpy(self.targetless_ime_preedit[0..input_event.text.len], input_event.text);
+                                self.targetless_ime_preedit_len = input_event.text.len;
+                                self.targetless_ime_preedit_window = input_event.window_id;
+                                const label_len = @min(input_event.label.len, self.targetless_ime_preedit_label.len);
+                                @memcpy(self.targetless_ime_preedit_label[0..label_len], input_event.label[0..label_len]);
+                                self.targetless_ime_preedit_label_len = label_len;
+                            }
+                            break :compiled null;
+                        },
+                        else => unreachable,
+                    };
+                    if (program.has(512)) self.targetless_ime_preedit_len = 0;
+                    if (program.has(16384)) self.targetless_ime_commit_grace = true;
+                    break :compiled if (text.len > 0) text else null;
+                } else switch (input_event.kind) {
                     .text_input => blk: {
                         // A command-chorded text event is a SHORTCUT, not
                         // typing — the same gate the focused-widget text
@@ -930,9 +984,11 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                     input_event.kind == .ime_commit_composition;
                 if (committed) |text| {
                     if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |index| {
-                        if (self.views[index].kind == .gpu_surface and self.views[index].focused and
-                            (!committed_text_claimed or ime_resolution))
-                        {
+                        const deliver = if (inputPlan(self, .delivery, input_event, .{ .claimed = committed_text_claimed, .latch = ime_resolution })) |program|
+                            program.has(4096)
+                        else
+                            self.views[index].kind == .gpu_surface and self.views[index].focused and (!committed_text_claimed or ime_resolution);
+                        if (deliver) {
                             // The focused widget's id rides the
                             // target-less event (see the key fallback
                             // above): a focused terminal resolves its
@@ -951,7 +1007,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                                         // `on_text` gate (insert_text only)
                                         // delivers it.
                                         .edit = .{ .insert_text = text },
-                                        .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                                        .modifiers = if (inputPlan(self, .normalize, input_event, .{})) |program| program.keyboardModifiers() else canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
                                     },
                                 },
                             });
@@ -1007,7 +1063,12 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             const focused_id = self.views[index].canvas_widget_focused_id;
             if (focused_id == 0) return false;
             const node = self.views[index].widgetLayoutTree().findById(focused_id) orelse return false;
-            const probe_key = if (input_event.key.len > 0)
+            const probe_key = if (inputPlan(self, .claim_probe, input_event, .{})) |program| switch (program.source) {
+                0 => return false,
+                1 => input_event.key,
+                2 => "space",
+                else => unreachable,
+            } else if (input_event.key.len > 0)
                 input_event.key
             else if (std.mem.eql(u8, input_event.text, " "))
                 "space"
@@ -1017,7 +1078,7 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
                 .phase = .key_down,
                 .focused_id = focused_id,
                 .key = probe_key,
-                .modifiers = canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
+                .modifiers = if (inputPlan(self, .normalize, input_event, .{})) |program| program.keyboardModifiers() else canvas_frame_helpers.canvasWidgetKeyboardModifiers(input_event.modifiers),
             }) != null;
         }
 
@@ -1121,7 +1182,8 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             }, CanvasFrameMethods().canvasFrameScratchStorage(self), false);
             const preview_render_pass = preview_frame.renderPass();
             const preview_gpu_packet_summary = preview_frame.gpuPacketSummary();
-            const preview_budget_status = preview_frame.budgetStatus();
+            const preview_encoder_counts = preview_render_pass.encoderCounts();
+            const preview_budget_status = preview_frame.budgetStatusFromPlanningSummaries(preview_gpu_packet_summary, preview_encoder_counts);
             enriched_frame_event.canvas_revision = self.views[index].canvas_revision;
             enriched_frame_event.frame_interval_ns = self.views[index].gpu_frame_interval_ns;
             enriched_frame_event.input_timestamp_ns = self.views[index].gpu_input_timestamp_ns;
@@ -1137,10 +1199,10 @@ pub fn RuntimeGpuSurfaceEvents(comptime Runtime: type) type {
             enriched_frame_event.canvas_frame_requires_render = preview_frame.requiresRender();
             enriched_frame_event.canvas_frame_full_repaint = preview_frame.full_repaint;
             enriched_frame_event.canvas_frame_batch_count = preview_frame.batch_plan.batchCount();
-            enriched_frame_event.canvas_frame_encoder_command_count = preview_render_pass.encoderCommandCount();
-            enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_render_pass.encoderCacheActionCount();
-            enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_render_pass.encoderBindPipelineCount();
-            enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_render_pass.encoderDrawBatchCount();
+            enriched_frame_event.canvas_frame_encoder_command_count = preview_encoder_counts.commands;
+            enriched_frame_event.canvas_frame_encoder_cache_action_count = preview_encoder_counts.caches;
+            enriched_frame_event.canvas_frame_encoder_bind_pipeline_count = preview_encoder_counts.binds;
+            enriched_frame_event.canvas_frame_encoder_draw_batch_count = preview_encoder_counts.draws;
             enriched_frame_event.canvas_frame_pipeline_count = preview_frame.pipeline_cache_plan.entryCount();
             enriched_frame_event.canvas_frame_pipeline_upload_count = preview_frame.pipeline_cache_plan.uploadCount();
             enriched_frame_event.canvas_frame_pipeline_retain_count = preview_frame.pipeline_cache_plan.retainCount();

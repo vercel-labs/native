@@ -16,13 +16,14 @@
                 .height = 520,
                 .views = .{
                     .{ .label = "split-canvas", .kind = "gpu_surface", .fill = true, .role = "Split canvas", .accessibility_label = "Split collapse", .gpu_backend = "metal", .gpu_pixel_format = "bgra8_unorm", .gpu_present_mode = "timer", .gpu_alpha_mode = "opaque", .gpu_color_space = "srgb", .gpu_vsync = true },
+                    .{ .label = "content-web", .kind = "webview", .parent = "split-canvas", .url = "https://example.com", .x = 0, .y = 0, .width = 1, .height = 1, .layer = 20 },
                 },
             },
         },
     },
     .security = .{
         .navigation = .{
-            .allowed_origins = .{ "zero://app", "zero://inline" },
+            .allowed_origins = .{ "zero://app", "zero://inline", "https://example.com" },
             .external_links = .{ .action = "deny" },
         },
     },

@@ -43,6 +43,25 @@ const shim_ai_chat = @import("shim_ai_chat_core");
 const testing = std.testing;
 const WideAdapter = native_sdk.TsUiApp(shim_wide);
 
+test "exact frame shim forwards complete decimal clocks through the retained ABI" {
+    const saved = stub_core.stub_channel_envelope;
+    defer stub_core.stub_channel_envelope = saved;
+    defer shim_soundboard.rt.frameReset();
+    stub_core.stub_channel_envelope = &.{ 0, 0 };
+    var timestamp = "9007199254740993".*;
+    var interval = "18446744073709551615".*;
+    var model: shim_soundboard.Model = undefined;
+    try testing.expect(shim_soundboard.frameMsg(&model, .{
+        .width = 800.25, .height = 520.5, .timestampMs = 9007199254.740993, .intervalMs = 16.666667,
+        .timestampNs = &timestamp, .intervalNs = &interval,
+    }) == null);
+    @memset(&timestamp, 'x');
+    @memset(&interval, 'x');
+    try testing.expectEqual([4]f64{ 800.25, 520.5, 9007199254.740993, 16.666667 }, stub_core.stub_exact_frame.numbers);
+    try testing.expectEqualStrings("9007199254740993", stub_core.stub_exact_frame.timestamp[0..stub_core.stub_exact_frame.timestamp_len]);
+    try testing.expectEqualStrings("18446744073709551615", stub_core.stub_exact_frame.interval[0..stub_core.stub_exact_frame.interval_len]);
+}
+
 // --------------------------------------------------------- wide Msg guard
 //
 // Compile-cost guard: a legal 160-arm TypeScript-core contract must compile

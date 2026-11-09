@@ -1,3 +1,5 @@
+const scene_policy = @import("canvas_scene_observation_policy.zig");
+const sampling_policy = @import("motion_sampling_policy.zig");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
 const canvas_frame_helpers = @import("canvas_frame.zig");
@@ -435,6 +437,11 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             return canvas.sampleCanvasRenderAnimations(self.canvasRenderAnimations(), timestamp_ns, output);
         }
 
+        pub fn sampleCanvasRenderAnimationsWithPolicy(self: *const RuntimeView, timestamp_ns: u64, output: []canvas.CanvasRenderOverride, policy: ?sampling_policy.Policy) anyerror![]const canvas.CanvasRenderOverride {
+            if (policy) |owner| return sampling_policy.sample(self.canvasRenderAnimations(), timestamp_ns, output, owner);
+            return self.sampleCanvasRenderAnimations(timestamp_ns, output);
+        }
+
         pub fn pruneCompletedNoopCanvasRenderAnimations(self: *RuntimeView, timestamp_ns: u64) bool {
             var len: usize = 0;
             var pruned = false;
@@ -479,13 +486,14 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn recordCanvasFrame(self: *RuntimeView, frame: canvas.CanvasFrame) void {
             const render_pass = frame.renderPass();
             const gpu_packet_summary = frame.gpuPacketSummary();
+            const encoder_counts = render_pass.encoderCounts();
             self.canvas_frame_requires_render = frame.requiresRender();
             self.canvas_frame_full_repaint = frame.full_repaint;
             self.canvas_frame_batch_count = frame.batch_plan.batchCount();
-            self.canvas_frame_encoder_command_count = render_pass.encoderCommandCount();
-            self.canvas_frame_encoder_cache_action_count = render_pass.encoderCacheActionCount();
-            self.canvas_frame_encoder_bind_pipeline_count = render_pass.encoderBindPipelineCount();
-            self.canvas_frame_encoder_draw_batch_count = render_pass.encoderDrawBatchCount();
+            self.canvas_frame_encoder_command_count = encoder_counts.commands;
+            self.canvas_frame_encoder_cache_action_count = encoder_counts.caches;
+            self.canvas_frame_encoder_bind_pipeline_count = encoder_counts.binds;
+            self.canvas_frame_encoder_draw_batch_count = encoder_counts.draws;
             self.canvas_frame_pipeline_count = frame.pipeline_cache_plan.entryCount();
             self.canvas_frame_pipeline_upload_count = frame.pipeline_cache_plan.uploadCount();
             self.canvas_frame_pipeline_retain_count = frame.pipeline_cache_plan.retainCount();
@@ -533,7 +541,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
             self.canvas_frame_gpu_packet_representable = gpu_packet_summary.fullyRepresentable();
             self.canvas_frame_change_count = frame.changes.len;
             self.canvas_frame_budget = frame.budget;
-            self.canvas_frame_budget_status = frame.budgetStatus();
+            self.canvas_frame_budget_status = frame.budgetStatusFromPlanningSummaries(gpu_packet_summary, encoder_counts);
             self.canvas_frame_dirty_bounds = frame.dirty_bounds;
             const profile = frame.profile();
             self.canvas_frame_profile_work_units = profile.work_units;
@@ -546,6 +554,7 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         pub fn recordCanvasFramePresentationComplete(self: *RuntimeView, frame: canvas.CanvasFrame) void {
             if (!self.presented_canvas_valid or self.presented_canvas_revision != self.canvas_revision) return;
             self.recordCanvasFrame(.{
+                .gpu_plan_policy = frame.gpu_plan_policy,
                 .frame_index = frame.frame_index,
                 .timestamp_ns = frame.timestamp_ns,
                 .surface_size = frame.surface_size,
@@ -612,6 +621,10 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn copyPresentedCanvasSummary(self: *RuntimeView, display_list: canvas.DisplayList, surface_size: geometry.SizeF, scale: f32) anyerror!void {
+            return self.copyPresentedCanvasSummaryWithPolicy(display_list, surface_size, scale, null);
+        }
+
+        pub fn copyPresentedCanvasSummaryWithPolicy(self: *RuntimeView, display_list: canvas.DisplayList, surface_size: geometry.SizeF, scale: f32, owner: ?scene_policy.Policy) anyerror!void {
             _ = try CanvasResourceCounts.fromDisplayList(display_list);
 
             self.presented_canvas_valid = true;
@@ -631,9 +644,10 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
                     .id = id,
                     .bounds = command_bounds,
                 };
-                if (id == null and command_bounds != null) self.presented_canvas_has_unkeyed = true;
+                if (owner == null and id == null and command_bounds != null) self.presented_canvas_has_unkeyed = true;
                 self.presented_canvas_command_count += 1;
             }
+            if (owner) |policy| self.presented_canvas_has_unkeyed = scene_policy.summaryHasUnkeyed(self.presented_canvas_commands[0..self.presented_canvas_command_count], policy);
             self.presented_canvas_revision = self.canvas_revision;
         }
 
@@ -648,6 +662,11 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn currentCanvasHasUnkeyed(self: *const RuntimeView) bool {
+            return self.currentCanvasHasUnkeyedWithPolicy(null);
+        }
+
+        pub fn currentCanvasHasUnkeyedWithPolicy(self: *const RuntimeView, owner: ?scene_policy.Policy) bool {
+            if (owner) |policy| return scene_policy.currentHasUnkeyed(self.canvasDisplayList().commands, policy);
             for (self.canvasDisplayList().commands) |command| {
                 if (command.objectId() == null and command.bounds() != null) return true;
             }
@@ -655,6 +674,11 @@ pub fn RuntimeViewCanvasFrame(comptime RuntimeView: type) type {
         }
 
         pub fn diffPresentedCanvasSummary(self: *const RuntimeView, output: []canvas.DiffChange) anyerror![]const canvas.DiffChange {
+            return self.diffPresentedCanvasSummaryWithPolicy(output, null);
+        }
+
+        pub fn diffPresentedCanvasSummaryWithPolicy(self: *const RuntimeView, output: []canvas.DiffChange, owner: ?scene_policy.Policy) anyerror![]const canvas.DiffChange {
+            if (owner) |policy| return scene_policy.diff(self, output, policy);
             if (self.canvas_revision == self.presented_canvas_revision) return output[0..0];
 
             // Id lookups ride the probe-table index whenever the lists

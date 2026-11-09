@@ -79,6 +79,7 @@ test "runtime handles built-in JavaScript webview bridge commands" {
     harness.runtime.options.security.navigation.allowed_origins = &webview_origins;
     var app_state: TestApp = .{};
     try harness.start(app_state.app());
+    harness.null_platform.webviews[0].zoom = std.math.nan(f64);
 
     try harness.runtime.dispatchPlatformEvent(app_state.app(), .{ .bridge_message = .{
         .bytes = "{\"id\":\"1\",\"command\":\"native-sdk.webview.create\",\"payload\":{\"label\":\"preview\",\"url\":\"https://example.com\",\"frame\":{\"x\":10,\"y\":20,\"width\":300,\"height\":200},\"layer\":2,\"transparent\":true,\"bridge\":false}}",
@@ -90,6 +91,7 @@ test "runtime handles built-in JavaScript webview bridge commands" {
     try std.testing.expectEqualStrings("preview", harness.null_platform.webviews[0].label);
     try std.testing.expectEqualStrings("https://example.com", harness.null_platform.webviews[0].url);
     try std.testing.expectEqual(@as(i32, 2), harness.null_platform.webviews[0].layer);
+    try std.testing.expectEqual(@as(f64, 1), harness.null_platform.webviews[0].zoom);
     try std.testing.expect(harness.null_platform.webviews[0].transparent);
     try std.testing.expect(!harness.null_platform.webviews[0].bridge_enabled);
 

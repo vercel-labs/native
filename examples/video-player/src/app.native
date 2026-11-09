@@ -1,0 +1,33 @@
+<column gap="0" background="background">
+  <column gap="12" padding="16" grow="1">
+    <row gap="8" cross="center">
+      <text size="lg">Video Player</text><spacer grow="1" />
+      <button-group>
+        <toggle-button selected="{screen == 'player'}" on-toggle="show_player">Player</toggle-button>
+        <toggle-button selected="{screen == 'custom'}" on-toggle="show_custom">Custom</toggle-button>
+      </button-group>
+    </row>
+    <row gap="8" cross="center">
+      <search-field grow="1" text="{source}" placeholder="file path or http(s) url" on-input="source_edit" on-submit="open" label="Source" />
+      <button variant="primary" on-press="open" disabled="{sourceEmpty}">Open</button>
+    </row>
+    <if test="{screen == 'player'}"><video src="{opened}" controls="true" grow="1" label="Feature video" /></if>
+    <if test="{screen == 'custom'}">
+      <column grow="1" gap="0" background="surface" radius="lg">
+        <media-surface surface="{surface}" grow="1" label="Custom player video" />
+        <row padding="10" gap="8" cross="center">
+          <button variant="ghost" size="sm" icon="skip-back" on-press="back" disabled="{unseekable}" label="Back 10 seconds" />
+          <button variant="ghost" size="sm" icon="{playIcon}" on-press="toggle_play" disabled="{inactive}" label="{playLabel}" />
+          <button variant="ghost" size="sm" icon="skip-forward" on-press="forward" disabled="{unseekable}" label="Forward 10 seconds" />
+          <text size="sm" width="52" wrap="false" overflow="clip" foreground="text_muted">{positionClock}</text>
+          <slider grow="1" value="{fraction}" disabled="{unseekable}" on-change="scrubbed" label="Seek" />
+          <text size="sm" width="52" wrap="false" overflow="clip" foreground="text_muted">{durationClock}</text>
+          <toggle-button selected="{looping}" on-toggle="toggle_loop" icon="repeat" label="Loop" />
+          <toggle-button selected="{muted}" on-toggle="toggle_mute" icon="volume" label="Mute" />
+          <slider width="90" value="{volume}" on-change="set_volume" label="Volume" />
+        </row>
+      </column>
+    </if>
+  </column>
+  <status-bar>{statusText}</status-bar>
+</column>

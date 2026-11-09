@@ -41,6 +41,7 @@ try {
 const maps = [];
 for (const [specifier, file] of [
   ["@native-sdk/core", "sdk/core.d.ts"],
+  ["@native-sdk/core/bytes", "sdk/bytes.d.ts"],
   ["@native-sdk/core/text", "sdk/text.d.ts"],
   ["@native-sdk/core/events", "sdk/events.d.ts"],
 ]) {

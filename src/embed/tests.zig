@@ -2041,6 +2041,8 @@ test "mobile hosts decline audio until the shim registers a service" {
     // the runtime's service table carries no audio entries.
     try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_playback));
     try std.testing.expect(!self.embedded.runtime.options.platform.supports(.audio_streaming));
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.global_shortcuts));
+    try std.testing.expect(!self.embedded.runtime.options.platform.supports(.keyboard_input));
     try std.testing.expect(self.embedded.runtime.options.platform.services.audio_load_fn == null);
 
     try startAudioHost(app);

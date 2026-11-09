@@ -1,0 +1,111 @@
+<template name="glass-caption" args="caption">
+  <text><span mono="true" foreground="info" scale="1">{caption}</span></text>
+</template>
+<template name="enamel-caption" args="caption">
+  <text><span mono="true" foreground="text_muted" scale="1">{caption}</span></text>
+</template>
+<template name="ledger-content" args="track number title artist duration current playing">
+  <row gap="8" cross="center">
+    <row width="20" cross="center">
+      <if test="{current &amp;&amp; playing}"><icon name="play" width="11" height="11" foreground="accent"/></if>
+      <else>
+        <if test="{current}"><icon name="pause" width="11" height="11" foreground="info"/></if>
+        <else><use template="glass-caption" caption="{number}"/></else>
+      </else>
+    </row>
+    <if test="{current}"><text grow="1" size="sm" wrap="false" foreground="accent">{title}</text></if>
+    <else><text grow="1" size="sm" wrap="false" foreground="success">{title}</text></else>
+    <text width="132" size="sm" wrap="false" foreground="info">{artist}</text>
+    <text width="40" text-alignment="end"><span mono="true" foreground="info" scale="1">{duration}</span></text>
+    <stack width="2"/>
+  </row>
+</template>
+
+<panel grow="1" background="surface" label="Rack chassis">
+  <column grow="1">
+    <row height="30" gap="8" cross="center" window-drag="true" label="Playlist cap">
+      <stack width="4"/>
+      <button variant="outline" width="20" height="20" icon="x" on-press="close_window:{playlistWindow}" label="Close window"/>
+      <button variant="outline" width="20" height="20" icon="app:minimize" on-press="minimize_window:{playlistWindow}" label="Minimize window"/>
+      <use template="enamel-caption" caption="PLAYLIST"/>
+      <spacer grow="1"/>
+      <use template="enamel-caption" caption="DECK MK-48 // 1U"/>
+      <stack width="8"/>
+    </row>
+    <separator height="1"/>
+    <panel grow="1" background="background" label="Playlist bay">
+      <column grow="1" gap="8" padding-top="8" padding-bottom="8" padding-left="16" padding-right="16">
+        <row height="16" cross="center" gap="8">
+          <use template="glass-caption" caption="TRACKS // LIBRARY"/>
+          <spacer grow="1"/>
+          <use template="glass-caption" caption="{trackCount}"/>
+        </row>
+        <if test="{hasTracks}">
+          <scroll grow="1" label="Track ledger">
+            <list role="list" label="Tracks">
+              <for each="deckVisibleTracks" as="row" key="id">
+                <if test="{row.first}"><if test="{row.now}">
+                    <panel global-key="{row.id}" height="27" padding="5" on-press="play_track:{row.id}" background="surface_subtle" radius="sm" role="listitem" label="{row.title}">
+                      <use template="ledger-content" track="{row.id}" number="{row.number}" title="{row.title}" artist="{row.artist}" duration="{row.duration}" current="{row.now}" playing="{row.playing}"/>
+                      <context-menu><menu-item on-press="copy_title:{row.id}">Copy Title</menu-item></context-menu>
+                    </panel>
+                  </if>
+                  <else>
+                    <panel global-key="{row.id}" height="27" padding="5" on-press="play_track:{row.id}" role="listitem" label="{row.title}">
+                      <use template="ledger-content" track="{row.id}" number="{row.number}" title="{row.title}" artist="{row.artist}" duration="{row.duration}" current="{row.now}" playing="{row.playing}"/>
+                      <context-menu><menu-item on-press="copy_title:{row.id}">Copy Title</menu-item></context-menu>
+                    </panel>
+                  </else></if>
+                <else>
+                  <column>
+                    <panel height="1" background="surface_subtle"/>
+                    <if test="{row.now}">
+                      <panel global-key="{row.id}" height="27" padding="5" on-press="play_track:{row.id}" background="surface_subtle" radius="sm" role="listitem" label="{row.title}">
+                        <use template="ledger-content" track="{row.id}" number="{row.number}" title="{row.title}" artist="{row.artist}" duration="{row.duration}" current="{row.now}" playing="{row.playing}"/>
+                        <context-menu><menu-item on-press="copy_title:{row.id}">Copy Title</menu-item></context-menu>
+                      </panel>
+                    </if>
+                    <else>
+                      <panel global-key="{row.id}" height="27" padding="5" on-press="play_track:{row.id}" role="listitem" label="{row.title}">
+                        <use template="ledger-content" track="{row.id}" number="{row.number}" title="{row.title}" artist="{row.artist}" duration="{row.duration}" current="{row.now}" playing="{row.playing}"/>
+                        <context-menu><menu-item on-press="copy_title:{row.id}">Copy Title</menu-item></context-menu>
+                      </panel>
+                    </else>
+                  </column>
+                </else>
+              </for>
+            </list>
+          </scroll>
+        </if>
+        <else>
+          <panel padding="16" background="background" radius="md" label="No tracks match">
+            <column gap="4">
+              <text><span mono="true" foreground="success">NO SIGNAL</span></text>
+              <text size="sm" foreground="info">no matches for &quot;{search}&quot;</text>
+            </column>
+          </panel>
+        </else>
+      </column>
+    </panel>
+    <row gap="8" height="50" cross="center" padding="4" label="Deck strip">
+      <stack width="12"/>
+      <if test="{deckHasCover}"><image image="{deckNowCover}" fit="cover" width="42" height="42" label="Sleeve"/></if>
+      <else>
+        <panel width="42" height="42" background="background" radius="sm" label="Sleeve"><column grow="1" main="center" cross="center"><use template="glass-caption" caption="--"/></column></panel>
+      </else>
+      <use template="enamel-caption" caption="ON DECK //"/>
+      <if test="{idle}"><text grow="1" size="sm" wrap="false" foreground="text_muted">--</text></if>
+      <else><text grow="1" size="sm" wrap="false" foreground="text">{deckLoadedTitle}</text></else>
+      <stack width="12"/>
+    </row>
+    <column>
+      <separator/>
+      <row height="38" padding="8" gap="10" cross="center" label="Status strip">
+        <search-field text="{search}" placeholder="SEARCH LIBRARY" width="210" on-input="search_edit" label="Search library"/>
+        <if test="{searching}"><button size="sm" variant="ghost" icon="x" on-press="clear_search" label="Clear search"/></if>
+        <spacer grow="1"/>
+        <text size="sm" foreground="text_muted">{deckStatusLabel}</text>
+      </row>
+    </column>
+  </column>
+</panel>

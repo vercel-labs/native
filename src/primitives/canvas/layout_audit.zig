@@ -34,7 +34,8 @@
 //! The audit is geometry-only and deterministic: it re-uses the exact
 //! measurement seam layout and paint use (`tokens.text_measure`, falling
 //! back to the deterministic estimator), so what it predicts is what the
-//! reference renderer inks. It allocates nothing and reads no globals —
+//! reference renderer inks. The native reference is allocation-free; a
+//! selected compiled owner uses copied native-owned request/result buffers —
 //! fast enough to run inside every example test suite across a sweep
 //! matrix of window sizes, densities, and text expansions.
 
@@ -136,6 +137,7 @@ pub fn auditWidgetLayout(
     tokens: DesignTokens,
     storage: []LayoutAuditFinding,
 ) LayoutAuditIssues {
+    if (layout.audit_policy orelse tokens.widget_audit_policy) |policy| return @import("widget_audit_policy.zig").auditLayout(std.heap.page_allocator, policy, layout, window, tokens, storage) catch @panic("compiled layout audit failed");
     var sink = FindingSink{ .storage = storage };
     const node_count = @min(layout.nodes.len, max_layout_audit_nodes);
 
@@ -272,7 +274,7 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
     // there is nothing to report on the horizontal axis. Only explicit
     // newlines can still overrun (vertically), checked below.
     const text_size = widget_metrics.widgetBodyTextSize(widget, tokens);
-    const line_height = widget_metrics.widgetLineHeight(text_size);
+    const line_height = widget_metrics.widgetLineHeightWithTokens(text_size, tokens);
 
     // Replay the paint-time single-line breaker (`wrap = .none`: lines
     // split only at explicit newlines) without a line buffer: the audit
@@ -286,6 +288,7 @@ fn auditPlainTextOverflow(widget: Widget, frame: geometry.RectF, node_index: usi
             .line_height = line_height,
             .wrap = .none,
             .alignment = widget.text_alignment,
+            .text_run_policy = tokens.text_run_policy,
             .measure = tokens.text_measure,
         });
         line_count += 1;

@@ -1,12 +1,12 @@
 // Docs honesty gate: every complete app-core sample in the docs checks clean.
 //
-// Scans docs/src/app/docs/**/page.mdx for ```ts fences (with or without a
+// Scans docs/content/docs/**/*.mdx for ```ts fences (with or without a
 // :filename info-string suffix) and runs the full
 // pipeline (tsc semantics + subset rules + contract analysis) over each block that
-// is a whole core — the discriminator is `export function update(`, the
-// one export every complete core carries. Fragments (case-arm excerpts,
-// type-only declarations) are teaching excerpts of the same idioms and are
-// skipped here; the complete cores around them are what this test pins.
+// is a whole core — exported Model, Msg, and update declarations. Fragments
+// that show only an update function (or one of its case arms) are teaching
+// excerpts and are skipped; the complete cores around them are what this
+// test pins.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,14 +18,14 @@ import { check } from "./helpers.ts";
 const repoRoot = path.dirname(
   path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url)))),
 );
-const docsAppDir = path.join(repoRoot, "docs", "src", "app");
+const docsAppDir = path.join(repoRoot, "docs", "content", "docs");
 
 function mdxPages(dir: string): string[] {
   const pages: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) pages.push(...mdxPages(full));
-    else if (entry.name === "page.mdx") pages.push(full);
+    else if (entry.name.endsWith(".mdx")) pages.push(full);
   }
   return pages;
 }
@@ -39,7 +39,9 @@ test("docs samples: every complete core in the docs checks clean", () => {
   let cores = 0;
   for (const page of mdxPages(docsAppDir)) {
     for (const fence of tsFences(fs.readFileSync(page, "utf8"))) {
-      if (!fence.includes("export function update(")) continue;
+      if (!fence.includes("export function update(") ||
+          !/\bexport\s+(?:interface|type)\s+Model\b/.test(fence) ||
+          !/\bexport\s+(?:interface|type)\s+Msg\b/.test(fence)) continue;
       cores += 1;
       const result = check(fence);
       const details = [

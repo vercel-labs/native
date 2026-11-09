@@ -462,7 +462,11 @@ export type NativeSdkPlatformFeature =
   | "window_hide_on_close"
   | "windowHideOnClose"
   | "video_playback"
-  | "videoPlayback";
+  | "videoPlayback"
+  | "global_shortcuts"
+  | "globalShortcuts"
+  | "keyboard_input"
+  | "keyboardInput";
 
 export type NativeSdkPlatformFeatureSelector =
   | { feature: NativeSdkPlatformFeature; name?: never }

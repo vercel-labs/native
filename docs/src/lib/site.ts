@@ -18,8 +18,8 @@ export const siteUrl = "https://native-sdk.dev";
 export const docsPath = "/docs";
 
 /** The one-line tagline used in titles and Open Graph text. */
-export const tagline = "The Complete Toolkit for Native Apps";
+export const tagline = "Build native desktop apps";
 
 /** The one-sentence description used in metadata. */
 export const description =
-  "Native SDK is the complete toolkit for building beautiful native desktop applications: declarative markup, a predictable message-based state model, a modern component library, and its own native renderer — no browser, no WebView, no compromise.";
+  "Build native desktop applications with TypeScript and Native markup. Native SDK provides a native renderer, components, app state, and development tools.";

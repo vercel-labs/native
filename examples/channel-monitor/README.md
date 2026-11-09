@@ -1,33 +1,36 @@
-# channel-monitor
+# Channel Monitor
 
-The external-source channel dogfood: a native-rendered app whose Start button opens a channel through `fx.openChannel` and hands the thread-safe `ChannelHandle` to an app-owned worker thread. The worker samples its own process every half second (uptime, peak resident set size) and `post`s each reading; every post wakes the UI loop itself and arrives as one typed `Msg` — **no timer polling anywhere**: no `fx.startTimer`, no shared-queue sweep, no rebuild that was not caused by an event.
+A TypeScript + Native markup app demonstrating a native external producer. Start opens a channel with `Cmd.channelOpenSource` and requests the explicit `native-sdk.process.samples` capability. Its native worker samples uptime and peak resident memory every 500 ms. Accepted posts wake the UI loop and arrive as typed messages; the app uses no polling timers.
 
-This is the standing proof for the channel family's live path: app thread → per-channel non-lossy staging → `wake` → loop-thread drain → `update` → rebuild. Stop closes the channel through `fx.closeChannel`; the worker's next `post` answers `.closed` and it winds down on its own — the generation-stamped handle makes the detached thread safe past close and even past app teardown.
+TypeScript owns startup outcomes, start/stop coordination, exact counters, the complete 16-row byte history and the view. The native capability owns OS readings and the generation-safe posting handle. Stop closes the channel; the worker exits when its next post reports closure. Temporary backpressure drops and counts that sample while sampling continues.
 
-The launch itself is gated on `handle.live()` — the producer-launch check. Under session replay the open parks and `live()` answers false, so the sampler never spawns and replay stays fully offline; a producer that launched unconditionally would still be stopped at its first post, but only after any pre-post setup already ran. The Msg stream (and the model) is identical either way, because nothing model-visible branches on `live()` — the journaled events are the whole stream.
-
-Back-pressure is part of the story, and the post's answer tells the worker exactly what to do: `.accepted` staged the sample; `.dropped_full` means the staging FIFO pushed back — the sample is dropped and counted (the next delivered event carries the counters, shown in the status bar and status line) but sampling continues, because a transient stall is not a stop; `.dropped_oversized` would be a programming error (this app's samples are bounded far under the post limit); `.closed` is the one answer that ends the loop.
+Startup replies before the settled view. A failed native start closes the channel and shows “sampler failed to start”; a refused open never starts an existing producer. Native recording includes the startup outcome and all delivered channel events, so replay reproduces successful and failed starts without launching a worker.
 
 ## Run
 
-```bash
+```sh
 native dev
-```
-
-## Verify through the automation harness
-
-```bash
-native build -Dautomation=true
-./zig-out/bin/channel-monitor &
-native automate wait
-# click Start (find the id in snapshot.txt), watch "sample N" lines grow
-# with NO timer subscriptions active, click Stop, verify the count stops.
 ```
 
 ## Test
 
-```bash
-native test -Dplatform=null
+```sh
+native test
 ```
 
-The tests swap the worker for a handle-capturing stub and drive the same `update`: posted bytes land as `.data` Msgs (and no fx timer is ever armed — the no-polling proof), a full staging FIFO answers `.dropped_full` without stopping the monitor (the drop count reaches the status line), Stop delivers the one `.closed` terminal and kills the handle, and a refused open reports `.rejected` instead of silence. Startup is honest in the same way: "monitoring" is claimed only after the source thread actually started — a failed spawn closes the just-opened channel and puts the failure in the status line, exercised through the same injected-source seam. A replay-armed start pins the launch gate: the parked open's handle answers `live() == false` and the source seam is never invoked.
+The headless test host deliberately has no OS sampler. It verifies explicit startup failure, cleanup, every initial model byte and sealed replay. The SDK integration suite injects producers and compares the complete native reference, including raw payloads, inactive bytes, exact u64/u32 boundaries, both view backends, backpressure, stale handles and replay:
+
+```sh
+zig build test-ts-channel-monitor-e2e
+```
+
+## Live verification
+
+```sh
+native build -Dautomation=true
+./zig-out/bin/channel-monitor &
+native automate wait
+native automate snapshot
+```
+
+Find the Start button's widget id in the snapshot and use `native automate widget-action monitor-canvas ID press`. Verify that sample lines grow without timer subscriptions. Press Stop and verify that the count settles and stays fixed. Capture the retained view with `native automate screenshot monitor-canvas`.

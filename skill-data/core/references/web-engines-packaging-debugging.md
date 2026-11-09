@@ -106,9 +106,10 @@ Signing modes:
 native package --target macos --signing none
 native package --target macos --signing adhoc
 native package --target macos --signing identity --identity "Developer ID Application: Your Name"
+native package --target macos --signing identity --identity "Developer ID Application: Your Name" --archive --notarize --notary-profile "my-app-release"
 ```
 
-For Chromium apps, verify the CEF framework and resources are included and signed before notarization.
+Identity signing enables the hardened runtime and requires a secure timestamp. `--notarize` uses a `notarytool` Keychain profile, submits the final DMG when `--archive` is present, and staples and validates the accepted tickets. For Chromium apps, verify the CEF framework and resources are included and signed before notarization.
 
 ## Linux and Windows packages
 

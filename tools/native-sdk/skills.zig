@@ -82,18 +82,58 @@ fn hasFlag(args: []const []const u8, name: []const u8) bool {
 }
 
 fn findPackageRoot(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map) !?[]const u8 {
-    if (env_map.get("NATIVE_SDK_SKILLS_ROOT")) |root| {
-        if (try hasSkillDirs(allocator, io, root)) return try allocator.dupe(u8, root);
-    }
+    if (try packageRootFromEnvironment(allocator, io, env_map)) |root| return root;
 
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const executable_len = std.process.executablePath(io, &buffer) catch return null;
-    const executable_path = buffer[0..executable_len];
-    var dir = std.fs.path.dirname(executable_path) orelse return null;
+    return packageRootFromExecutablePath(allocator, io, buffer[0..executable_len]);
+}
 
-    while (true) {
-        if (try hasSkillDirs(allocator, io, dir)) return try allocator.dupe(u8, dir);
-        dir = std.fs.path.dirname(dir) orelse break;
+/// Resolve the package that owns the skill payload. The explicit skills
+/// override wins, followed by the framework path supplied by the npm wrapper.
+/// Invalid environment candidates fall through to the executable layout.
+fn findPackageRootFromExecutable(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    env_map: *std.process.Environ.Map,
+    executable_path: []const u8,
+) !?[]const u8 {
+    if (try packageRootFromEnvironment(allocator, io, env_map)) |root| return root;
+    return packageRootFromExecutablePath(allocator, io, executable_path);
+}
+
+fn packageRootFromEnvironment(allocator: std.mem.Allocator, io: std.Io, env_map: *std.process.Environ.Map) !?[]const u8 {
+    const environment_candidates = [_][]const u8{
+        "NATIVE_SDK_SKILLS_ROOT",
+        "NATIVE_SDK_PATH",
+    };
+    for (environment_candidates) |name| {
+        if (env_map.get(name)) |root| {
+            if (root.len > 0 and try hasSkillDirs(allocator, io, root)) {
+                return try allocator.dupe(u8, root);
+            }
+        }
+    }
+    return null;
+}
+
+/// Find payloads bundled with the executable or owned by the sibling main npm
+/// package. This mirrors buildgraph.frameworkRootFromExecutable so direct
+/// invocation works for flat bundles, checkouts, hoisted installs, and nested
+/// optional dependencies without copying the payload into platform packages.
+fn packageRootFromExecutablePath(allocator: std.mem.Allocator, io: std.Io, executable_path: []const u8) !?[]const u8 {
+    var dir = std.fs.path.dirname(executable_path) orelse return null;
+    if (try hasSkillDirs(allocator, io, dir)) return try allocator.dupe(u8, dir);
+    var level: usize = 0;
+
+    while (level < 4) : (level += 1) {
+        const parent = std.fs.path.dirname(dir) orelse return null;
+        if (try hasSkillDirs(allocator, io, parent)) return try allocator.dupe(u8, parent);
+
+        const sibling = try std.fs.path.join(allocator, &.{ parent, "cli" });
+        if (try hasSkillDirs(allocator, io, sibling)) return sibling;
+        allocator.free(sibling);
+        dir = parent;
     }
 
     return null;
@@ -249,4 +289,180 @@ fn printSupplementaryFiles(allocator: std.mem.Allocator, io: std.Io, stdout: *st
             try stdout.print("\n\n---\n# {s}/{s}\n\n{s}", .{ subdir, entry.path, content });
         }
     }
+}
+
+fn testTempRootAlloc(tmp: *std.testing.TmpDir) ![]u8 {
+    const allocator = std.testing.allocator;
+    const relative = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer allocator.free(relative);
+    const real = try std.Io.Dir.cwd().realPathFileAlloc(std.testing.io, relative, allocator);
+    defer allocator.free(real);
+    return allocator.dupe(u8, real);
+}
+
+fn testCreateDir(tmp: *std.testing.TmpDir, parts: []const []const u8) !void {
+    const path = try std.fs.path.join(std.testing.allocator, parts);
+    defer std.testing.allocator.free(path);
+    try tmp.dir.createDirPath(std.testing.io, path);
+}
+
+fn testExpectResolved(expected: []const u8, resolved: ?[]const u8) !void {
+    const root = resolved orelse return error.TestUnexpectedResult;
+    defer std.testing.allocator.free(root);
+    try std.testing.expectEqualStrings(expected, root);
+}
+
+test "NATIVE_SDK_SKILLS_ROOT takes precedence over NATIVE_SDK_PATH" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "explicit", "skills" });
+    try testCreateDir(&tmp, &.{ "framework", "skill-data" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const explicit = try std.fs.path.join(std.testing.allocator, &.{ root, "explicit" });
+    defer std.testing.allocator.free(explicit);
+    const framework = try std.fs.path.join(std.testing.allocator, &.{ root, "framework" });
+    defer std.testing.allocator.free(framework);
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ root, "unrelated", "bin", "native" });
+    defer std.testing.allocator.free(executable);
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("NATIVE_SDK_SKILLS_ROOT", explicit);
+    try env.put("NATIVE_SDK_PATH", framework);
+
+    try testExpectResolved(explicit, try findPackageRootFromExecutable(std.testing.allocator, std.testing.io, &env, executable));
+}
+
+test "invalid explicit skills root falls through to NATIVE_SDK_PATH" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "framework", "skill-data" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const invalid = try std.fs.path.join(std.testing.allocator, &.{ root, "missing" });
+    defer std.testing.allocator.free(invalid);
+    const framework = try std.fs.path.join(std.testing.allocator, &.{ root, "framework" });
+    defer std.testing.allocator.free(framework);
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ root, "unrelated", "bin", "native" });
+    defer std.testing.allocator.free(executable);
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("NATIVE_SDK_SKILLS_ROOT", invalid);
+    try env.put("NATIVE_SDK_PATH", framework);
+
+    try testExpectResolved(framework, try findPackageRootFromExecutable(std.testing.allocator, std.testing.io, &env, executable));
+}
+
+test "invalid NATIVE_SDK_PATH falls through to the executable layout" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "bundle", "skills" });
+    try testCreateDir(&tmp, &.{ "bundle", "bin" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const invalid = try std.fs.path.join(std.testing.allocator, &.{ root, "framework-without-skills" });
+    defer std.testing.allocator.free(invalid);
+    const bundle = try std.fs.path.join(std.testing.allocator, &.{ root, "bundle" });
+    defer std.testing.allocator.free(bundle);
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ bundle, "bin", "native" });
+    defer std.testing.allocator.free(executable);
+
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("NATIVE_SDK_PATH", invalid);
+
+    try testExpectResolved(bundle, try findPackageRootFromExecutable(std.testing.allocator, std.testing.io, &env, executable));
+}
+
+test "skill roots accept skills and skill-data directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "skills-only", "skills" });
+    try testCreateDir(&tmp, &.{ "data-only", "skill-data" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const skills_only = try std.fs.path.join(std.testing.allocator, &.{ root, "skills-only" });
+    defer std.testing.allocator.free(skills_only);
+    const data_only = try std.fs.path.join(std.testing.allocator, &.{ root, "data-only" });
+    defer std.testing.allocator.free(data_only);
+
+    try std.testing.expect(try hasSkillDirs(std.testing.allocator, std.testing.io, skills_only));
+    try std.testing.expect(try hasSkillDirs(std.testing.allocator, std.testing.io, data_only));
+}
+
+test "executable search accepts checkout and flat bundle ancestors" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "checkout", "skills" });
+    try testCreateDir(&tmp, &.{ "checkout", "zig-out", "bin" });
+    try testCreateDir(&tmp, &.{ "bundle", "skill-data" });
+    try testCreateDir(&tmp, &.{ "bundle", "bin" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const checkout = try std.fs.path.join(std.testing.allocator, &.{ root, "checkout" });
+    defer std.testing.allocator.free(checkout);
+    const checkout_executable = try std.fs.path.join(std.testing.allocator, &.{ checkout, "zig-out", "bin", "native" });
+    defer std.testing.allocator.free(checkout_executable);
+    const bundle = try std.fs.path.join(std.testing.allocator, &.{ root, "bundle" });
+    defer std.testing.allocator.free(bundle);
+    const bundle_executable = try std.fs.path.join(std.testing.allocator, &.{ bundle, "bin", "native" });
+    defer std.testing.allocator.free(bundle_executable);
+
+    try testExpectResolved(checkout, try packageRootFromExecutablePath(std.testing.allocator, std.testing.io, checkout_executable));
+    try testExpectResolved(bundle, try packageRootFromExecutablePath(std.testing.allocator, std.testing.io, bundle_executable));
+}
+
+test "executable search finds hoisted sibling main package" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli", "skills" });
+    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const main_package = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@native-sdk", "cli" });
+    defer std.testing.allocator.free(main_package);
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin", "native" });
+    defer std.testing.allocator.free(executable);
+
+    try testExpectResolved(main_package, try packageRootFromExecutablePath(std.testing.allocator, std.testing.io, executable));
+}
+
+test "executable search reaches outer main package from nested optional dependency" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli", "skill-data" });
+    try testCreateDir(&tmp, &.{ "node_modules", "@native-sdk", "cli", "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const main_package = try std.fs.path.join(std.testing.allocator, &.{ root, "node_modules", "@native-sdk", "cli" });
+    defer std.testing.allocator.free(main_package);
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ main_package, "node_modules", "@native-sdk", "cli-linux-x64-gnu", "bin", "native" });
+    defer std.testing.allocator.free(executable);
+
+    try testExpectResolved(main_package, try packageRootFromExecutablePath(std.testing.allocator, std.testing.io, executable));
+}
+
+test "skill root resolution returns null when no candidate is valid" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try testCreateDir(&tmp, &.{ "empty", "one", "two", "three", "four", "bin" });
+
+    const root = try testTempRootAlloc(&tmp);
+    defer std.testing.allocator.free(root);
+    const executable = try std.fs.path.join(std.testing.allocator, &.{ root, "empty", "one", "two", "three", "four", "bin", "native" });
+    defer std.testing.allocator.free(executable);
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+
+    const resolved = try findPackageRootFromExecutable(std.testing.allocator, std.testing.io, &env, executable);
+    try std.testing.expect(resolved == null);
 }

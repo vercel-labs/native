@@ -1,6 +1,6 @@
 //! The native host consumer for compiled TypeScript app cores: bridges
 //! the versioned command/subscription wire format a compiled core
-//! emits (`cmd_format_version` 7) onto the real effect engine
+//! emits (`cmd_format_version` 10) onto the real effect engine
 //! (`effects.zig`). The TypeScript tier's core module is a pure
 //! Model/Msg/update core whose effects are INERT BYTES — this module is
 //! the one place those bytes become engine calls, so the entire
@@ -166,7 +166,7 @@
 //!                  Image loads are not the string-keyed cancel's to
 //!                  end (they are keyed by numeric id, not a wire key)
 //!                  — `image_cancel` is their cancel.
-//!   image_cancel-> `fx.cancel(id)` on the live load under the id, if
+//!   image_cancel-> `fx.cancelImage(id)` on the live load under the id, if
 //!                  any: the engine's `.cancelled` terminal routes the
 //!                  load's own event arm (state "cancelled") and
 //!                  retires the entry, freeing the id for a fresh load
@@ -439,6 +439,8 @@ pub const db_key_base: u64 = 0x5453_4442_0000_0000;
 /// Dedicated raw-file stream key namespace ("TSFS").
 pub const file_stream_key_base: u64 = 0x5453_4653_0000_0000;
 
+pub const global_shortcut_key: u64 = 0x5453_4753_0000_0000;
+
 /// The spawn wire record's "no line routing" tag sentinel (the wire
 /// format's shared constant).
 pub const spawn_no_line_tag: u8 = 0xFF;
@@ -457,8 +459,18 @@ pub const max_now_chain: usize = 64;
 pub const max_nows_per_cmd: usize = 16;
 
 pub fn TsCoreHost(comptime core: type) type {
+    return TsCoreHostWithRuntimeModel(core, false);
+}
+
+/// Compiled views use a stateless handle. Reference views retain the full
+/// source model; commands, subscriptions and restoration share one bridge.
+pub fn TsCoreHostWithRuntimeModel(comptime core: type, comptime compiled_model: bool) type {
+    const use_runtime_model = compiled_model and @hasDecl(core, "RuntimeModel");
     return struct {
-        pub const Model = core.Model;
+        pub const Model = if (use_runtime_model) core.RuntimeModel else core.Model;
+        const initialModel = if (use_runtime_model) core.initialRuntimeModel else core.initialModel;
+        const updateModel = if (use_runtime_model) core.updateRuntimeModel else core.update;
+        const commitModel = if (use_runtime_model) core.commitRuntimeModel else core.commitModelRoot;
         pub const Msg = core.Msg;
         pub const Fx = runtime_effects.Effects(Msg);
 
@@ -473,9 +485,10 @@ pub fn TsCoreHost(comptime core: type) type {
 
         const msg_arms = @typeInfo(Msg).@"union".fields;
 
-        const update_returns_cmd = @typeInfo(@TypeOf(core.update)).@"fn".return_type.? != *const Model;
-        const init_returns_cmd = @typeInfo(@TypeOf(core.initialModel)).@"fn".return_type.? != *const Model;
+        const update_returns_cmd = @typeInfo(@TypeOf(updateModel)).@"fn".return_type.? != *const Model;
+        const init_returns_cmd = @typeInfo(@TypeOf(initialModel)).@"fn".return_type.? != *const Model;
         const has_subscriptions = @hasDecl(core, "subscriptions");
+        pub const environment_messages = if (@hasDecl(core, "envMsgs")) core.envMsgs else .{};
 
         /// One in-flight routed request: the wire key names it for
         /// replace/cancel, the tags route its terminal, and the table
@@ -514,6 +527,9 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         };
 
+        const GlobalShortcutEntry = struct { used: bool = false, declared: bool = false, binding: platform.OwnedShortcut = .{}, tag: u8 = 0, pressed: bool = false };
+        const DeclaredShortcut = struct { shortcut: platform.Shortcut, tag: u8 };
+
         /// One in-flight named engine op (read_file / write_file /
         /// fetch / clip_read): same lifecycle as `RequestEntry` — the
         /// table index IS the engine key (minus `effect_key_base`),
@@ -525,6 +541,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the engine's shared effect slots.
         const EffectEntry = struct {
             used: bool = false,
+            full_result: bool = false,
             dropped: bool = false,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
@@ -541,6 +558,8 @@ pub fn TsCoreHost(comptime core: type) type {
         /// timer replaces in place under the same engine key).
         const DelayEntry = struct {
             used: bool = false,
+            full_result: bool = false,
+            mode: runtime_effects.TimerMode = .one_shot,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
             tag: u8 = 0,
@@ -566,6 +585,7 @@ pub fn TsCoreHost(comptime core: type) type {
             exit_tag: u8 = 0,
             err_tag: u8 = 0,
             collect: bool = false,
+            complete_events: bool = false,
             /// Fetch lines are data records, so a cut or dropped line makes
             /// the eventual success terminal unusable. Spawn line mode keeps
             /// its existing best-effort contract.
@@ -672,6 +692,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// table.
         const PtyEntry = struct {
             used: bool = false,
+            bound: bool = false,
             key_len: usize = 0,
             key: [max_wire_key_bytes]u8 = undefined,
             event_tag: u8 = 0,
@@ -720,6 +741,10 @@ pub fn TsCoreHost(comptime core: type) type {
         var audio_captures: [runtime_effects.max_effect_channels]AudioCaptureEntry = @splat(.{});
         var ptys: [runtime_effects.max_effect_ptys]PtyEntry = @splat(.{});
         var dbs: [runtime_effects.max_db_effects]DbEntry = @splat(.{});
+        var global_shortcuts: [2 * platform.max_global_shortcuts]GlobalShortcutEntry = @splat(.{});
+        var global_shortcut_count: usize = 0;
+        var rejected_shortcuts: [platform.max_global_shortcuts]u64 = undefined;
+        var rejected_shortcut_count: usize = 0;
         /// The platform caches directory for URL image sources, the
         /// audio cache dir's twin (`setImageCacheDir` / `TsUiApp`'s
         /// `image_cache_dir`): bridge-side derivation of the
@@ -746,7 +771,24 @@ pub fn TsCoreHost(comptime core: type) type {
 
         /// A `now` record captured during the command walk, dispatched
         /// after the issuing cycle's frame reset.
-        const PendingNow = struct { tag: u8, ms: i64 };
+        const ClipboardWriteEntry = struct {
+            used: bool = false,
+            key: [max_wire_key_bytes]u8 = undefined,
+            key_len: usize = 0,
+            tag: u8 = 0,
+            fn wireKey(self: *const ClipboardWriteEntry) []const u8 {
+                return self.key[0..self.key_len];
+            }
+        };
+        var clipboard_writes: [runtime_effects.max_effects]ClipboardWriteEntry = @splat(.{});
+        const clipboard_result_key_base: u64 = 0x5453_4352_0000_0000;
+
+        const PendingNow = union(enum) {
+            channel_source: struct { tag: u8, key: u64, state: runtime_effects.EffectChannelSourceState, bytes: [255]u8, len: u8 },
+            clock: struct { tag: u8, ms: i64 },
+            decimal_clock: struct { tag: u8, ms: i64 },
+            video: struct { tag: u8, snapshot: Fx.VideoSnapshot, key: [max_wire_key_bytes]u8, key_len: usize },
+        };
 
         // Bridge-refused dispatches (a spawn under a live wire key, an
         // image load or channel open under a duplicate live id/key, an
@@ -795,6 +837,7 @@ pub fn TsCoreHost(comptime core: type) type {
             effects_table = @splat(.{});
             delays = @splat(.{});
             streams = @splat(.{});
+            file_streams = @splat(.{});
             audio_entry = .{};
             video_entry = .{};
             images = @splat(.{});
@@ -802,12 +845,16 @@ pub fn TsCoreHost(comptime core: type) type {
             audio_captures = @splat(.{});
             ptys = @splat(.{});
             dbs = @splat(.{});
+            global_shortcuts = @splat(.{});
+            global_shortcut_count = 0;
+            rejected_shortcut_count = 0;
             clip_write_counter = 0;
+            clipboard_writes = @splat(.{});
             audio_cache_dir_len = 0;
             image_cache_dir_len = 0;
             swallow_next_dispatch = false;
-            const initial = core.initialModel();
-            model_root = core.commitModelRoot(if (comptime init_returns_cmd) initial.model else initial);
+            const initial = initialModel();
+            model_root = commitModel(if (comptime init_returns_cmd) initial.model else initial);
             core.rt.frameReset();
         }
 
@@ -826,18 +873,24 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         /// The committed model root (valid until the next dispatch).
-        pub fn model() *const Model {
+        pub fn runtimeModel() *const Model {
             return model_root;
         }
 
-        /// Replace the committed core model from canonical snapshot bytes and
-        /// refresh the host mirror. Generated external cores expose the inverse
+        /// Complete source state for diagnostics and replay. Compiled apps
+        /// decode only here; returned roots follow the shim snapshot lifetime.
+        pub fn model() *const core.Model {
+            return if (comptime use_runtime_model) core.snapshotModel() else model_root;
+        }
+
+        /// Replace the committed core model from canonical snapshot bytes.
+        /// Reference mode refreshes its mirror; compiled mode keeps its handle. Generated external cores expose the inverse
         /// of `modelSnapshot`; hand-written test cores intentionally do not.
         pub fn restoreSnapshot(snapshot: []const u8) void {
             if (comptime !@hasDecl(core, "restoreModel")) {
                 @panic("ts core host: this core exposes no restoreModel entry - regenerate it with core ABI version 2");
             } else {
-                model_root = core.restoreModel(snapshot);
+                model_root = if (comptime use_runtime_model) core.restoreRuntimeModel(snapshot) else core.restoreModel(snapshot);
             }
         }
 
@@ -926,6 +979,20 @@ pub fn TsCoreHost(comptime core: type) type {
             dispatchDepth(fx, msg, 0);
         }
 
+        /// Commit a pure retained-control observation at the UiApp sync
+        /// boundary. Effects and subscriptions belong to normal dispatch.
+        pub fn syncControls(msg: Msg) void {
+            if (comptime update_returns_cmd) {
+                const result = updateModel(model_root, msg);
+                if (result.cmd.len != 0) @panic("sliderStateMsg must produce a state-only update without commands");
+                model_root = commitModel(result.model);
+            } else {
+                model_root = commitModel(updateModel(model_root, msg));
+            }
+            // The enclosing dispatch may already hold a frame-backed message
+            // (for example exact frame clocks). It owns the scratch reset.
+        }
+
         /// Drain every queued effect completion into the core — the
         /// bridge-shaped mirror of `UiApp.drainEffects`' loop. Hosts
         /// that embed the core without a UiApp call this on wake/frame.
@@ -944,11 +1011,11 @@ pub fn TsCoreHost(comptime core: type) type {
                 @panic("ts core host: more than 64 chained Cmd.now dispatches from one event - update is requesting timestamps in a loop");
             }
             if (comptime update_returns_cmd) {
-                const result = core.update(model_root, msg);
-                model_root = core.commitModelRoot(result.model);
+                const result = updateModel(model_root, msg);
+                model_root = commitModel(result.model);
                 finishCycle(fx, result.cmd, depth);
             } else {
-                model_root = core.commitModelRoot(core.update(model_root, msg));
+                model_root = commitModel(updateModel(model_root, msg));
                 finishCycle(fx, "", depth);
             }
         }
@@ -967,14 +1034,20 @@ pub fn TsCoreHost(comptime core: type) type {
             reconcileSubscriptions(fx);
             fx.flushDbSubscriptions();
             core.rt.frameReset();
-            for (nows[0..now_count]) |pending| {
-                dispatchDepth(fx, msgFromTagNumber(pending.tag, @floatFromInt(pending.ms)), depth + 1);
+            for (nows[0..now_count]) |*pending| {
+                const reply = switch (pending.*) {
+                    .channel_source => |*source| msgFromTagChannelSource(source.tag, .{ .key = source.key, .state = source.state, .bytes = source.bytes[0..source.len] }),
+                    .clock => |clock| msgFromTagNumber(clock.tag, @floatFromInt(clock.ms)),
+                    .decimal_clock => |clock| msgFromTagBytes(clock.tag, decimalFrame(clock.ms)),
+                    .video => |*video| msgFromVideoSnapshot(video.tag, video.snapshot, video.key[0..video.key_len]),
+                };
+                dispatchDepth(fx, reply, depth + 1);
             }
         }
 
         // ------------------------------------------------- command walk
 
-        /// Walk one command value (v3 wire format; batch is plain
+        /// Walk one command value (generation 10; batch is plain
         /// concatenation, the empty slice is `Cmd.none`).
         fn runCmd(
             fx: *Fx,
@@ -1000,7 +1073,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         }
                         // The journaled clock read (replay pops the same
                         // value), captured in record order.
-                        nows[now_count.*] = .{ .tag = tag, .ms = fx.wallMs() };
+                        nows[now_count.*] = .{ .clock = .{ .tag = tag, .ms = fx.wallMs() } };
                         now_count.* += 1;
                     },
                     // host [op][name_len][name][argc][argc * f64 LE]
@@ -1032,6 +1105,40 @@ pub fn TsCoreHost(comptime core: type) type {
                     0x06 => {
                         const key = takeShortBytes(cmd, &at);
                         cancelWireKey(fx, key);
+                    },
+                    // Complete file terminals and exact journaled clocks.
+                    0x37, 0x38, 0x3e, 0x3f => {
+                        const key = takeShortBytes(cmd, &at);
+                        const tag = takeByte(cmd, &at);
+                        const file_path = takeLongBytes(cmd, &at);
+                        const bytes = if (op == 0x38 or op == 0x3f) takeLongBytes(cmd, &at) else "";
+                        const file_op: runtime_effects.EffectFileOp = if (op == 0x38 or op == 0x3f) .write else .read;
+                        const index = allocEffectEntryWithFilePolicy(fx, .{ .key = key, .ok_tag = tag, .err_tag = tag }, file_op, op == 0x37 or op == 0x38) orelse continue;
+                        if (file_op == .read) fx.readFile(.{ .key = effect_key_base + index, .path = file_path, .on_result = completeFileResultMsg }) else fx.writeFile(.{ .key = effect_key_base + index, .path = file_path, .bytes = bytes, .on_result = completeFileResultMsg });
+                    },
+                    0x39 => {
+                        const tag = takeByte(cmd, &at);
+                        if (now_count.* >= max_nows_per_cmd) @panic("ts core host: too many clock replies");
+                        nows[now_count.*] = .{ .decimal_clock = .{ .tag = tag, .ms = fx.wallMs() } };
+                        now_count.* += 1;
+                    },
+                    0x40 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        if (mode > 1) @panic("ts core host: invalid timer mode");
+                        const decimal = takeLongBytes(cmd, &at);
+                        const tag = takeByte(cmd, &at);
+                        const exact = parseExactTimerInterval(decimal);
+                        const ms: f64 = if (exact) |value| @floatFromInt(value) else 0;
+                        armResultTimer(fx, key, ms, tag, if (mode == 1) .repeating else .one_shot, true);
+                    },
+                    0x3A => {
+                        const key = takeShortBytes(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        if (mode > 1) @panic("ts core host: invalid timer mode");
+                        const ms: f64 = @bitCast(std.mem.readInt(u64, takeBytes(cmd, &at, 8)[0..8], .little));
+                        const tag = takeByte(cmd, &at);
+                        armResultTimer(fx, key, ms, tag, if (mode == 1) .repeating else .one_shot, false);
                     },
                     // read_file [op][key_len][key][ok][err][path_len u32 LE][path]
                     0x07 => {
@@ -1124,7 +1231,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         // otherwise find this named op first and leave the
                         // stream running. The live stream owns the key, so
                         // reject the newcomer through its own err arm.
-                        if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) {
+                        if (head.key.len > 0 and (findStream(head.key) != null or reservedWireKeyOccupied(head.key))) {
                             fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                         } else {
                             const effect_index = allocEffectEntry(fx, head) orelse continue;
@@ -1154,6 +1261,57 @@ pub fn TsCoreHost(comptime core: type) type {
                         });
                         clip_write_counter +%= 1;
                     },
+                    // Complete spawn records; the legacy opcode remains unchanged.
+                    0x46 => {
+                        const key = parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                            @panic("ts core host: invalid exact subprocess identity");
+                        const line_tag = takeByte(cmd, &at);
+                        const exit_tag = takeByte(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        const argc = takeByte(cmd, &at);
+                        if (mode > 1) @panic("ts core host: invalid exact subprocess output mode");
+                        var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
+                        for (0..argc) |i| {
+                            const arg = takeLongBytes(cmd, &at);
+                            if (i < argv.len) argv[i] = arg;
+                        }
+                        const stdin = takeLongBytes(cmd, &at);
+                        // An over-capacity argv is a native rejected request.
+                        const retained = if (argc <= argv.len) argv[0..argc] else &.{};
+                        issueSpawnExact(fx, key, line_tag, exit_tag, mode == 1, retained, stdin);
+                    },
+                    0x47 => fx.cancel(parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                        @panic("ts core host: invalid exact cancellation identity")),
+                    0x33 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const line_tag = takeByte(cmd, &at);
+                        const exit_tag = takeByte(cmd, &at);
+                        const mode = takeByte(cmd, &at);
+                        const argc = takeByte(cmd, &at);
+                        if (mode > 1 or argc == 0 or argc > runtime_effects.max_effect_argv) @panic("ts core host: invalid complete spawn wire record");
+                        var argv: [runtime_effects.max_effect_argv][]const u8 = undefined;
+                        for (0..argc) |i| argv[i] = takeLongBytes(cmd, &at);
+                        const stdin = takeLongBytes(cmd, &at);
+                        issueSpawn(fx, .{ .key = key, .line_tag = line_tag, .exit_tag = exit_tag, .err_tag = exit_tag, .complete_events = true }, mode == 1, argv[0..argc], stdin);
+                    },
+                    // Routed write completion, including rejection and cancellation.
+                    0x34 => {
+                        const key = takeShortBytes(cmd, &at);
+                        const tag = takeByte(cmd, &at);
+                        const bytes = takeLongBytes(cmd, &at);
+                        issueClipboardWrite(fx, key, tag, bytes);
+                    },
+                    // Capture now; reply after resetting the ABI result arena, in
+                    // command order like Cmd.now. No intervening host turn occurs.
+                    0x35 => {
+                        const tag = takeByte(cmd, &at);
+                        if (now_count.* >= max_nows_per_cmd) @panic("ts core host: over 16 immediate capability replies in one command");
+                        const snapshot = fx.videoSnapshot();
+                        const key = if (video_entry.used and fx.videoOwnerToken() == video_entry.token) video_entry.wireKey() else "";
+                        nows[now_count.*] = .{ .video = .{ .tag = tag, .snapshot = snapshot, .key = undefined, .key_len = key.len } };
+                        @memcpy(nows[now_count.*].video.key[0..key.len], key);
+                        now_count.* += 1;
+                    },
                     // clip_read [op][key_len][key][ok][err]
                     0x0B => {
                         const head = takeRoutedHead(cmd, &at);
@@ -1169,10 +1327,12 @@ pub fn TsCoreHost(comptime core: type) type {
                         const after_bits = takeBytes(cmd, &at, 8);
                         const after_ms: f64 = @bitCast(std.mem.readInt(u64, after_bits[0..8], .little));
                         const tag = takeByte(cmd, &at);
-                        if (!(after_ms >= 1) or !(after_ms <= 31_536_000_000.0)) {
-                            // Same bound as Sub.timer: the lower rejects NaN,
-                            // the upper (one year) keeps ns conversion in range.
-                            @panic("ts core host: Cmd.delay interval must be between 1ms and one year");
+                        if (comptime !@hasDecl(core, "nativeTimerPolicy")) {
+                            if (!(after_ms >= 1) or !(after_ms <= 31_536_000_000.0)) {
+                                // Same bound as Sub.timer: the lower rejects NaN,
+                                // the upper (one year) keeps ns conversion in range.
+                                @panic("ts core host: Cmd.delay interval must be between 1ms and one year");
+                            }
                         }
                         armDelay(fx, key, after_ms, tag);
                     },
@@ -1208,27 +1368,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const cache_path = takeLongBytes(cmd, &at);
                         const expected_bits = takeBytes(cmd, &at, 8);
                         const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
-                        // One player is the whole surface: a new play
-                        // re-keys and re-routes the single entry in place,
-                        // exactly as the engine replaces its channel.
-                        audio_entry.used = true;
-                        audio_entry.key_len = key.len;
-                        @memcpy(audio_entry.key[0..key.len], key);
-                        audio_entry.event_tag = event_tag;
-                        fx.playAudio(.{
-                            .key = audio_key_base,
-                            .path = audio_path,
-                            .url = url,
-                            .cache_path = effectiveAudioCachePath(cache_path, url),
-                            // The wire carries the app's number; anything
-                            // that is not a representable byte count means
-                            // "unknown size" (0), the engine's own default.
-                            .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0)
-                                @intFromFloat(expected)
-                            else
-                                0,
-                            .on_event = audioEventMsg,
-                        });
+                        issueAudioPlay(fx, key, event_tag, audio_path, url, cache_path, expected);
                     },
                     // audio_ctl [op][key_len][key][verb u8][value f64 LE]
                     0x0F => {
@@ -1238,13 +1378,72 @@ pub fn TsCoreHost(comptime core: type) type {
                         const value: f64 = @bitCast(std.mem.readInt(u64, value_bits[0..8], .little));
                         runAudioCtl(fx, key, verb, value);
                     },
+                    // Exact audio: decimal key, load-owned route, source and cache facts.
+                    0x42 => {
+                        const key = parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                            @panic("ts core host: invalid exact audio identity");
+                        const tag = takeByte(cmd, &at);
+                        const audio_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const cache_path = takeLongBytes(cmd, &at);
+                        const cache_dir = takeLongBytes(cmd, &at);
+                        const expected_bits = takeBytes(cmd, &at, 8);
+                        const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bits[0..8], .little));
+                        issueAudioPlayExact(fx, key, tag, audio_path, url, cache_path, cache_dir, expected);
+                    },
+                    // Single-player transport. Seek retains the native u64 range.
+                    0x43 => switch (takeByte(cmd, &at)) {
+                        0 => fx.pauseAudio(),
+                        1 => fx.resumeAudio(),
+                        2 => {
+                            audio_entry.used = false;
+                            fx.stopAudio();
+                        },
+                        3 => fx.seekAudio(parseExactUnsigned(takeLongBytes(cmd, &at)) orelse
+                            @panic("ts core host: invalid exact audio seek position")),
+                        4 => {
+                            const bits = takeBytes(cmd, &at, 8);
+                            const value: f64 = @bitCast(std.mem.readInt(u64, bits[0..8], .little));
+                            if (!std.math.isFinite(value) or @abs(value) > std.math.floatMax(f32))
+                                @panic("ts core host: invalid audio volume");
+                            fx.setAudioVolume(@floatCast(value));
+                        },
+                        else => @panic("ts core host: invalid audio transport verb"),
+                    },
                     // window_show [op][label_len][label]
                     0x10 => {
                         const label = takeShortBytes(cmd, &at);
                         fx.showWindow(label);
                     },
+                    // Native close/minimize preserve the ordinary window policy.
+                    0x44 => fx.closeWindow(takeShortBytes(cmd, &at)),
+                    0x45 => fx.minimizeWindow(takeShortBytes(cmd, &at)),
                     // quit_app [op]
                     0x11 => fx.quitApp(),
+                    // Lossless identity: two unsigned little-endian words.
+                    0x3b => {
+                        const id_bytes = takeBytes(cmd, &at, 8);
+                        const id = std.mem.readInt(u64, id_bytes[0..8], .little);
+                        const tag = takeByte(cmd, &at);
+                        const image_path = takeLongBytes(cmd, &at);
+                        const url = takeLongBytes(cmd, &at);
+                        const cache = takeLongBytes(cmd, &at);
+                        const expected_bytes = takeBytes(cmd, &at, 8);
+                        const expected: f64 = @bitCast(std.mem.readInt(u64, expected_bytes[0..8], .little));
+                        issueImageLoadWords(fx, id, tag, image_path, url, cache, expected);
+                    },
+                    0x3c, 0x3d => {
+                        const id_bytes = takeBytes(cmd, &at, 8);
+                        const id = std.mem.readInt(u64, id_bytes[0..8], .little);
+                        const table: []const ImageEntry = if (op == 0x3c) &images else &.{};
+                        const plan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                            compiledMediaIdentityPlan(0, 4, id, 0, 0, .microphone, 0, 0, 0, table, true)
+                        else
+                            MediaPlan{ .valid = imageWordIdValid(id), .slot = findImage(id), .key = id, .tag = 0, .retire = false, .expected_bytes = 0, .source = .microphone, .sample_rate = 0, .capture_channels = 0 };
+                        if (op == 0x3c) {
+                            if (plan.valid and plan.slot != null) fx.cancelImage(plan.key);
+                        } else if (plan.valid) _ = fx.unregisterImage(plan.key);
+                    },
                     // image_load [op][id f64 LE][event_tag]
                     //            [path_len u32 LE][path][url_len u32 LE][url]
                     //            [cache_len u32 LE][cache][expected f64 LE]
@@ -1279,6 +1478,26 @@ pub fn TsCoreHost(comptime core: type) type {
                         const max_pending = takeByte(cmd, &at);
                         _ = issueChannelOpen(fx, key_value, event_tag, max_pending);
                     },
+                    // channel_open_source [op][key f64 LE][event_tag][started_tag]
+                    //                     [max_pending][source short][payload long]
+                    0x41 => {
+                        const key_bits = takeBytes(cmd, &at, 8);
+                        const key_value: f64 = @bitCast(std.mem.readInt(u64, key_bits[0..8], .little));
+                        const event_tag = takeByte(cmd, &at);
+                        const started_tag = takeByte(cmd, &at);
+                        const max_pending = takeByte(cmd, &at);
+                        const name = takeShortBytes(cmd, &at);
+                        const payload = takeLongBytes(cmd, &at);
+                        if (name.len == 0 or payload.len > runtime_effects.max_channel_source_payload or now_count.* >= max_nows_per_cmd)
+                            @panic("ts core host: invalid channel source command");
+                        const accepted = issueChannelOpen(fx, key_value, event_tag, max_pending);
+                        const key: u64 = if (std.math.isFinite(key_value) and key_value >= 1 and key_value < 9007199254740992.0 and @floor(key_value) == key_value) @intFromFloat(key_value) else 0;
+                        const result = fx.startChannelSource(key, if (accepted) fx.channelHandle(key) else null, name, payload);
+                        const pending = &nows[now_count.*];
+                        pending.* = .{ .channel_source = .{ .tag = started_tag, .key = key, .state = result.state, .bytes = undefined, .len = @intCast(result.bytes.len) } };
+                        @memcpy(pending.channel_source.bytes[0..result.bytes.len], result.bytes);
+                        now_count.* += 1;
+                    },
                     // channel_close [op][key f64 LE]
                     0x16 => {
                         const key_bits = takeBytes(cmd, &at, 8);
@@ -1296,58 +1515,7 @@ pub fn TsCoreHost(comptime core: type) type {
                         const video_path = takeLongBytes(cmd, &at);
                         const url = takeLongBytes(cmd, &at);
                         const flags = takeByte(cmd, &at);
-                        const options: Fx.LoadVideoOptions = .{
-                            // The tag rides the key's low byte so every
-                            // event routes the arm of the load that
-                            // produced it (see `videoKeyForTag`).
-                            .key = videoKeyForTag(event_tag),
-                            // The wire carries the app's number; a surface
-                            // that is not an exactly-carried positive
-                            // integer (0, negatives, fractions, 2^53 and
-                            // past — the image id bound) reaches the engine
-                            // as 0, which the validation refuses with one
-                            // `.rejected` event — never silent.
-                            .surface = if (surface >= 1 and surface < 9007199254740992.0 and @floor(surface) == surface)
-                                @intFromFloat(surface)
-                            else
-                                0,
-                            .path = video_path,
-                            .url = url,
-                            .autoplay = (flags & 0x01) != 0,
-                            .loop = (flags & 0x02) != 0,
-                            .muted = (flags & 0x04) != 0,
-                            .on_event = videoEventMsg,
-                        };
-                        // A load the engine's own deterministic gates
-                        // would refuse must not commit the routing
-                        // entry: the engine keeps the CURRENT playback
-                        // on a rejected load, so re-keying first would
-                        // route the surviving stream's events and verbs
-                        // through the refused load's key and arm. Stage
-                        // the rejection to the refused arm directly
-                        // (the channel-admission precedent) and leave
-                        // the entry — and the engine — untouched.
-                        if (Fx.videoLoadRejected(options)) {
-                            fx.stageLoopMsg(msgFromTagVideo(event_tag, .{
-                                .key = videoKeyForTag(event_tag),
-                                .kind = .rejected,
-                            }));
-                        } else {
-                            // One player is the whole surface: an
-                            // accepted load re-keys and re-routes the
-                            // single entry in place, exactly as the
-                            // engine replaces its channel.
-                            video_entry.used = true;
-                            video_entry.key_len = key.len;
-                            @memcpy(video_entry.key[0..key.len], key);
-                            video_entry.event_tag = event_tag;
-                            fx.loadVideo(options);
-                            // The identity this load minted (valid even
-                            // when a synchronous refusal already reset
-                            // the channel): the entry's verbs prove
-                            // ownership against it.
-                            video_entry.token = fx.videoMintedToken();
-                        }
+                        issueVideoLoad(fx, key, event_tag, surface, video_path, url, flags);
                     },
                     // video_ctl [op][key_len][key][verb u8][value f64 LE]
                     0x18 => {
@@ -1720,22 +1888,44 @@ pub fn TsCoreHost(comptime core: type) type {
         /// flight either (a dropped entry holds its slot only until
         /// its `.cancelled` terminal drains).
         fn allocEffectEntry(fx: *Fx, head: RoutedHead) ?u64 {
-            if (head.key.len > 0) {
-                if (fileStreamOccupiesKey(head.key)) {
-                    fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+            return allocEffectEntryWithFileResult(fx, head, null);
+        }
+        fn allocEffectEntryWithFileResult(fx: *Fx, head: RoutedHead, file_op: ?runtime_effects.EffectFileOp) ?u64 {
+            return allocEffectEntryWithFilePolicy(fx, head, file_op, true);
+        }
+        fn allocEffectEntryWithFilePolicy(fx: *Fx, head: RoutedHead, file_op: ?runtime_effects.EffectFileOp, replace: bool) ?u64 {
+            const blocked = (!replace and head.key.len > 0 and findEffect(head.key) != null) or head.key.len > 0 and (reservedWireKeyOccupiedExcept(head.key, .effect) or (file_op != null and (findRequest(head.key) != null or findStream(head.key) != null or findDelay(head.key) != null or findPty(head.key) != null or findDb(head.key) != null)));
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) compiledEffectDeclaration(head, blocked) else blk: {
+                break :blk EffectPlan{
+                    .admitted = !blocked,
+                    .slot = if (blocked) null else freeEffectIndex(),
+                    .drop = if (blocked or head.key.len == 0) null else findEffect(head.key),
+                    .ok_tag = head.ok_tag,
+                    .err_tag = head.err_tag,
+                };
+            };
+            if (!plan.admitted) {
+                if (file_op) |operation| stageFileRejected(fx, head, operation) else fx.stageLoopMsg(msgFromTagStaticBytes(plan.err_tag, "rejected"));
+                return null;
+            }
+            // A dropped predecessor remains occupied until its terminal drains.
+            // Preserve the reference order even when no free slot is available.
+            if (plan.drop) |existing| dropEffectEntry(fx, existing);
+            const index = plan.slot orelse {
+                if (file_op) |operation| {
+                    stageFileRejected(fx, head, operation);
                     return null;
                 }
-                if (findEffect(head.key)) |existing| dropEffectEntry(fx, existing);
-            }
-            const index = freeEffectIndex() orelse
                 @panic("ts core host: more than 16 named engine ops in flight - the op table mirrors the engine's max_effects slots");
+            };
             const entry = &effects_table[index];
             entry.used = true;
             entry.dropped = false;
+            entry.full_result = file_op != null;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
-            entry.ok_tag = head.ok_tag;
-            entry.err_tag = head.err_tag;
+            entry.ok_tag = plan.ok_tag;
+            entry.err_tag = plan.err_tag;
             return index;
         }
 
@@ -1745,12 +1935,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the entry through the result callback, which swallows it.
         fn dropEffectEntry(fx: *Fx, index: usize) void {
             effects_table[index].dropped = true;
-            fx.cancel(effect_key_base + index);
+            fx.cancelNonImage(effect_key_base + index);
         }
 
         /// A dropped entry's key is dead to lookup: reissuing it is a
         /// fresh effect, and cancel aimed at it finds nothing.
         fn findEffect(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledEffectLookup(key);
             for (&effects_table, 0..) |*entry, index| {
                 if (entry.used and !entry.dropped and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -1764,6 +1955,67 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
+        const EffectPlan = struct { admitted: bool, slot: ?usize, drop: ?usize, ok_tag: u8, err_tag: u8 };
+        const max_effect_policy_bytes = 5 + max_wire_key_bytes + 16 * (5 + max_wire_key_bytes);
+
+        fn writeEffectTable(request: []u8, start: usize) usize {
+            var at = start;
+            for (&effects_table) |*entry| {
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intFromBool(entry.dropped);
+                request[at + 2] = @intCast(entry.key_len);
+                @memcpy(request[at + 3 ..][0..entry.key_len], entry.wireKey());
+                at += 3 + entry.key_len;
+                request[at] = entry.ok_tag;
+                request[at + 1] = entry.err_tag;
+                at += 2;
+            }
+            return at;
+        }
+
+        fn compiledEffectDeclaration(head: RoutedHead, blocked: bool) EffectPlan {
+            var request: [max_effect_policy_bytes]u8 = undefined;
+            request[0] = 0;
+            request[1] = @intCast(head.key.len);
+            @memcpy(request[2..][0..head.key.len], head.key);
+            const at = 2 + head.key.len;
+            request[at] = @intFromBool(blocked);
+            request[at + 1] = head.ok_tag;
+            request[at + 2] = head.err_tag;
+            const end = writeEffectTable(&request, at + 3);
+            var result: [5]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..end], &result) != result.len or result[0] > 1)
+                @panic("ts core host: invalid compiled effect declaration result");
+            const slot: ?usize = if (result[1] == 255) null else result[1];
+            const drop: ?usize = if (result[2] == 255) null else result[2];
+            if (slot) |index| {
+                if (index >= effects_table.len or effects_table[index].used)
+                    @panic("ts core host: invalid compiled effect allocation slot");
+            }
+            if (drop) |index| {
+                if (index >= effects_table.len or !effects_table[index].used or effects_table[index].dropped)
+                    @panic("ts core host: invalid compiled effect predecessor slot");
+            }
+            if (result[0] == 0 and (slot != null or drop != null))
+                @panic("ts core host: rejected effect declaration contains live slots");
+            return .{ .admitted = result[0] == 1, .slot = slot, .drop = drop, .ok_tag = result[3], .err_tag = result[4] };
+        }
+
+        fn compiledEffectLookup(key: []const u8) ?usize {
+            var request: [max_effect_policy_bytes]u8 = undefined;
+            request[0] = 1;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const end = writeEffectTable(&request, 2 + key.len);
+            var result: [1]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..end], &result) != result.len)
+                @panic("ts core host: invalid compiled effect lookup result");
+            if (result[0] == 255) return null;
+            if (result[0] >= effects_table.len or !effects_table[result[0]].used or effects_table[result[0]].dropped)
+                @panic("ts core host: invalid compiled effect lookup slot");
+            return result[0];
+        }
+
         /// Arm (or re-arm) a one-shot delay. A live wire key reuses its
         /// slot: the engine timer replaces in place under the same
         /// engine key and restarts from now — the debounce discipline.
@@ -1771,28 +2023,33 @@ pub fn TsCoreHost(comptime core: type) type {
             // A delay has no err arm. Preserve an incumbent file stream and
             // fail closed instead of creating a second owner that Cmd.cancel
             // could not address unambiguously.
-            if (fileStreamOccupiesKey(key)) return;
-            const index = blk: {
-                if (key.len > 0) {
-                    if (findDelay(key)) |existing| break :blk existing;
-                }
-                break :blk freeDelayIndex() orelse
-                    @panic("ts core host: more than 16 armed delays - the delay table mirrors the engine's max_effect_timers");
+            const plan: DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclaration(key, after_ms, tag, reservedWireKeyOccupiedExcept(key, .delay), false) orelse return else blk: {
+                if (reservedWireKeyOccupiedExcept(key, .delay)) return;
+                const index = if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex();
+                break :blk .{
+                    .slot = index orelse @panic("ts core host: more than 16 armed delays - the delay table mirrors the engine's max_effect_timers"),
+                    .tag = tag,
+                    .interval_ms = intervalMs(after_ms),
+                };
             };
+            const index = plan.slot;
             const entry = &delays[index];
             entry.used = true;
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
-            entry.tag = tag;
+            entry.tag = plan.tag;
+            entry.full_result = false;
+            entry.mode = .one_shot;
             fx.startTimer(.{
                 .key = delay_key_base + index,
-                .interval_ms = intervalMs(after_ms),
+                .interval_ms = plan.interval_ms,
                 .mode = .one_shot,
                 .on_fire = delayFireMsg,
             });
         }
 
         fn findDelay(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeTimerPolicy")) return compiledDelayLookup(key);
             for (&delays, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -1808,7 +2065,49 @@ pub fn TsCoreHost(comptime core: type) type {
 
         // ------------------------------------------- spawn / fetch streams
 
-        const SpawnHead = struct { key: []const u8, line_tag: u8, exit_tag: u8, err_tag: u8 };
+        const SpawnHead = struct { key: []const u8, line_tag: u8, exit_tag: u8, err_tag: u8, complete_events: bool = false };
+
+        /// The engine copies the request and owns admission, pending routes,
+        /// cancellation and lifetime. Per-arm callback thunks retain the route
+        /// of each request, including refusals under an already occupied key.
+        fn issueSpawnExact(fx: *Fx, key: u64, line_tag: u8, exit_tag: u8, collect: bool, argv: []const []const u8, stdin: []const u8) void {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (exit_tag == index) {
+                    if (comptime exactSpawnArmShape(arm.type, false)) {
+                        const Exit = struct {
+                            fn message(exit: runtime_effects.EffectExit) Msg {
+                                return msgFromSpawnExit(index, exit, decimalFrame(exit.key));
+                            }
+                        };
+                        var options: Fx.SpawnOptions = .{ .key = key, .argv = argv,
+                            .stdin = if (stdin.len > 0) stdin else null,
+                            .output = if (collect) .collect else .lines, .on_exit = Exit.message };
+                        if (line_tag == spawn_no_line_tag) {
+                            fx.spawn(options);
+                            return;
+                        }
+                        inline for (msg_arms, 0..) |line_arm, line_index| {
+                            if (line_tag == line_index) {
+                                if (comptime exactSpawnArmShape(line_arm.type, true)) {
+                                    const Line = struct {
+                                        fn message(line: runtime_effects.EffectLine) Msg {
+                                            return msgFromSpawnLine(line_index, line, decimalFrame(line.key));
+                                        }
+                                    };
+                                    options.on_line = Line.message;
+                                    fx.spawn(options);
+                                    return;
+                                }
+                                @panic("ts core host: incompatible exact subprocess line arm");
+                            }
+                        }
+                        @panic("ts core host: invalid exact subprocess line tag");
+                    }
+                    @panic("ts core host: incompatible exact subprocess terminal arm");
+                }
+            }
+            @panic("ts core host: invalid exact subprocess terminal tag");
+        }
 
         /// Open a spawn stream: claim a non-retiring stream entry (the
         /// keyed-effect discipline's ONE exception — a live wire key
@@ -1825,19 +2124,18 @@ pub fn TsCoreHost(comptime core: type) type {
             argv: []const []const u8,
             stdin: []const u8,
         ) void {
-            if (head.key.len > 0 and (findStream(head.key) != null or fileStreamOccupiesKey(head.key))) {
-                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
-                return;
-            }
-            const index = freeStreamIndex() orelse {
-                // Resource refusal is an ordinary stream terminal. The
-                // engine would report the same rejection if it owned one
-                // more routing slot; the bridge table must not turn that
-                // public outcome into a process panic.
-                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
+            const index = if (comptime @hasDecl(core, "nativeStreamPolicy")) compiledStreamAdmission(head.key, false) else blk: {
+                if (head.key.len > 0 and (findStream(head.key) != null or reservedWireKeyOccupied(head.key))) break :blk null;
+                break :blk freeStreamIndex();
+            };
+            const slot = index orelse {
+                fx.stageLoopMsg(if (head.complete_events)
+                    msgFromSpawnExit(head.exit_tag, .{ .key = 0, .reason = .rejected }, fx.stageLoopKey(head.key))
+                else
+                    msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             };
-            const entry = &streams[index];
+            const entry = &streams[slot];
             entry.used = true;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
@@ -1845,10 +2143,11 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.exit_tag = head.exit_tag;
             entry.err_tag = head.err_tag;
             entry.collect = collect;
+            entry.complete_events = head.complete_events;
             entry.fetch = false;
             entry.damaged = false;
             fx.spawn(.{
-                .key = spawn_key_base + index,
+                .key = spawn_key_base + slot,
                 .argv = argv,
                 .stdin = if (stdin.len > 0) stdin else null,
                 .output = if (collect) .collect else .lines,
@@ -1871,17 +2170,15 @@ pub fn TsCoreHost(comptime core: type) type {
         /// replacing a source that has already delivered lines would splice
         /// two HTTP responses into one app-owned stream.
         fn issueFetchStream(fx: *Fx, head: SpawnHead, options: FetchStreamOptions) void {
-            if (head.key.len > 0 and
-                (findStream(head.key) != null or findEffect(head.key) != null or fileStreamOccupiesKey(head.key)))
-            {
-                fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
-                return;
-            }
-            const index = freeStreamIndex() orelse {
+            const index = if (comptime @hasDecl(core, "nativeStreamPolicy")) compiledStreamAdmission(head.key, true) else blk: {
+                if (head.key.len > 0 and (findStream(head.key) != null or findEffect(head.key) != null or reservedWireKeyOccupied(head.key))) break :blk null;
+                break :blk freeStreamIndex();
+            };
+            const slot = index orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
             };
-            const entry = &streams[index];
+            const entry = &streams[slot];
             entry.used = true;
             entry.key_len = head.key.len;
             @memcpy(entry.key[0..head.key.len], head.key);
@@ -1890,9 +2187,10 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.err_tag = head.err_tag;
             entry.collect = false;
             entry.fetch = true;
+            entry.complete_events = false;
             entry.damaged = false;
             fx.fetch(.{
-                .key = spawn_key_base + index,
+                .key = spawn_key_base + slot,
                 .method = options.method,
                 .url = options.url,
                 .headers = options.headers,
@@ -1906,6 +2204,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findStream(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) return compiledStreamLookup(key);
             for (&streams, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -1919,15 +2218,118 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
+        const max_stream_policy_bytes = 5 + max_wire_key_bytes + runtime_effects.max_effects * (2 + max_wire_key_bytes);
+
+        fn appendStreamTable(request: []u8, start: usize) usize {
+            var at = start;
+            for (streams) |entry| {
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(entry.key_len);
+                at += 2;
+                @memcpy(request[at..][0..entry.key_len], entry.wireKey());
+                at += entry.key_len;
+            }
+            return at;
+        }
+
+        fn compiledStreamSlot(request: []const u8) ?usize {
+            var result: [1]u8 = undefined;
+            if (core.nativeStreamPolicy(request, &result) != result.len) @panic("ts core host: invalid compiled stream slot result");
+            if (result[0] == 255) return null;
+            if (result[0] >= streams.len) @panic("ts core host: compiled stream slot outside table");
+            return result[0];
+        }
+
+        fn compiledStreamAdmission(key: []const u8, fetch: bool) ?usize {
+            var request: [max_stream_policy_bytes]u8 = undefined;
+            request[0] = 0;
+            request[1] = @intFromBool(fetch);
+            request[2] = @intFromBool(reservedWireKeyOccupied(key));
+            request[3] = @intFromBool(fetch and key.len > 0 and findEffect(key) != null);
+            request[4] = @intCast(key.len);
+            @memcpy(request[5..][0..key.len], key);
+            const end = appendStreamTable(&request, 5 + key.len);
+            const slot = compiledStreamSlot(request[0..end]) orelse return null;
+            if (streams[slot].used) @panic("ts core host: compiled stream admission selected occupied slot");
+            return slot;
+        }
+
+        fn compiledStreamLookup(key: []const u8) ?usize {
+            var request: [max_stream_policy_bytes]u8 = undefined;
+            request[0] = 1;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const end = appendStreamTable(&request, 2 + key.len);
+            const slot = compiledStreamSlot(request[0..end]) orelse return null;
+            if (!streams[slot].used) @panic("ts core host: compiled stream lookup selected unused slot");
+            return slot;
+        }
+
+        const StreamCompletion = struct { tag: u8, shape: enum { bytes, number, number_bytes }, damaged: bool, retire: bool, truncated: bool };
+
+        fn compiledStreamCompletion(request: []const u8) StreamCompletion {
+            var result: [5]u8 = undefined;
+            if (core.nativeStreamPolicy(request, &result) != result.len or result[1] > 2 or result[2] > 1 or result[3] > 1 or result[4] > 1)
+                @panic("ts core host: invalid compiled stream completion result");
+            return .{ .tag = result[0], .shape = @enumFromInt(result[1]), .damaged = result[2] != 0, .retire = result[3] != 0, .truncated = result[4] != 0 };
+        }
+
+        /// Copied portable plans borrow native-owned slot facts and key bytes.
+        /// OS operations and engine namespace checks stay in this host.
+        fn compiledFileStreamPlan(action: u8, key: []const u8, blocked: bool, slot: u8, op: u8, event: u8, outcome: u8, chunk_tag: u8, done_tag: u8, err_tag: u8) [8]u8 {
+            var request: [12 + max_wire_key_bytes + file_streams.len * (8 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0..12].* = .{ 15, action, @intCast(key.len), @intFromBool(blocked), slot, op, event, outcome, chunk_tag, done_tag, err_tag, 0 };
+            @memcpy(request[12..][0..key.len], key);
+            var at: usize = 12 + key.len;
+            for (&file_streams) |*entry| {
+                const name = if (entry.used) entry.wireKey() else "";
+                request[at..][0..8].* = .{ @intFromBool(entry.used), @intFromBool(entry.sink), @intFromBool(entry.busy), @intFromBool(entry.cancelling), entry.chunk_tag, entry.done_tag, entry.err_tag, @intCast(name.len) };
+                @memcpy(request[at + 8 ..][0..name.len], name);
+                at += 8 + name.len;
+            }
+            var result: [8]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[1] > 3 or result[3] > 3 or result[4] > 1 or result[5] > 1 or result[6] != 0 or result[7] != 0 or (result[0] != 255 and result[0] >= file_streams.len))
+                @panic("ts core host: invalid compiled file stream plan");
+            if (action == 5) {
+                if (result[0] != slot or result[1] != 0) @panic("ts core host: invalid compiled file completion owner");
+            } else if (result[0] != 255) {
+                const entry = &file_streams[result[0]];
+                if ((action == 0 or action >= 3) and (!entry.used or !std.mem.eql(u8, entry.wireKey(), key)))
+                    @panic("ts core host: invalid compiled file lookup owner");
+                if ((action == 1 or action == 2) and entry.used and (action == 2 or key.len == 0 or entry.sink or !std.mem.eql(u8, entry.wireKey(), key)))
+                    @panic("ts core host: compiled file admission overwrites another owner");
+                if (result[1] != 0) @panic("ts core host: compiled file plan admits a refused command");
+            }
+            return result;
+        }
+
         fn findFileStream(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(0, key, false, 0, 0, 0, 0, 0, 0, 0);
+                return if (plan[0] == 255) null else plan[0];
+            }
             for (&file_streams, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
             return null;
         }
 
-        fn fileStreamOccupiesKey(key: []const u8) bool {
-            return key.len > 0 and findFileStream(key) != null;
+        fn reservedWireKeyOccupied(key: []const u8) bool {
+            return reservedWireKeyOccupiedExcept(key, .none);
+        }
+
+        /// Complete results reserve one owner across every command family.
+        /// Same-family replacements retain the existing silent-drop contract.
+        fn reservedWireKeyOccupiedExcept(key: []const u8, family: enum { none, effect, delay }) bool {
+            if (key.len == 0) return false;
+            if (findFileStream(key) != null or findClipboardWrite(key) != null) return true;
+            if (family != .effect) if (findEffect(key)) |index| if (effects_table[index].full_result) return true;
+            // Capability ownership is the recorded wire key, independent of
+            // the compiled policy's cancellation lookup and routing decisions.
+            if (family != .delay) for (&delays) |*entry| {
+                if (entry.used and entry.full_result and std.mem.eql(u8, entry.wireKey(), key)) return true;
+            };
+            return false;
         }
 
         /// Every string-keyed command family shares one authored key surface.
@@ -1940,7 +2342,8 @@ pub fn TsCoreHost(comptime core: type) type {
                 findStream(key) != null or
                 findDelay(key) != null or
                 findPty(key) != null or
-                findDb(key) != null;
+                findDb(key) != null or
+                findClipboardWrite(key) != null;
         }
 
         fn freeFileStreamIndex() ?usize {
@@ -1949,6 +2352,18 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueReadFileStream(fx: *Fx, key: []const u8, chunk_tag: u8, done_tag: u8, err_tag: u8, path: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(1, key, wireKeyOccupiedOutsideFileStreams(key), 0, 0, 0, 0, chunk_tag, done_tag, err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(plan[2], "rejected"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.* = .{ .used = true, .key_len = key.len, .chunk_tag = chunk_tag, .done_tag = plan[2], .err_tag = err_tag };
+                @memcpy(entry.key[0..key.len], key);
+                fx.readFileStream(.{ .key = file_stream_key_base + plan[0], .path = path, .on_result = fileStreamResultMsg });
+                return;
+            }
             if (wireKeyOccupiedOutsideFileStreams(key)) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                 return;
@@ -1974,6 +2389,18 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileStream(fx: *Fx, head: RoutedHead, path: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(2, head.key, wireKeyOccupiedOutsideFileStreams(head.key), 0, 0, 0, 0, 0, head.ok_tag, head.err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(msgFromTagStaticBytes(plan[2], "rejected"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.* = .{ .used = true, .sink = true, .busy = true, .key_len = head.key.len, .done_tag = plan[2], .err_tag = head.err_tag };
+                @memcpy(entry.key[0..head.key.len], head.key);
+                fx.writeFileStream(.{ .key = file_stream_key_base + plan[0], .path = path, .on_result = fileStreamResultMsg });
+                return;
+            }
             if (head.key.len == 0 or findFileStream(head.key) != null or wireKeyOccupiedOutsideFileStreams(head.key)) {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return;
@@ -1989,6 +2416,19 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileChunk(fx: *Fx, head: RoutedHead, bytes: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(3, head.key, false, 0, 0, 0, 0, 0, head.ok_tag, head.err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(if (plan[1] == 3) msgFromTagStaticBytes(plan[2], "out_of_order") else msgFromTagStaticBytes(plan[2], "sink_missing"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.busy = true;
+                entry.done_tag = plan[2];
+                entry.err_tag = head.err_tag;
+                fx.writeFileChunk(.{ .key = file_stream_key_base + plan[0], .bytes = bytes, .on_result = fileStreamResultMsg });
+                return;
+            }
             const index = findFileStream(head.key) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
                 return;
@@ -2012,6 +2452,19 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueWriteFileClose(fx: *Fx, head: RoutedHead) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(4, head.key, false, 0, 0, 0, 0, 0, head.ok_tag, head.err_tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(if (plan[1] == 3) msgFromTagStaticBytes(plan[2], "out_of_order") else msgFromTagStaticBytes(plan[2], "sink_missing"));
+                    return;
+                }
+                const entry = &file_streams[plan[0]];
+                entry.busy = true;
+                entry.done_tag = plan[2];
+                entry.err_tag = head.err_tag;
+                fx.writeFileClose(.{ .key = file_stream_key_base + plan[0], .on_result = fileStreamResultMsg });
+                return;
+            }
             const index = findFileStream(head.key) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "sink_missing"));
                 return;
@@ -2039,6 +2492,18 @@ pub fn TsCoreHost(comptime core: type) type {
             const index = result.key - file_stream_key_base;
             if (index >= file_streams.len or !file_streams[index].used) @panic("ts core host: untracked file stream result");
             const entry = &file_streams[index];
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledFileStreamPlan(5, "", false, @intCast(index), @intFromEnum(result.op), @intFromEnum(result.event), @intFromEnum(result.outcome), 0, 0, 0);
+                if (plan[4] == 1) entry.used = false;
+                if (plan[5] == 1) entry.busy = false;
+                return switch (plan[3]) {
+                    0 => msgFromTagVoid(plan[2]),
+                    1 => msgFromTagBytes(plan[2], result.bytes),
+                    3 => msgFromTagBytes(plan[2], @tagName(result.outcome)),
+                    2 => msgFromTagNumber(plan[2], @floatFromInt(result.total)),
+                    else => unreachable,
+                };
+            }
             if (entry.cancelling and result.outcome == .cancelled) {
                 entry.used = false;
                 return msgFromTagBytes(entry.err_tag, "cancelled");
@@ -2082,6 +2547,14 @@ pub fn TsCoreHost(comptime core: type) type {
         /// complete.
         fn streamLineMsg(line: runtime_effects.EffectLine) Msg {
             const entry = streamAt(line.key);
+            if (entry.complete_events) return msgFromSpawnLine(entry.line_tag, line, entry.wireKey());
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) {
+                const plan = compiledStreamCompletion(&.{ 2, @intFromBool(entry.fetch), @intFromBool(entry.damaged), @intFromBool(line.truncated), @intFromBool(line.dropped_before != 0), entry.line_tag });
+                if (plan.shape != .bytes) @panic("ts core host: invalid compiled stream line payload");
+                entry.damaged = plan.damaged;
+                if (plan.retire) entry.used = false;
+                return msgFromTagBytes(plan.tag, line.line);
+            }
             if (entry.fetch and (line.truncated or line.dropped_before != 0)) {
                 entry.damaged = true;
             }
@@ -2097,6 +2570,19 @@ pub fn TsCoreHost(comptime core: type) type {
         /// with the reason name as bytes.
         fn spawnExitMsg(exit: runtime_effects.EffectExit) Msg {
             const entry = streamAt(exit.key);
+            if (entry.complete_events) {
+                entry.used = false;
+                return msgFromSpawnExit(entry.exit_tag, exit, entry.wireKey());
+            }
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) {
+                const plan = compiledStreamCompletion(&.{ 3, @intFromBool(entry.collect), @intFromBool(exit.reason == .exited), @intFromBool(exit.output_truncated), entry.exit_tag, entry.err_tag });
+                if (plan.retire) entry.used = false;
+                return switch (plan.shape) {
+                    .bytes => msgFromTagBytes(plan.tag, if (plan.truncated) "truncated" else @tagName(exit.reason)),
+                    .number => msgFromTagNumber(plan.tag, @floatFromInt(exit.code)),
+                    .number_bytes => msgFromTagNumberBytes("spawn exit", "{ code, output }", plan.tag, exit.code, exit.output),
+                };
+            }
             entry.used = false;
             if (exit.reason == .exited) {
                 if (!entry.collect) {
@@ -2118,6 +2604,16 @@ pub fn TsCoreHost(comptime core: type) type {
         /// shared stream entry, so no later line can route for the key.
         fn fetchStreamResultMsg(response: runtime_effects.EffectResponse) Msg {
             const entry = streamAt(response.key);
+            if (comptime @hasDecl(core, "nativeStreamPolicy")) {
+                const plan = compiledStreamCompletion(&.{ 4, @intFromBool(entry.damaged), @intFromBool(response.truncated), @intFromBool(response.dropped_before != 0), @intFromBool(response.outcome == .ok), entry.exit_tag, entry.err_tag });
+                entry.damaged = plan.damaged;
+                if (plan.retire) entry.used = false;
+                return switch (plan.shape) {
+                    .bytes => if (plan.truncated) msgFromTagStaticBytes(plan.tag, "truncated") else msgFromTagBytes(plan.tag, @tagName(response.outcome)),
+                    .number => msgFromTagNumber(plan.tag, @floatFromInt(response.status)),
+                    .number_bytes => @panic("ts core host: invalid compiled fetch terminal payload"),
+                };
+            }
             const damaged = entry.damaged or response.truncated or response.dropped_before != 0;
             entry.used = false;
             if (response.outcome == .ok) {
@@ -2125,6 +2621,206 @@ pub fn TsCoreHost(comptime core: type) type {
                 return msgFromTagNumber(entry.exit_tag, @floatFromInt(response.status));
             }
             return msgFromTagBytes(entry.err_tag, @tagName(response.outcome));
+        }
+
+        const MediaPlan = struct {
+            valid: bool,
+            slot: ?usize,
+            tag: u8,
+            retire: bool,
+            key: u64,
+            expected_bytes: u64,
+            source: platform.AudioCaptureSource,
+            sample_rate: u32,
+            capture_channels: u8,
+        };
+
+        /// The tables and capability identities remain native-owned. The
+        /// compiled core selects admission, routing and terminal retirement;
+        /// exact u64 keys cross as opaque bytes, never as rounded numbers.
+        fn compiledMediaPlan(
+            comptime family: u8,
+            operation: u8,
+            key_bits: u64,
+            event_kind: u8,
+            tag: u8,
+            source: platform.AudioCaptureSource,
+            sample_rate: u32,
+            capture_channels: u8,
+            expected: f64,
+            table: anytype,
+        ) MediaPlan {
+            return compiledMediaIdentityPlan(family, operation, key_bits, event_kind, tag, source, sample_rate, capture_channels, expected, table, false);
+        }
+
+        fn compiledMediaIdentityPlan(comptime family: u8, operation: u8, key_bits: u64, event_kind: u8, tag: u8, source: platform.AudioCaptureSource, sample_rate: u32, capture_channels: u8, expected: f64, table: anytype, words: bool) MediaPlan {
+            var request: [28 + @as(usize, @max(runtime_effects.max_effects, runtime_effects.max_effect_channels)) * 16]u8 = @splat(0);
+            request[0] = operation;
+            request[1] = family;
+            request[2] = @intCast(table.len);
+            request[3] = event_kind;
+            request[4] = tag;
+            request[5] = @intFromEnum(source);
+            request[6] = capture_channels;
+            request[7] = @intFromBool(words);
+            std.mem.writeInt(u64, request[8..16], key_bits, .little);
+            std.mem.writeInt(u32, request[16..20], sample_rate, .little);
+            std.mem.writeInt(u64, request[20..28], @bitCast(expected), .little);
+            for (table, 0..) |entry, slot| {
+                const at = 28 + slot * 16;
+                request[at] = @intFromBool(entry.used);
+                std.mem.writeInt(u64, request[at + 1 ..][0..8], if (comptime family == 0) entry.id else entry.key, .little);
+                request[at + 9] = entry.event_tag;
+                if (comptime family == 2) {
+                    request[at + 10] = @intFromEnum(entry.source);
+                    std.mem.writeInt(u32, request[at + 11 ..][0..4], entry.sample_rate, .little);
+                    request[at + 15] = entry.channels;
+                }
+            }
+            var result: [28]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0 .. 28 + table.len * 16], &result) != result.len or
+                result[0] > 1 or result[3] > 1 or result[4] > 1 or result[6] != 0 or result[7] != 0)
+                @panic("ts core host: invalid compiled media plan");
+            const slot: ?usize = if (result[1] == 255) null else result[1];
+            if (slot) |index| {
+                if (index >= table.len) @panic("ts core host: invalid compiled media slot");
+                if (operation != 3 and !table[index].used) @panic("ts core host: compiled media lookup names an idle slot");
+                if (operation == 3 and table[index].used) @panic("ts core host: compiled media admission names a live slot");
+            }
+            return .{
+                .valid = result[0] == 1,
+                .slot = slot,
+                .tag = result[2],
+                .retire = result[3] == 1,
+                .source = @enumFromInt(result[4]),
+                .capture_channels = result[5],
+                .key = std.mem.readInt(u64, result[8..16], .little),
+                .expected_bytes = std.mem.readInt(u64, result[16..24], .little),
+                .sample_rate = std.mem.readInt(u32, result[24..28], .little),
+            };
+        }
+
+        fn compiledMediaLookup(comptime family: u8, key: u64, table: anytype) ?usize {
+            return compiledMediaPlan(family, 7, key, 0, 0, .microphone, 0, 0, 0, table).slot;
+        }
+
+        const MediaTransportPlan = struct { action: u8, retire: bool, rekey: bool, value: f64 };
+
+        fn compiledMediaTransport(video: bool, used: bool, ownership: u8, stored: []const u8, key: []const u8, verb: u8, value: f64) MediaTransportPlan {
+            var request: [15 + max_wire_key_bytes * 2]u8 = @splat(0);
+            request[0] = 6;
+            request[1] = @intFromBool(video);
+            request[2] = @intFromBool(used);
+            request[3] = ownership;
+            request[4] = verb;
+            request[5] = @intCast(key.len);
+            request[6] = @intCast(stored.len);
+            std.mem.writeInt(u64, request[7..15], @bitCast(value), .little);
+            @memcpy(request[15..][0..key.len], key);
+            @memcpy(request[15 + key.len ..][0..stored.len], stored);
+            var result: [12]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0 .. 15 + key.len + stored.len], &result) != result.len or
+                (result[0] != 255 and result[0] > (if (video) @as(u8, 7) else @as(u8, 4))) or
+                result[1] > 1 or result[2] > 1 or result[3] != 0)
+                @panic("ts core host: invalid compiled media transport plan");
+            return .{ .action = result[0], .retire = result[1] == 1, .rekey = result[2] == 1, .value = @bitCast(std.mem.readInt(u64, result[4..12], .little)) };
+        }
+
+        const PlaybackLoadPlan = struct { accepted: bool, tag: u8, flags: u8, surface: u64, expected_bytes: u64 };
+
+        fn compiledPlaybackLoad(video: bool, tag: u8, flags: u8, value: f64, path: []const u8, url: []const u8) PlaybackLoadPlan {
+            var request: [24 + runtime_effects.max_effect_video_path_bytes]u8 = @splat(0);
+            request[0] = 8;
+            request[1] = @intFromBool(video);
+            request[2] = tag;
+            request[3] = flags;
+            std.mem.writeInt(u64, request[8..16], @bitCast(value), .little);
+            std.mem.writeInt(u32, request[16..20], @intCast(path.len), .little);
+            std.mem.writeInt(u32, request[20..24], @intCast(url.len), .little);
+            const size = @min(url.len, runtime_effects.max_effect_video_path_bytes);
+            @memcpy(request[24..][0..size], url[0..size]);
+            var result: [24]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0 .. 24 + size], &result) != result.len or result[0] > 1 or result[2] > 7 or
+                !std.mem.allEqual(u8, result[3..8], 0)) @panic("ts core host: invalid compiled playback load plan");
+            return .{ .accepted = result[0] == 1, .tag = result[1], .flags = result[2], .surface = std.mem.readInt(u64, result[8..16], .little), .expected_bytes = std.mem.readInt(u64, result[16..24], .little) };
+        }
+
+        fn issueAudioPlay(fx: *Fx, key: []const u8, tag: u8, path: []const u8, url: []const u8, cache: []const u8, expected: f64) void {
+            const plan: PlaybackLoadPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackLoad(false, tag, 0, expected, path, url)
+            else
+                .{ .accepted = true, .tag = tag, .flags = 0, .surface = 0, .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0) @intFromFloat(expected) else 0 };
+            if (!plan.accepted) @panic("ts core host: audio load cannot refuse bridge admission");
+            // Audio always commits before the capability, including failed sources.
+            audio_entry.used = true;
+            audio_entry.key_len = key.len;
+            @memcpy(audio_entry.key[0..key.len], key);
+            audio_entry.event_tag = plan.tag;
+            fx.playAudio(.{ .key = audio_key_base, .path = path, .url = url, .cache_path = effectiveAudioCachePath(cache, url), .expected_bytes = plan.expected_bytes, .on_event = audioEventMsg });
+        }
+
+        fn issueAudioPlayExact(fx: *Fx, key: u64, tag: u8, path: []const u8, url: []const u8, cache: []const u8, cache_dir: []const u8, expected: f64) void {
+            const plan: PlaybackLoadPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackLoad(false, tag, 0, expected, path, url)
+            else
+                .{ .accepted = true, .tag = tag, .flags = 0, .surface = 0, .expected_bytes = if (expected >= 1 and expected <= 9007199254740992.0) @intFromFloat(expected) else 0 };
+            if (!plan.accepted) @panic("ts core host: exact audio load cannot refuse bridge admission");
+            var cache_buffer: [runtime_effects.max_effect_audio_path_bytes]u8 = undefined;
+            const cache_path = if (cache.len > 0 or url.len == 0 or cache_dir.len == 0) cache else runtime_effects.audioCachePath(&cache_buffer, cache_dir, url) catch "";
+            inline for (msg_arms, 0..) |arm, index| {
+                if (plan.tag == index) {
+                    if (comptime exactAudioArmShape(arm.type)) {
+                        const Callback = struct {
+                            fn eventMsg(event: runtime_effects.EffectAudio) Msg {
+                                const bands = core.rt.frameAlloc(u8, event.bands.len);
+                                @memcpy(bands, &event.bands);
+                                return msgFromCapability(index, .{ .key = decimalFrame(event.key), .state = event.kind, .positionMs = decimalFrame(event.position_ms), .durationMs = decimalFrame(event.duration_ms), .playing = event.playing, .buffering = event.buffering, .bands = @as([]const u8, bands) });
+                            }
+                        };
+                        const options: Fx.PlayAudioOptions = .{ .key = key, .path = path, .url = url, .cache_path = cache_path, .expected_bytes = plan.expected_bytes, .on_event = Callback.eventMsg };
+                        // Rejection retains the prior native player and its compatibility route.
+                        if (!Fx.audioPlayRejected(options)) audio_entry.used = false;
+                        fx.playAudio(options);
+                        return;
+                    }
+                    @panic("ts core host: exact audio targets an incompatible message arm");
+                }
+            }
+            @panic("ts core host: invalid exact audio message tag");
+        }
+
+        fn issueVideoLoad(fx: *Fx, key: []const u8, tag: u8, surface: f64, path: []const u8, url: []const u8, flags: u8) void {
+            const plan: PlaybackLoadPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackLoad(true, tag, flags, surface, path, url)
+            else blk: {
+                const id: u64 = if (surface >= 1 and surface < 9007199254740992.0 and @floor(surface) == surface) @intFromFloat(surface) else 0;
+                const options: Fx.LoadVideoOptions = .{ .key = videoKeyForTag(tag), .surface = id, .path = path, .url = url, .on_event = videoEventMsg };
+                break :blk .{ .accepted = !Fx.videoLoadRejected(options), .tag = tag, .flags = flags & 7, .surface = id, .expected_bytes = 0 };
+            };
+            const options: Fx.LoadVideoOptions = .{ .key = videoKeyForTag(plan.tag), .surface = plan.surface, .path = path, .url = url, .autoplay = (plan.flags & 1) != 0, .loop = (plan.flags & 2) != 0, .muted = (plan.flags & 4) != 0, .on_event = videoEventMsg };
+            if (!plan.accepted) {
+                // Refusal leaves the surviving player's key, route and exact token intact.
+                fx.stageLoopMsg(msgFromTagVideo(plan.tag, .{ .key = options.key, .kind = .rejected }));
+                return;
+            }
+            video_entry.used = true;
+            video_entry.key_len = key.len;
+            @memcpy(video_entry.key[0..key.len], key);
+            video_entry.event_tag = plan.tag;
+            fx.loadVideo(options);
+            video_entry.token = fx.videoMintedToken();
+        }
+
+        fn compiledPlaybackEvent(video: bool, used: bool, tag: u8, key: u64) u8 {
+            var request: [12]u8 = @splat(0);
+            request[0] = 10;
+            request[1] = @intFromBool(video);
+            request[2] = @intFromBool(used);
+            request[3] = tag;
+            std.mem.writeInt(u64, request[4..12], key, .little);
+            var result: [1]u8 = undefined;
+            if (core.nativeEffectPolicy(&request, &result) != result.len) @panic("ts core host: invalid compiled playback event route");
+            return result[0];
         }
 
         // ------------------------------------------------- audio stream
@@ -2136,6 +2832,20 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the stream: the entry retires and later platform stragglers
         /// are the engine's to swallow.
         fn runAudioCtl(fx: *Fx, key: []const u8, verb: u8, value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaTransport(false, audio_entry.used, 1, audio_entry.wireKey(), key, verb, value);
+                if (plan.retire) audio_entry.used = false;
+                switch (plan.action) {
+                    0 => fx.pauseAudio(),
+                    1 => fx.resumeAudio(),
+                    2 => fx.stopAudio(),
+                    3 => fx.seekAudio(@intFromFloat(plan.value)),
+                    4 => fx.setAudioVolume(@floatCast(value)),
+                    255 => {},
+                    else => unreachable,
+                }
+                return;
+            }
             if (!audio_entry.used or !std.mem.eql(u8, audio_entry.wireKey(), key)) return;
             switch (verb) {
                 0 => fx.pauseAudio(),
@@ -2144,12 +2854,7 @@ pub fn TsCoreHost(comptime core: type) type {
                     audio_entry.used = false;
                     fx.stopAudio();
                 },
-                // The wire carries the app's f64; anything that is not a
-                // millisecond offset seeks to 0 (the engine clamps the
-                // high end to the duration itself).
                 3 => fx.seekAudio(if (value >= 0 and value <= 9007199254740992.0) @intFromFloat(value) else 0),
-                // The engine clamps volume to 0..1 (NaN clamps to the
-                // bound arithmetic's result deterministically).
                 4 => fx.setAudioVolume(@floatCast(value)),
                 else => @panic("ts core host: unknown audio_ctl verb wire value - the core and this runtime disagree on cmd_format_version"),
             }
@@ -2161,10 +2866,13 @@ pub fn TsCoreHost(comptime core: type) type {
         /// starts the next track from `completed`), and audio_ctl
         /// `stop` is the explicit close.
         fn audioEventMsg(event: runtime_effects.EffectAudio) Msg {
-            if (!audio_entry.used) {
-                @panic("ts core host: an audio event arrived with no open bridge stream");
-            }
-            return msgFromTagAudio(audio_entry.event_tag, event);
+            const tag = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackEvent(false, audio_entry.used, audio_entry.event_tag, event.key)
+            else blk: {
+                if (!audio_entry.used) @panic("ts core host: an audio event arrived with no open bridge stream");
+                break :blk audio_entry.event_tag;
+            };
+            return msgFromTagAudio(tag, event);
         }
 
         // ------------------------------------------------- video stream
@@ -2176,6 +2884,26 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the stream: the entry retires and later platform stragglers
         /// are the engine's to swallow.
         fn runVideoCtl(fx: *Fx, key: []const u8, verb: u8, value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const owner = fx.videoOwnerToken();
+                const ownership: u8 = if (owner == video_entry.token) 1 else if (owner == 0) 2 else 0;
+                const plan = compiledMediaTransport(true, video_entry.used, ownership, video_entry.wireKey(), key, verb, value);
+                if (plan.retire) video_entry.used = false;
+                switch (plan.action) {
+                    0 => fx.playVideo(),
+                    1 => fx.pauseVideo(),
+                    2 => fx.stopVideoCancel(video_entry.token),
+                    3 => fx.seekVideo(@intFromFloat(plan.value)),
+                    4 => fx.setVideoVolume(@floatCast(value)),
+                    5 => fx.setVideoMuted(plan.value != 0),
+                    6 => fx.setVideoLoop(plan.value != 0),
+                    7 => fx.restartVideo(),
+                    255 => {},
+                    else => unreachable,
+                }
+                if (plan.rekey) video_entry.token = fx.videoMintedToken();
+                return;
+            }
             if (!video_entry.used or !std.mem.eql(u8, video_entry.wireKey(), key)) return;
             if (verb == 2) {
                 // `Cmd.videoStop` is the stream's CANCEL: the engine
@@ -2233,6 +2961,10 @@ pub fn TsCoreHost(comptime core: type) type {
                 4 => fx.setVideoVolume(@floatCast(value)),
                 5 => fx.setVideoMuted(value != 0),
                 6 => fx.setVideoLoop(value != 0),
+                7 => {
+                    fx.restartVideo();
+                    video_entry.token = fx.videoMintedToken();
+                },
                 else => @panic("ts core host: unknown video_ctl verb wire value - the core and this runtime disagree on cmd_format_version"),
             }
         }
@@ -2252,7 +2984,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// starts the next clip from `completed`), and video_ctl
         /// `stop` is the explicit close.
         fn videoEventMsg(event: runtime_effects.EffectVideo) Msg {
-            return msgFromTagVideo(@intCast(event.key & 0xFF), event);
+            const tag = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPlaybackEvent(true, video_entry.used, video_entry.event_tag, event.key)
+            else
+                @as(u8, @intCast(event.key & 0xFF));
+            return msgFromTagVideo(tag, event);
         }
 
         /// Issue one image load. The keyed-effect discipline here is
@@ -2276,39 +3012,53 @@ pub fn TsCoreHost(comptime core: type) type {
             cache_path: []const u8,
             expected: f64,
         ) void {
-            // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
-            // grid steps by 2, so 2^53 is the first value that aliases
-            // a neighbor (2^53 + 1) on the wire — the bridge rejects it
-            // rather than guess which integer the app meant. 2^53 - 1
-            // is the last id every tier carries exactly.
-            const representable = std.math.isFinite(id_value) and
-                id_value >= 1 and id_value < 9007199254740992.0 and
-                @floor(id_value) == id_value;
-            if (!representable) {
-                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }));
-                return;
-            }
-            const id: u64 = @intFromFloat(id_value);
-            if (findImage(id) != null) {
-                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
-                return;
-            }
-            const index = freeImageIndex() orelse {
-                // All 16 entries hold live loads — one gallery screen's
-                // Cmd.batch reaches this. The engine answers its own
-                // slot exhaustion with a dynamic `.rejected` result, and
-                // the audio channel's exhaustion story is a quiet
-                // in-place replace; a full bridge table speaks the same
-                // vocabulary: exactly one rejected result through the
-                // event arm, never a crash — however many loads one
-                // batch stages against it.
-                fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
-                return;
+            const Selection = struct { key: u64, index: usize, tag: u8, expected_bytes: u64 };
+            const selection: ?Selection = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const plan = compiledMediaPlan(0, 3, @bitCast(id_value), 0, event_tag, .microphone, 0, 0, expected, &images);
+                const index = plan.slot orelse {
+                    fx.stageLoopMsg(msgFromTagImage(plan.tag, .{ .id = plan.key, .outcome = .rejected }));
+                    break :blk null;
+                };
+                break :blk .{ .key = plan.key, .index = index, .tag = plan.tag, .expected_bytes = plan.expected_bytes };
+            } else native: {
+                // Strictly BELOW 2^53 (the SDK contract): at 2^53 the f64
+                // grid steps by 2, so 2^53 is the first value that aliases
+                // a neighbor (2^53 + 1) on the wire — the bridge rejects it
+                // rather than guess which integer the app meant. 2^53 - 1
+                // is the last id every tier carries exactly.
+                const representable = std.math.isFinite(id_value) and
+                    id_value >= 1 and id_value < 9007199254740992.0 and
+                    @floor(id_value) == id_value;
+                if (!representable) {
+                    fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = 0, .outcome = .rejected }));
+                    break :native null;
+                }
+                const id: u64 = @intFromFloat(id_value);
+                if (findImage(id) != null) {
+                    fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
+                    break :native null;
+                }
+                const index = freeImageIndex() orelse {
+                    // All 16 entries hold live loads — one gallery screen's
+                    // Cmd.batch reaches this. The engine answers its own
+                    // slot exhaustion with a dynamic `.rejected` result, and
+                    // the audio channel's exhaustion story is a quiet
+                    // in-place replace; a full bridge table speaks the same
+                    // vocabulary: exactly one rejected result through the
+                    // event arm, never a crash — however many loads one
+                    // batch stages against it.
+                    fx.stageLoopMsg(msgFromTagImage(event_tag, .{ .id = id, .outcome = .rejected }));
+                    break :native null;
+                };
+                break :native .{ .key = id, .index = index, .tag = event_tag, .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected) @intFromFloat(expected) else 0 };
             };
+            const chosen = selection orelse return;
+            const id = chosen.key;
+            const index = chosen.index;
             const entry = &images[index];
             entry.used = true;
             entry.id = id;
-            entry.event_tag = event_tag;
+            entry.event_tag = chosen.tag;
             fx.loadImage(.{
                 .id = id,
                 .path = image_path,
@@ -2329,15 +3079,31 @@ pub fn TsCoreHost(comptime core: type) type {
                 // size every real download misses. 0 is the honest
                 // mapping; the emitter already stops the literal
                 // spellings (NS1030).
-                .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected)
-                    @intFromFloat(expected)
-                else
-                    0,
+                .expected_bytes = chosen.expected_bytes,
                 .on_result = imageResultMsg,
             });
         }
 
+        fn imageWordIdValid(id: u64) bool {
+            return id != 0 and id >> 63 == 0;
+        }
+
+        fn issueImageLoadWords(fx: *Fx, id: u64, tag: u8, image_path: []const u8, url: []const u8, cache: []const u8, expected: f64) void {
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledMediaIdentityPlan(0, 3, id, 0, tag, .microphone, 0, 0, expected, &images, true)
+            else
+                MediaPlan{ .valid = imageWordIdValid(id), .slot = if (imageWordIdValid(id) and findImage(id) == null) freeImageIndex() else null, .key = id, .tag = tag, .retire = false, .expected_bytes = if (expected >= 1 and expected < 9007199254740992.0 and @floor(expected) == expected) @intFromFloat(expected) else 0, .source = .microphone, .sample_rate = 0, .capture_channels = 0 };
+            const index = plan.slot orelse {
+                // Invalid identities still echo the complete requested words.
+                fx.stageLoopMsg(msgFromTagImage(tag, .{ .id = id, .outcome = .rejected }));
+                return;
+            };
+            images[index] = .{ .used = true, .id = plan.key, .event_tag = plan.tag };
+            fx.loadImage(.{ .id = plan.key, .path = image_path, .url = url, .cache_path = effectiveImageCachePath(cache, url), .expected_bytes = plan.expected_bytes, .on_result = imageResultMsg });
+        }
+
         fn findImage(id: u64) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(0, id, &images);
             for (&images, 0..) |*entry, index| {
                 if (entry.used and entry.id == id) return index;
             }
@@ -2363,13 +3129,18 @@ pub fn TsCoreHost(comptime core: type) type {
         /// bridge namespace), and every bridge key base sits above 2^53,
         /// so the cancel can never reach another table's slot.
         fn runImageCancel(fx: *Fx, id_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(0, 4, @bitCast(id_value), 0, 0, .microphone, 0, 0, 0, &images);
+                if (plan.slot != null) fx.cancelImage(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(id_value) and
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
             if (!representable) return;
             const id: u64 = @intFromFloat(id_value);
             if (findImage(id) == null) return;
-            fx.cancel(id);
+            fx.cancelImage(id);
         }
 
         /// The image_unregister record: free the registry slot under
@@ -2385,6 +3156,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// id the wire cannot carry exactly could never have been
         /// registered through this bridge, so it no-ops the same way.
         fn runImageUnregister(fx: *Fx, id_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(0, 4, @bitCast(id_value), 0, 0, .microphone, 0, 0, 0, &[_]ImageEntry{});
+                if (plan.valid) _ = fx.unregisterImage(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(id_value) and
                 id_value >= 1 and id_value < 9007199254740992.0 and
                 @floor(id_value) == id_value;
@@ -2396,6 +3172,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `ImageMsgFn` for image loads: the ONE terminal routes the
         /// entry's event arm and retires the entry.
         fn imageResultMsg(result: runtime_effects.EffectImageResult) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(0, 5, result.id, 0, 0, .microphone, 0, 0, 0, &images);
+                const index = plan.slot orelse @panic("ts core host: image result has no compiled owner");
+                if (plan.retire) images[index].used = false;
+                return msgFromTagImage(plan.tag, result);
+            }
             const index = findImage(result.id) orelse
                 @panic("ts core host: an image result arrived with no open bridge entry");
             const entry = &images[index];
@@ -2425,27 +3207,42 @@ pub fn TsCoreHost(comptime core: type) type {
             event_tag: u8,
             max_pending: u8,
         ) bool {
-            const representable = std.math.isFinite(key_value) and
-                key_value >= 1 and key_value < 9007199254740992.0 and
-                @floor(key_value) == key_value;
-            if (!representable) {
-                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
-                return false;
-            }
-            const key: u64 = @intFromFloat(key_value);
-            if (findChannel(key) != null) {
-                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return false;
-            }
-            const index = freeChannelIndex() orelse {
-                fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
-                return false;
+            const Selection = struct { key: u64, index: usize, tag: u8 };
+            const selection: ?Selection = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const plan = compiledMediaPlan(1, 3, @bitCast(key_value), 0, event_tag, .microphone, 0, 0, 0, &channels);
+                const index = plan.slot orelse {
+                    fx.stageLoopMsg(msgFromTagChannel(plan.tag, .{ .key = plan.key, .kind = .rejected }));
+                    break :blk null;
+                };
+                break :blk .{ .key = plan.key, .index = index, .tag = plan.tag };
+            } else native: {
+                const representable = std.math.isFinite(key_value) and
+                    key_value >= 1 and key_value < 9007199254740992.0 and
+                    @floor(key_value) == key_value;
+                if (!representable) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = 0, .kind = .rejected }));
+                    break :native null;
+                }
+                const key: u64 = @intFromFloat(key_value);
+                if (findChannel(key) != null) {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
+                    break :native null;
+                }
+                const index = freeChannelIndex() orelse {
+                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = key, .kind = .rejected }));
+                    break :native null;
+                };
+                break :native .{ .key = key, .index = index, .tag = event_tag };
             };
+            const chosen = selection orelse return false;
+            const key = chosen.key;
+            const index = chosen.index;
             const entry = &channels[index];
             entry.used = true;
             entry.key = key;
-            entry.event_tag = event_tag;
-            _ = fx.openChannel(.{
+            entry.event_tag = chosen.tag;
+            const already_open = fx.channelHandle(key) != null;
+            const opened = fx.openChannel(.{
                 .key = key,
                 .on_event = channelEventMsg,
                 .max_pending = max_pending,
@@ -2454,10 +3251,11 @@ pub fn TsCoreHost(comptime core: type) type {
             // both live execution and replay (whose accepted handle is inert).
             // Validation and capacity refusals stage their rejection without
             // leaving an open slot.
-            return fx.channelHandle(key) != null;
+            return opened.live() or (!already_open and fx.replayArmed() and fx.channelHandle(key) != null);
         }
 
         fn findChannel(key: u64) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(1, key, &channels);
             for (&channels, 0..) |*entry, index| {
                 if (entry.used and entry.key == key) return index;
             }
@@ -2481,6 +3279,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// convention; every bridge key base sits above 2^53, so this
         /// can never reach another table's slot).
         fn runChannelClose(fx: *Fx, key_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(1, 4, @bitCast(key_value), 0, 0, .microphone, 0, 0, 0, &channels);
+                if (plan.slot != null) fx.closeChannel(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
@@ -2495,6 +3298,17 @@ pub fn TsCoreHost(comptime core: type) type {
         /// terminals retire the entry (freeing the key for a fresh
         /// open), `data` events keep it live — the spawn stream shape.
         fn channelEventMsg(event: runtime_effects.EffectChannelEvent) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const kind: u8 = switch (event.kind) {
+                    .data => 0,
+                    .closed => 1,
+                    .rejected => 2,
+                };
+                const plan = compiledMediaPlan(1, 5, event.key, kind, 0, .microphone, 0, 0, 0, &channels);
+                const index = plan.slot orelse @panic("ts core host: channel event has no compiled owner");
+                if (plan.retire) channels[index].used = false;
+                return msgFromTagChannel(plan.tag, event);
+            }
             const index = findChannel(event.key) orelse
                 @panic("ts core host: a channel event arrived with no open bridge entry");
             const entry = &channels[index];
@@ -2512,62 +3326,77 @@ pub fn TsCoreHost(comptime core: type) type {
             capture_channels: u8,
             event_tag: u8,
         ) void {
-            const representable = std.math.isFinite(key_value) and
-                key_value >= 1 and key_value < 9007199254740992.0 and
-                @floor(key_value) == key_value;
-            const format: platform.AudioCaptureFormat = .{
-                .sample_rate = sample_rate,
-                .channels = capture_channels,
+            const Selection = struct { key: u64, index: usize, tag: u8, source: platform.AudioCaptureSource, rate: u32, channels: u8 };
+            const selection: ?Selection = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const plan = compiledMediaPlan(2, 3, @bitCast(key_value), 0, event_tag, source, sample_rate, capture_channels, 0, &audio_captures);
+                const index = plan.slot orelse {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(plan.tag, .{ .key = plan.key, .kind = .rejected, .source = plan.source, .sample_rate = plan.sample_rate, .channels = plan.capture_channels }));
+                    break :blk null;
+                };
+                break :blk .{ .key = plan.key, .index = index, .tag = plan.tag, .source = plan.source, .rate = plan.sample_rate, .channels = plan.capture_channels };
+            } else native: {
+                const representable = std.math.isFinite(key_value) and
+                    key_value >= 1 and key_value < 9007199254740992.0 and
+                    @floor(key_value) == key_value;
+                const format: platform.AudioCaptureFormat = .{
+                    .sample_rate = sample_rate,
+                    .channels = capture_channels,
+                };
+                if (!representable or !format.valid()) {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                        .key = if (representable) @intFromFloat(key_value) else 0,
+                        .kind = .rejected,
+                        .source = source,
+                        .sample_rate = sample_rate,
+                        .channels = capture_channels,
+                    }));
+                    break :native null;
+                }
+                const key: u64 = @intFromFloat(key_value);
+                if (findAudioCapture(key) != null) {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                        .key = key,
+                        .kind = .rejected,
+                        .source = source,
+                        .sample_rate = sample_rate,
+                        .channels = capture_channels,
+                    }));
+                    break :native null;
+                }
+                const index = freeAudioCaptureIndex() orelse {
+                    fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
+                        .key = key,
+                        .kind = .rejected,
+                        .source = source,
+                        .sample_rate = sample_rate,
+                        .channels = capture_channels,
+                    }));
+                    break :native null;
+                };
+                break :native .{ .key = key, .index = index, .tag = event_tag, .source = source, .rate = sample_rate, .channels = capture_channels };
             };
-            if (!representable or !format.valid()) {
-                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
-                    .key = if (representable) @intFromFloat(key_value) else 0,
-                    .kind = .rejected,
-                    .source = source,
-                    .sample_rate = sample_rate,
-                    .channels = capture_channels,
-                }));
-                return;
-            }
-            const key: u64 = @intFromFloat(key_value);
-            if (findAudioCapture(key) != null) {
-                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
-                    .key = key,
-                    .kind = .rejected,
-                    .source = source,
-                    .sample_rate = sample_rate,
-                    .channels = capture_channels,
-                }));
-                return;
-            }
-            const index = freeAudioCaptureIndex() orelse {
-                fx.stageLoopMsg(msgFromTagAudioCapture(event_tag, .{
-                    .key = key,
-                    .kind = .rejected,
-                    .source = source,
-                    .sample_rate = sample_rate,
-                    .channels = capture_channels,
-                }));
-                return;
-            };
+            const chosen = selection orelse return;
+            const key = chosen.key;
+            const index = chosen.index;
             audio_captures[index] = .{
                 .used = true,
                 .key = key,
-                .event_tag = event_tag,
-                .source = source,
-                .sample_rate = sample_rate,
-                .channels = capture_channels,
+                .event_tag = chosen.tag,
+                .source = chosen.source,
+                .sample_rate = chosen.rate,
+                .channels = chosen.channels,
             };
             fx.startAudioCapture(.{
                 .key = key,
-                .source = source,
-                .sample_rate = sample_rate,
-                .channels = capture_channels,
+                .source = chosen.source,
+                .sample_rate = chosen.rate,
+                .channels = chosen.channels,
                 .on_event = audioCaptureEventMsg,
             });
         }
 
         fn findAudioCapture(key: u64) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledMediaLookup(2, key, &audio_captures);
             for (&audio_captures, 0..) |*entry, index| {
                 if (entry.used and entry.key == key) return index;
             }
@@ -2582,6 +3411,11 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn runAudioCaptureStop(fx: *Fx, key_value: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledMediaPlan(2, 4, @bitCast(key_value), 0, 0, .microphone, 0, 0, 0, &audio_captures);
+                if (plan.slot != null) fx.stopAudioCapture(plan.key);
+                return;
+            }
             const representable = std.math.isFinite(key_value) and
                 key_value >= 1 and key_value < 9007199254740992.0 and
                 @floor(key_value) == key_value;
@@ -2592,6 +3426,23 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn audioCaptureEventMsg(channel_event: runtime_effects.EffectChannelEvent) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                var event = runtime_effects.decodeAudioCaptureChannelEvent(channel_event);
+                const kind: u8 = switch (event.kind) {
+                    .started => 0,
+                    .data => 1,
+                    .failed => 2,
+                    .stopped => 3,
+                    .rejected => 4,
+                };
+                const plan = compiledMediaPlan(2, 5, channel_event.key, kind, 0, event.source, event.sample_rate, event.channels, 0, &audio_captures);
+                const index = plan.slot orelse @panic("ts core host: capture event has no compiled owner");
+                event.source = plan.source;
+                event.sample_rate = plan.sample_rate;
+                event.channels = plan.capture_channels;
+                if (plan.retire) audio_captures[index].used = false;
+                return msgFromTagAudioCapture(plan.tag, event);
+            }
             const index = findAudioCapture(channel_event.key) orelse
                 @panic("ts core host: an audio capture event arrived with no open bridge entry");
             const entry = &audio_captures[index];
@@ -2618,6 +3469,44 @@ pub fn TsCoreHost(comptime core: type) type {
         /// "rejected" exit through the entry's own event arm — never
         /// silent — and a transport that could not start as one
         /// "spawn_failed".
+        const PtyPlan = struct { slot: ?usize, tag: u8, retire: bool, bind: bool, cols: u16, rows: u16, engine_key: u64 };
+
+        fn compiledPtyPlan(action: u8, key: []const u8, tag: u8, cols: f64, rows: f64, blocked: bool, event_key: u64, event_kind: u8) PtyPlan {
+            var request: [32 + max_wire_key_bytes + runtime_effects.max_effect_ptys * (4 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0] = 9;
+            request[1] = action;
+            request[2] = @intCast(ptys.len);
+            request[3] = @intFromBool(blocked);
+            request[4] = event_kind;
+            request[5] = tag;
+            request[6] = @intCast(key.len);
+            std.mem.writeInt(u64, request[8..16], event_key, .little);
+            std.mem.writeInt(u64, request[16..24], @bitCast(cols), .little);
+            std.mem.writeInt(u64, request[24..32], @bitCast(rows), .little);
+            @memcpy(request[32..][0..key.len], key);
+            var at: usize = 32 + key.len;
+            for (&ptys) |*entry| {
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intFromBool(entry.bound);
+                request[at + 2] = entry.event_tag;
+                request[at + 3] = @intCast(entry.key_len);
+                @memcpy(request[at + 4 ..][0..entry.key_len], entry.wireKey());
+                at += 4 + entry.key_len;
+            }
+            var result: [16]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[2] > 1 or result[3] > 1)
+                @panic("ts core host: invalid compiled PTY plan");
+            const slot: ?usize = if (result[0] == 255) null else result[0];
+            const engine_key = std.mem.readInt(u64, result[8..16], .little);
+            if (slot) |index| {
+                if (index >= ptys.len or engine_key != pty_key_base + index)
+                    @panic("ts core host: invalid compiled PTY identity");
+                if ((action == 0 and ptys[index].used) or ((action == 1 or action == 2 or action == 4) and !ptys[index].used))
+                    @panic("ts core host: compiled PTY plan names an invalid owner");
+            } else if (engine_key != 0) @panic("ts core host: absent compiled PTY identity is nonzero");
+            return .{ .slot = slot, .tag = result[1], .retire = result[2] == 1, .bind = result[3] == 1, .cols = std.mem.readInt(u16, result[4..6], .little), .rows = std.mem.readInt(u16, result[6..8], .little), .engine_key = engine_key };
+        }
+
         fn issuePtySpawn(
             fx: *Fx,
             key: []const u8,
@@ -2627,47 +3516,38 @@ pub fn TsCoreHost(comptime core: type) type {
             term: []const u8,
             argv: []const []const u8,
         ) void {
-            if (key.len > 0 and (findPty(key) != null or fileStreamOccupiesKey(key))) {
-                // The rejection is STAGED (delivered a later frame), so its
-                // key must be self-contained: the wire key points into this
-                // dispatch's command buffer, gone by delivery, so intern
-                // it in the engine's instance-lived staged-key store and
-                // reference that. The app's key rides the refusal,
-                // correlating it with its command — and the interned
-                // slice stays valid even committed into the model.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
-                return;
-            }
-            const index = freePtyIndex() orelse {
-                // The bridge table mirrors the engine's pty table, whose
-                // own exhaustion answer is the same rejected exit — one
-                // vocabulary for every refusal, never a crash. Staged, so
-                // the requested key rides the engine's interned
-                // instance-lived staged-key store, not the frame arena.
-                fx.stageLoopMsg(msgFromTagPty(event_tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
+            const plan: PtyPlan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledPtyPlan(0, key, event_tag, cols, rows, reservedWireKeyOccupied(key), 0, 0)
+            else blk: {
+                const index = if (key.len > 0 and (findPty(key) != null or reservedWireKeyOccupied(key))) null else reusableBoundPty(key) orelse freePtyIndex();
+                break :blk .{ .slot = index, .tag = event_tag, .retire = false, .bind = false, .cols = ptyDimension(cols), .rows = ptyDimension(rows), .engine_key = if (index) |i| pty_key_base + i else 0 };
+            };
+            const index = plan.slot orelse {
+                // Refusals outlive the borrowed command frame; intern their key.
+                fx.stageLoopMsg(msgFromTagPty(plan.tag, fx.stageLoopKey(key), true, .{ .key = 0, .kind = .exit, .reason = .rejected }));
                 return;
             };
             const entry = &ptys[index];
             entry.used = true;
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
-            entry.event_tag = event_tag;
+            entry.event_tag = plan.tag;
             if (term.len == 0) {
                 // Wire "" = "the engine's default TERM" — the record
                 // never bakes the default in (the fetch-timeout rule).
                 fx.ptySpawn(.{
-                    .key = pty_key_base + index,
+                    .key = plan.engine_key,
                     .argv = argv,
-                    .cols = ptyDimension(cols),
-                    .rows = ptyDimension(rows),
+                    .cols = plan.cols,
+                    .rows = plan.rows,
                     .on_event = ptyEventMsg,
                 });
             } else {
                 fx.ptySpawn(.{
-                    .key = pty_key_base + index,
+                    .key = plan.engine_key,
                     .argv = argv,
-                    .cols = ptyDimension(cols),
-                    .rows = ptyDimension(rows),
+                    .cols = plan.cols,
+                    .rows = plan.rows,
                     .term = term,
                     .on_event = ptyEventMsg,
                 });
@@ -2691,6 +3571,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// the engine's clamp would otherwise shrink the child to a
         /// 1x1 the app never asked for).
         fn runPtyResize(fx: *Fx, key: []const u8, cols: f64, rows: f64) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledPtyPlan(2, key, 0, cols, rows, false, 0, 0);
+                if (plan.slot != null) fx.ptyResize(plan.engine_key, plan.cols, plan.rows);
+                return;
+            }
             const index = findPty(key) orelse return;
             const c = ptyDimension(cols);
             const r = ptyDimension(rows);
@@ -2699,6 +3584,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findPty(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledPtyPlan(1, key, 0, 0, 0, false, 0, 0).slot;
             if (key.len == 0) return null;
             for (&ptys, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
@@ -2706,9 +3592,36 @@ pub fn TsCoreHost(comptime core: type) type {
             return null;
         }
 
+        /// Named terminal bindings reserve their identity until this host resets.
+        /// An ended grid remains addressable; another name cannot inherit it.
+        pub fn resolvePtyKey(key: []const u8) u64 {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledPtyPlan(3, key, 0, 0, 0, false, 0, 0);
+                if (plan.slot) |index| if (plan.bind) {
+                    ptys[index].bound = true;
+                };
+                return plan.engine_key;
+            }
+            if (key.len == 0) return 0;
+            for (&ptys, 0..) |*entry, index| {
+                if ((entry.used or entry.bound) and std.mem.eql(u8, entry.wireKey(), key)) {
+                    entry.bound = true;
+                    return pty_key_base + index;
+                }
+            }
+            return 0;
+        }
+
+        fn reusableBoundPty(key: []const u8) ?usize {
+            for (&ptys, 0..) |*entry, index| {
+                if (entry.bound and !entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            }
+            return null;
+        }
+
         fn freePtyIndex() ?usize {
             for (&ptys, 0..) |*entry, index| {
-                if (!entry.used) return index;
+                if (!entry.used and !entry.bound) return index;
             }
             return null;
         }
@@ -2718,6 +3631,12 @@ pub fn TsCoreHost(comptime core: type) type {
         /// (freeing the wire key for a fresh session), "output"
         /// batches keep it live — the spawn stream shape.
         fn ptyEventMsg(event: runtime_effects.EffectPtyEvent) Msg {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledPtyPlan(4, "", 0, 0, 0, false, event.key, @intFromEnum(event.kind));
+                const entry = &ptys[plan.slot orelse @panic("ts core host: compiled PTY event has no slot")];
+                if (plan.retire) entry.used = false;
+                return msgFromTagPty(plan.tag, entry.wireKey(), false, event);
+            }
             if (event.key < pty_key_base) {
                 @panic("ts core host: a pty event arrived outside the bridge's pty key namespace");
             }
@@ -2732,6 +3651,142 @@ pub fn TsCoreHost(comptime core: type) type {
             return msgFromTagPty(entry.event_tag, wire_key, false, event);
         }
 
+        /// Native owns slots and opaque handles; the policy borrows an exact
+        /// packed view and returns a copied plan before any capability runs.
+        fn compiledRequestPlan(action: u8, pool: RequestPool, key: []const u8, blocked: bool, reject_duplicate: bool, ok_tag: u8, err_tag: u8, ok_void: bool, result_ok: bool, result_slot: u8, channel_occupied: bool) [16]u8 {
+            var request: [16 + max_wire_key_bytes + requests.len * (15 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0..12].* = .{ 11, action, @intFromEnum(pool), @intCast(key.len), @intFromBool(blocked), @intFromBool(reject_duplicate), ok_tag, err_tag, @intFromBool(ok_void), @intFromBool(result_ok), result_slot, @intFromBool(channel_occupied) };
+            @memcpy(request[16..][0..key.len], key);
+            var at: usize = 16 + key.len;
+            for (&requests) |*entry| {
+                const name = if (entry.used) entry.wireKey() else "";
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(name.len);
+                @memcpy(request[at + 2 ..][0..name.len], name);
+                const route = at + 2 + name.len;
+                request[route..][0..5].* = .{ entry.ok_tag, entry.err_tag, @intFromBool(entry.ok_void), @intFromBool(entry.service_operation != null), @intFromBool(entry.service_channel != null) };
+                std.mem.writeInt(u64, request[route + 5 ..][0..8], entry.service_channel orelse 0, .little);
+                at = route + 13;
+            }
+            var result: [16]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[6] != 0 or result[7] != 0)
+                @panic("ts core host: invalid compiled request plan");
+            for (result[0..2]) |slot| if (slot != 255 and slot >= requests.len)
+                @panic("ts core host: invalid compiled request slot");
+            if (action == 0) {
+                if (result[4] > 1) @panic("ts core host: invalid compiled request void flag");
+                if (result[0] != 255 and requestPoolAt(result[0]) != pool) @panic("ts core host: compiled request names the wrong pool");
+                if (result[1] != 255 and (!requests[result[1]].used or requestPoolAt(result[1]) == pool or key.len == 0 or !std.mem.eql(u8, key, requests[result[1]].wireKey())))
+                    @panic("ts core host: invalid compiled request predecessor");
+                if (result[0] != 255 and requests[result[0]].used and (key.len == 0 or !std.mem.eql(u8, key, requests[result[0]].wireKey())))
+                    @panic("ts core host: compiled request overwrites another owner");
+            } else if (action == 1) {
+                if (result[0] != 255 and (!requests[result[0]].used or !std.mem.eql(u8, key, requests[result[0]].wireKey())))
+                    @panic("ts core host: invalid compiled request lookup");
+            } else if (action == 2) {
+                if (result[0] != result_slot or result[3] > 2 or result[4] > 1 or result[5] > 1 or
+                    (result[3] == 2 and requests[result_slot].service_operation == null) or
+                    (result[5] == 1 and (requests[result_slot].service_channel == null or std.mem.readInt(u64, result[8..16], .little) != requests[result_slot].service_channel.?)))
+                    @panic("ts core host: invalid compiled request completion");
+            } else if (result[3] > 3) @panic("ts core host: invalid compiled service guard");
+            return result;
+        }
+
+        fn compiledDbCommandPlan(action: u8, key: []const u8, blocked: bool, query: bool, page_tag: u8, done_tag: u8, err_tag: u8, result_slot: u8, result_kind: u8, outcome_ok: bool) [8]u8 {
+            var request: [12 + max_wire_key_bytes + dbs.len * (7 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0..12].* = .{ 14, action, @intCast(key.len), @intFromBool(blocked), @intFromBool(query), page_tag, done_tag, err_tag, result_slot, result_kind, @intFromBool(outcome_ok), 0 };
+            @memcpy(request[12..][0..key.len], key);
+            var at: usize = 12 + key.len;
+            for (&dbs) |*entry| {
+                const name = if (entry.used) entry.wireKey() else "";
+                request[at..][0..7].* = .{ @intFromBool(entry.used), @intFromBool(entry.query), @intFromBool(entry.live), entry.page_tag, entry.done_tag, entry.err_tag, @intCast(name.len) };
+                @memcpy(request[at + 7 ..][0..name.len], name);
+                at += 7 + name.len;
+            }
+            var result: [8]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[5] > 2 or result[6] > 1 or result[7] != 0 or (result[0] != 255 and result[0] >= dbs.len))
+                @panic("ts core host: invalid compiled database command plan");
+            if (action == 0 and result[0] != 255 and dbs[result[0]].used and (key.len == 0 or !std.mem.eql(u8, key, dbs[result[0]].wireKey()) or !dbs[result[0]].query or dbs[result[0]].live))
+                @panic("ts core host: compiled database command overwrites another owner");
+            if (action == 1 and result[0] != result_slot) @panic("ts core host: compiled database completion changed its owner");
+            return result;
+        }
+
+        fn appendCancellationSlot(request: []u8, at: *usize, used: bool, flags: u8, key: []const u8, err_tag: u8) void {
+            const name = if (used) key else "";
+            request[at.*..][0..3].* = .{ @intFromBool(used), flags, @intCast(name.len) };
+            @memcpy(request[at.* + 3 ..][0..name.len], name);
+            request[at.* + 3 + name.len] = err_tag;
+            at.* += 4 + name.len;
+        }
+
+        fn compiledCancelWireKey(fx: *Fx, key: []const u8) void {
+            const count = requests.len + effects_table.len + clipboard_writes.len + streams.len + file_streams.len + delays.len + dbs.len;
+            var request: [2 + max_wire_key_bytes + count * (4 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0] = 12;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            var at: usize = 2 + key.len;
+            for (&requests) |*e| appendCancellationSlot(&request, &at, e.used, @intFromBool(e.service_channel != null), e.wireKey(), e.err_tag);
+            for (&effects_table) |*e| appendCancellationSlot(&request, &at, e.used, @intFromBool(e.dropped), e.wireKey(), e.err_tag);
+            for (&clipboard_writes) |*e| appendCancellationSlot(&request, &at, e.used, 0, e.wireKey(), e.tag);
+            for (&streams) |*e| appendCancellationSlot(&request, &at, e.used, 0, e.wireKey(), e.err_tag);
+            for (&file_streams) |*e| appendCancellationSlot(&request, &at, e.used, @intFromBool(e.sink), e.wireKey(), e.err_tag);
+            for (&delays) |*e| appendCancellationSlot(&request, &at, e.used, 0, e.wireKey(), e.tag);
+            for (&dbs) |*e| appendCancellationSlot(&request, &at, e.used, @as(u8, @intFromBool(e.query)) | (@as(u8, @intFromBool(e.live)) << 1), e.wireKey(), e.err_tag);
+            var result: [8]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or (result[0] != 255 and result[0] > 6))
+                @panic("ts core host: invalid compiled cancellation plan");
+            for (result[2..6]) |flag| if (flag > 1) @panic("ts core host: invalid compiled cancellation flag");
+            if (result[7] > 1) @panic("ts core host: invalid compiled cancellation message flag");
+            if (result[0] == 255) return;
+            const slot: usize = result[1];
+            // Authenticate table ownership independently of portable selection.
+            const valid = switch (result[0]) {
+                0 => slot < requests.len and requests[slot].used and std.mem.eql(u8, key, requests[slot].wireKey()),
+                1 => slot < effects_table.len and effects_table[slot].used and !effects_table[slot].dropped and std.mem.eql(u8, key, effects_table[slot].wireKey()),
+                2 => slot < clipboard_writes.len and clipboard_writes[slot].used and std.mem.eql(u8, key, clipboard_writes[slot].wireKey()),
+                3 => slot < streams.len and streams[slot].used and std.mem.eql(u8, key, streams[slot].wireKey()),
+                4 => slot < file_streams.len and file_streams[slot].used and std.mem.eql(u8, key, file_streams[slot].wireKey()),
+                5 => slot < delays.len and delays[slot].used and std.mem.eql(u8, key, delays[slot].wireKey()),
+                6 => slot < dbs.len and dbs[slot].used and std.mem.eql(u8, key, dbs[slot].wireKey()),
+                else => unreachable,
+            };
+            if (!valid or key.len == 0 or (result[5] == 1 and (result[0] != 0 or requests[slot].service_channel == null)) or (result[4] == 1 and result[0] != 4))
+                @panic("ts core host: compiled cancellation names an invalid owner");
+            switch (result[0]) {
+                0 => {
+                    if (result[3] == 1) fx.cancelHostRequest(request_key_base + slot);
+                    if (result[2] == 1) requests[slot].used = false;
+                    if (result[5] == 1) fx.closeChannel(requests[slot].service_channel.?);
+                },
+                1 => if (result[3] == 1) {
+                    dropEffectEntry(fx, slot);
+                },
+                2 => if (result[3] == 1) {
+                    fx.cancelNonImage(clipboard_result_key_base + slot);
+                },
+                3 => if (result[3] == 1) {
+                    fx.cancelNonImage(spawn_key_base + slot);
+                },
+                4 => {
+                    if (result[2] == 1) file_streams[slot].used = false;
+                    if (result[4] == 1) file_streams[slot].cancelling = true;
+                    if (result[3] == 1) fx.cancelNonImage(file_stream_key_base + slot);
+                },
+                5 => {
+                    if (result[3] == 1) fx.cancelTimer(delay_key_base + slot);
+                    if (result[2] == 1) delays[slot].used = false;
+                },
+                6 => {
+                    if (result[3] == 1) fx.cancelDbQuery(db_key_base + slot);
+                    if (result[2] == 1) dbs[slot].used = false;
+                },
+                else => unreachable,
+            }
+            if (result[7] == 1) fx.stageLoopMsg(msgFromTagStaticBytes(result[6], "cancelled"));
+        }
+
         fn allocDbEntry(
             fx: *Fx,
             key: []const u8,
@@ -2740,28 +3795,38 @@ pub fn TsCoreHost(comptime core: type) type {
             done_tag: u8,
             err_tag: u8,
         ) ?usize {
-            if (fileStreamOccupiesKey(key)) {
-                fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
-                return null;
-            }
-            const index = blk: {
-                if (key.len > 0) {
-                    if (findDb(key)) |existing| {
-                        // One-shot queries replace only earlier one-shot
-                        // queries. A live subscription owns its slot until
-                        // subscription reconciliation removes or re-arms it;
-                        // a command with the same wire key must reject rather
-                        // than silently erase that subscription.
-                        if (query and dbs[existing].query and !dbs[existing].live) break :blk existing;
-                        fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
-                        return null;
-                    }
-                }
-                break :blk freeDbIndex() orelse {
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledDbCommandPlan(0, key, reservedWireKeyOccupied(key), query, page_tag, done_tag, err_tag, 0, 0, false)
+            else blk: {
+                if (reservedWireKeyOccupied(key)) {
                     fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                     return null;
+                }
+                const index = native: {
+                    if (key.len > 0) {
+                        if (findDb(key)) |existing| {
+                            // One-shot queries replace only earlier one-shot
+                            // queries. A live subscription owns its slot until
+                            // subscription reconciliation removes or re-arms it;
+                            // a command with the same wire key must reject rather
+                            // than silently erase that subscription.
+                            if (query and dbs[existing].query and !dbs[existing].live) break :native existing;
+                            fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                            return null;
+                        }
+                    }
+                    break :native freeDbIndex() orelse {
+                        fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
+                        return null;
+                    };
                 };
+                break :blk [8]u8{ @intCast(index), page_tag, done_tag, err_tag, 0, 0, 0, 0 };
             };
+            if (plan[0] == 255) {
+                fx.stageLoopMsg(msgFromTagStaticBytes(plan[3], "rejected"));
+                return null;
+            }
+            const index: usize = plan[0];
             const entry = &dbs[index];
             entry.used = true;
             entry.query = query;
@@ -2769,13 +3834,14 @@ pub fn TsCoreHost(comptime core: type) type {
             entry.signature = 0;
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
-            entry.page_tag = page_tag;
-            entry.done_tag = done_tag;
-            entry.err_tag = err_tag;
+            entry.page_tag = plan[1];
+            entry.done_tag = plan[2];
+            entry.err_tag = plan[3];
             return index;
         }
 
         fn findDb(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeDbPolicy")) return compiledDbLookup(key);
             if (key.len == 0) return null;
             for (&dbs, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
@@ -2792,6 +3858,21 @@ pub fn TsCoreHost(comptime core: type) type {
             if (result.key < db_key_base) @panic("ts core host: a relational result arrived outside the bridge DB key namespace");
             const index = result.key - db_key_base;
             if (index >= dbs.len or !dbs[index].used) @panic("ts core host: a relational result arrived for an untracked command");
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const kind: u8 = switch (result.kind) {
+                    .page => 0,
+                    .done => 1,
+                    .exec => 2,
+                };
+                const plan = compiledDbCommandPlan(1, "", false, false, 0, 0, 0, @intCast(index), kind, result.outcome == .ok);
+                if (plan[6] == 1) dbs[index].used = false;
+                return switch (plan[5]) {
+                    0 => msgFromTagBytes(plan[4], result.bytes),
+                    1 => msgFromTagVoid(plan[4]),
+                    2 => msgFromTagBytes(plan[4], @tagName(result.outcome)),
+                    else => unreachable,
+                };
+            }
             const entry = &dbs[index];
             if (result.outcome != .ok) {
                 if (!entry.live) entry.used = false;
@@ -2823,6 +3904,7 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Unknown keys are a no-op; the audio stream is not cancel's
         /// to end (audio_ctl `stop` closes it).
         fn cancelWireKey(fx: *Fx, key: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) return compiledCancelWireKey(fx, key);
             if (key.len == 0) return;
             if (findRequest(key)) |index| {
                 const entry = requests[index];
@@ -2838,10 +3920,14 @@ pub fn TsCoreHost(comptime core: type) type {
                 dropEffectEntry(fx, index);
                 return;
             }
+            if (findClipboardWrite(key)) |index| {
+                fx.cancelNonImage(clipboard_result_key_base + index);
+                return;
+            }
             if (findStream(key)) |index| {
                 // The engine's `.cancelled` terminal retires the entry in
                 // spawnExitMsg or fetchStreamResultMsg.
-                fx.cancel(spawn_key_base + index);
+                fx.cancelNonImage(spawn_key_base + index);
                 return;
             }
             if (findFileStream(key)) |index| {
@@ -2852,7 +3938,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 } else {
                     file_streams[index].cancelling = true;
                 }
-                fx.cancel(file_stream_key_base + index);
+                fx.cancelNonImage(file_stream_key_base + index);
                 return;
             }
             if (findDelay(key)) |index| {
@@ -2877,7 +3963,7 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
-        const RequestPool = enum { host, store, credentials };
+        const RequestPool = enum(u8) { host, store, credentials };
 
         fn requestPoolAt(index: usize) RequestPool {
             if (index < runtime_effects.max_effects) return .host;
@@ -2895,36 +3981,51 @@ pub fn TsCoreHost(comptime core: type) type {
             err_tag: u8,
             ok_void: bool,
             pool: RequestPool,
+            reject_duplicate: bool,
         ) ?u64 {
-            if (fileStreamOccupiesKey(key)) return null;
-            const index = blk: {
-                if (key.len > 0) {
-                    if (findRequest(key)) |existing| {
-                        if (requestPoolAt(existing) == pool) break :blk existing;
-                        fx.cancelHostRequest(request_key_base + existing);
-                        requests[existing].used = false;
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy"))
+                compiledRequestPlan(0, pool, key, reservedWireKeyOccupied(key), reject_duplicate, ok_tag, err_tag, ok_void, false, 0, false)
+            else blk: {
+                if (reject_duplicate and key.len > 0 and findRequest(key) != null) return null;
+                if (reservedWireKeyOccupied(key)) return null;
+                const index = native: {
+                    if (key.len > 0) {
+                        if (findRequest(key)) |existing| {
+                            if (requestPoolAt(existing) == pool) break :native existing;
+                            fx.cancelHostRequest(request_key_base + existing);
+                            requests[existing].used = false;
+                        }
                     }
-                }
-                break :blk switch (pool) {
-                    .host => freeRequestIndex(),
-                    .store => freeStoreRequestIndex(),
-                    .credentials => freeCredentialsRequestIndex(),
-                } orelse return null;
+                    break :native switch (pool) {
+                        .host => freeRequestIndex(),
+                        .store => freeStoreRequestIndex(),
+                        .credentials => freeCredentialsRequestIndex(),
+                    } orelse return null;
+                };
+                var result: [16]u8 = @splat(0);
+                result[0..5].* = .{ @intCast(index), 255, ok_tag, err_tag, @intFromBool(ok_void) };
+                break :blk result;
             };
+            if (plan[1] != 255) {
+                fx.cancelHostRequest(request_key_base + plan[1]);
+                requests[plan[1]].used = false;
+            }
+            if (plan[0] == 255) return null;
+            const index: usize = plan[0];
             const entry = &requests[index];
             entry.used = true;
             entry.key_len = key.len;
             @memcpy(entry.key[0..key.len], key);
-            entry.ok_tag = ok_tag;
-            entry.err_tag = err_tag;
-            entry.ok_void = ok_void;
+            entry.ok_tag = plan[2];
+            entry.err_tag = plan[3];
+            entry.ok_void = plan[4] == 1;
             entry.service_operation = null;
             entry.service_channel = null;
             return index;
         }
 
         fn allocStoreRequestEntry(fx: *Fx, head: RoutedHead, ok_void: bool) ?u64 {
-            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, .store) orelse {
+            const index = allocRequestEntry(fx, head.key, head.ok_tag, head.err_tag, ok_void, .store, false) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(head.err_tag, "rejected"));
                 return null;
             };
@@ -2932,7 +4033,7 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn allocCredentialsRequestEntry(fx: *Fx, key: []const u8, ok_tag: u8, err_tag: u8, ok_void: bool) ?u64 {
-            const index = allocRequestEntry(fx, key, ok_tag, err_tag, ok_void, .credentials) orelse {
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, ok_void, .credentials, false) orelse {
                 fx.stageLoopMsg(msgFromTagStaticBytes(err_tag, "rejected"));
                 return null;
             };
@@ -2950,11 +4051,7 @@ pub fn TsCoreHost(comptime core: type) type {
                 issueCredentialsRequest(fx, name, key, ok_tag, err_tag, payload);
                 return;
             }
-            if (key.len > 0 and findRequest(key) != null and (typed_service or fx.rejectsDuplicateHostRequestKeys())) {
-                stageRequestRejected(fx, err_tag);
-                return;
-            }
-            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, .host) orelse {
+            const index = allocRequestEntry(fx, key, ok_tag, err_tag, false, .host, typed_service or fx.rejectsDuplicateHostRequestKeys()) orelse {
                 stageRequestRejected(fx, err_tag);
                 return;
             };
@@ -2977,6 +4074,34 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn issueCredentialsRequest(fx: *Fx, name: []const u8, key: []const u8, ok_tag: u8, err_tag: u8, payload: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                if (name.len > 255) {
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
+                const request = core.rt.frameAlloc(u8, 2 + name.len + payload.len);
+                request[0] = 13;
+                request[1] = @intCast(name.len);
+                @memcpy(request[2..][0..name.len], name);
+                @memcpy(request[2 + name.len ..], payload);
+                var plan: [20]u8 = undefined;
+                if (core.nativeEffectPolicy(request, &plan) != plan.len or plan[0] > 1 or plan[1] > 2 or plan[2] != 0 or plan[3] != 0)
+                    @panic("ts core host: invalid compiled credential plan");
+                if (plan[0] == 0) {
+                    stageRequestRejected(fx, err_tag);
+                    return;
+                }
+                const credential_key = credentialPlanBytes(payload, plan[4..12]);
+                const secret = if (plan[1] == 0) credentialPlanBytes(payload, plan[12..20]) else "";
+                const request_key = allocCredentialsRequestEntry(fx, key, ok_tag, err_tag, plan[1] != 1) orelse return;
+                switch (plan[1]) {
+                    0 => fx.credentialsSet(.{ .key = request_key, .credential_key = credential_key, .secret = secret, .host_result = hostResultMsg }),
+                    1 => fx.credentialsGet(.{ .key = request_key, .credential_key = credential_key, .host_result = hostResultMsg }),
+                    2 => fx.credentialsDelete(.{ .key = request_key, .credential_key = credential_key, .host_result = hostResultMsg }),
+                    else => unreachable,
+                }
+                return;
+            }
             const is_set = std.mem.eql(u8, name, "core.credentials.set");
             const is_get = std.mem.eql(u8, name, "core.credentials.get");
             const is_delete = std.mem.eql(u8, name, "core.credentials.delete");
@@ -3033,6 +4158,13 @@ pub fn TsCoreHost(comptime core: type) type {
             }
         }
 
+        fn credentialPlanBytes(payload: []const u8, span: *const [8]u8) []const u8 {
+            const offset: usize = std.mem.readInt(u32, span[0..4], .little);
+            const length: usize = std.mem.readInt(u32, span[4..8], .little);
+            if (offset > payload.len or length > payload.len - offset) @panic("ts core host: compiled credential span is outside its borrowed packet");
+            return payload[offset .. offset + length];
+        }
+
         /// Credential records can also arrive through public `Cmd.request`,
         /// so their inner fields are untrusted even though the outer command
         /// wire was emitted correctly. Decode them fallibly and route a
@@ -3064,26 +4196,47 @@ pub fn TsCoreHost(comptime core: type) type {
             max_pending: u8,
             payload: []const u8,
         ) void {
-            if (key.len > 0 and (findRequest(key) != null or fileStreamOccupiesKey(key))) {
-                stageRequestRejected(fx, err_tag);
-                return;
-            }
-            // Fail the existing request-table bound before opening a channel;
-            // an admission failure must not leave an orphaned stream.
-            if (freeRequestIndex() == null) {
-                @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
-            }
-
-            const channel_key = exactEngineKey(channel_value);
-            if (channel_key) |value| {
-                // `findChannel` covers every TS bridge occupancy, including a
-                // rejected terminal waiting to drain. `channelHandle` also
-                // sees an open embedder-owned channel and replay's parked
-                // occupancy. Never let this service acquire either one.
-                if (findChannel(value) != null or fx.channelHandle(value) != null) {
-                    fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = value, .kind = .rejected }));
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const channel_key = exactEngineKey(channel_value);
+                const occupied = if (channel_key) |value| findChannel(value) != null or fx.channelHandle(value) != null else false;
+                const plan = compiledRequestPlan(3, .host, key, reservedWireKeyOccupied(key), true, ok_tag, err_tag, false, false, 0, occupied);
+                switch (plan[3]) {
+                    0 => {},
+                    1 => {
+                        stageRequestRejected(fx, err_tag);
+                        return;
+                    },
+                    2 => @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots"),
+                    3 => {
+                        const value = channel_key orelse @panic("ts core host: compiled service refusal names an invalid channel");
+                        fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = value, .kind = .rejected }));
+                        stageRequestRejected(fx, err_tag);
+                        return;
+                    },
+                    else => unreachable,
+                }
+            } else {
+                if (key.len > 0 and (findRequest(key) != null or reservedWireKeyOccupied(key))) {
                     stageRequestRejected(fx, err_tag);
                     return;
+                }
+                // Fail the existing request-table bound before opening a channel;
+                // an admission failure must not leave an orphaned stream.
+                if (freeRequestIndex() == null) {
+                    @panic("ts core host: more than 16 host requests in flight - the request table mirrors the engine's max_effects slots");
+                }
+
+                const channel_key = exactEngineKey(channel_value);
+                if (channel_key) |value| {
+                    // `findChannel` covers every TS bridge occupancy, including a
+                    // rejected terminal waiting to drain. `channelHandle` also
+                    // sees an open embedder-owned channel and replay's parked
+                    // occupancy. Never let this service acquire either one.
+                    if (findChannel(value) != null or fx.channelHandle(value) != null) {
+                        fx.stageLoopMsg(msgFromTagChannel(event_tag, .{ .key = value, .kind = .rejected }));
+                        stageRequestRejected(fx, err_tag);
+                        return;
+                    }
                 }
             }
 
@@ -3101,6 +4254,10 @@ pub fn TsCoreHost(comptime core: type) type {
         }
 
         fn findRequest(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledRequestPlan(1, .host, key, false, false, 0, 0, false, false, 0, false);
+                return if (plan[0] == 255) null else plan[0];
+            }
             for (&requests, 0..) |*entry, index| {
                 if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
             }
@@ -3144,6 +4301,18 @@ pub fn TsCoreHost(comptime core: type) type {
             if (index >= requests.len or !requests[index].used) {
                 @panic("ts core host: a host result arrived for a request the bridge is not tracking");
             }
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledRequestPlan(2, .host, "", false, false, 0, 0, false, result.ok, @intCast(index), false);
+                const entry = requests[index];
+                if (plan[4] == 1) requests[index].used = false;
+                if (plan[5] == 1) pending_service_channel_close = std.mem.readInt(u64, plan[8..16], .little);
+                return switch (plan[3]) {
+                    0 => msgFromTagBytes(plan[2], result.bytes),
+                    1 => msgFromTagVoid(plan[2]),
+                    2 => (service_results orelse @panic("ts core host: a typed service result arrived after its decoder was unbound")).decode_fn(entry.service_operation.?, plan[2], result.bytes),
+                    else => unreachable,
+                };
+            }
             const entry = &requests[index];
             entry.used = false;
             if (entry.service_channel) |channel_key| pending_service_channel_close = channel_key;
@@ -3163,17 +4332,72 @@ pub fn TsCoreHost(comptime core: type) type {
         /// Retire the named-op entry an engine terminal names and hand
         /// back its routing tags plus whether the entry was dropped —
         /// a dropped entry's terminal must be swallowed, not routed.
-        fn takeEffectEntry(key: u64) struct { ok_tag: u8, err_tag: u8, dropped: bool } {
-            if (key < effect_key_base) {
+        const EffectSuccess = enum(u8) { void_msg, bytes, stat, response };
+        const EffectPayload = enum(u8) { swallow, void_msg, bytes, stat, response, reason };
+        const EffectCompletion = struct { tag: u8, payload: EffectPayload, reason: u8 };
+
+        const BufferedFamily = enum(u8) { file, complete_file, fetch, clipboard };
+        const BufferedCompletion = struct { slot: usize, tag: u8, payload: u8, reason: u8, swallow: bool };
+
+        fn bufferedCompletion(key: u64, family: BufferedFamily, operation: u8, outcome: u8, truncated: bool) BufferedCompletion {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                var request: [88]u8 = @splat(0);
+                request[0..5].* = .{ 17, @intFromEnum(family), operation, outcome, @intFromBool(truncated) };
+                std.mem.writeInt(u64, request[8..16], key, .little);
+                std.mem.writeInt(u64, request[16..24], effect_key_base, .little);
+                for (&effects_table, 0..) |*entry, slot| {
+                    request[24 + slot * 4 ..][0..4].* = .{ @intFromBool(entry.used), @intFromBool(entry.dropped), entry.ok_tag, entry.err_tag };
+                }
+                var result: [8]u8 = undefined;
+                if (core.nativeEffectPolicy(&request, &result) != result.len or result[0] >= effects_table.len or
+                    !effects_table[result[0]].used or result[2] > 6 or result[3] > 2 or result[4] > 1 or result[5] > 1 or result[6] != 0 or result[7] != 0)
+                    @panic("ts core host: invalid compiled buffered completion plan");
+                if (result[4] == 1) effects_table[result[0]].used = false;
+                return .{ .slot = result[0], .tag = result[1], .payload = result[2], .reason = result[3], .swallow = result[5] == 1 };
+            }
+            const success: EffectSuccess = switch (family) {
+                .file => if (operation == @intFromEnum(runtime_effects.EffectFileOp.read)) .bytes else if (operation == @intFromEnum(runtime_effects.EffectFileOp.stat)) .stat else .void_msg,
+                .complete_file => .void_msg,
+                .fetch => .response,
+                .clipboard => .bytes,
+            };
+            const route = takeEffectEntry(key, success, family == .complete_file or outcome == 0, truncated);
+            return .{ .slot = @intCast(key - effect_key_base), .tag = route.tag, .payload = if (family == .complete_file) 6 else @intFromEnum(route.payload), .reason = route.reason, .swallow = route.payload == .swallow };
+        }
+
+        fn takeEffectEntry(key: u64, success: EffectSuccess, ok: bool, truncated: bool) EffectCompletion {
+            if (key < effect_key_base)
                 @panic("ts core host: an effect terminal arrived outside the bridge's named-op key namespace");
-            }
             const index = key - effect_key_base;
-            if (index >= effects_table.len or !effects_table[index].used) {
+            if (index >= effects_table.len or !effects_table[index].used)
                 @panic("ts core host: an effect terminal arrived for a named op the bridge is not tracking");
-            }
-            const entry = &effects_table[index];
-            entry.used = false;
-            return .{ .ok_tag = entry.ok_tag, .err_tag = entry.err_tag, .dropped = entry.dropped };
+            const plan = if (comptime @hasDecl(core, "nativeEffectPolicy")) blk: {
+                var request: [69]u8 = undefined;
+                request[0] = 2;
+                request[1] = @intCast(index);
+                request[2] = @intFromEnum(success);
+                request[3] = @intFromBool(ok);
+                request[4] = @intFromBool(truncated);
+                for (&effects_table, 0..) |*entry, slot| {
+                    const at = 5 + slot * 4;
+                    request[at] = @intFromBool(entry.used);
+                    request[at + 1] = @intFromBool(entry.dropped);
+                    request[at + 2] = entry.ok_tag;
+                    request[at + 3] = entry.err_tag;
+                }
+                var result: [4]u8 = undefined;
+                if (core.nativeEffectPolicy(&request, &result) != result.len or result[0] != index or result[2] > 5 or result[3] > 2)
+                    @panic("ts core host: invalid compiled effect completion result");
+                break :blk EffectCompletion{ .tag = result[1], .payload = @enumFromInt(result[2]), .reason = result[3] };
+            } else blk: {
+                const entry = &effects_table[index];
+                if (entry.dropped) break :blk EffectCompletion{ .tag = entry.err_tag, .payload = .swallow, .reason = 0 };
+                const cut = success == .response and truncated;
+                if (ok and !cut) break :blk EffectCompletion{ .tag = entry.ok_tag, .payload = @enumFromInt(@intFromEnum(success) + 1), .reason = 0 };
+                break :blk EffectCompletion{ .tag = entry.err_tag, .payload = .reason, .reason = if (ok and cut) 2 else 1 };
+            };
+            effects_table[index].used = false;
+            return plan;
         }
 
         /// A dropped entry's terminal (the `.cancelled` end of a
@@ -3191,15 +4415,73 @@ pub fn TsCoreHost(comptime core: type) type {
         /// arm; every non-ok outcome routes the err arm with the
         /// outcome's name as bytes. A dropped entry's terminal routes
         /// nothing — the silent drop.
+        fn parseExactUnsigned(decimal: []const u8) ?u64 {
+            if (decimal.len == 0 or decimal.len > 20 or (decimal.len > 1 and decimal[0] == '0')) return null;
+            for (decimal) |byte| if (byte < '0' or byte > '9') return null;
+            return std.fmt.parseInt(u64, decimal, 10) catch null;
+        }
+
+        fn parseExactTimerInterval(decimal: []const u8) ?u64 {
+            const value = parseExactUnsigned(decimal) orelse return null;
+            if (value > std.math.maxInt(u64) / std.time.ns_per_ms) return null;
+            return value;
+        }
+
+        fn armResultTimer(fx: *Fx, key: []const u8, ms: f64, tag: u8, mode: runtime_effects.TimerMode, native_range: bool) void {
+            const blocked = key.len > 0 and (reservedWireKeyOccupiedExcept(key, .delay) or findRequest(key) != null or findEffect(key) != null or findStream(key) != null or findPty(key) != null or findDb(key) != null);
+            const plan: ?DelayPlan = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledDelayDeclarationRange(key, ms, tag, blocked, true, native_range) else blk: {
+                if (blocked or !std.math.isFinite(ms) or ms < 1 or ms > (if (native_range) @as(f64, 18_446_744_073_709) else 31_536_000_000)) break :blk null;
+                const slot = (if (key.len > 0) findDelay(key) orelse freeDelayIndex() else freeDelayIndex()) orelse break :blk null;
+                break :blk .{ .slot = slot, .tag = tag, .interval_ms = intervalMs(ms) };
+            };
+            const admitted = plan orelse {
+                fx.stageLoopMsg(msgFromTimerResult(tag, .{ .key = 0, .outcome = .rejected }, fx.stageLoopKey(key)));
+                return;
+            };
+            const entry = &delays[admitted.slot];
+            entry.used = true;
+            entry.full_result = true;
+            entry.mode = mode;
+            entry.key_len = key.len;
+            @memcpy(entry.key[0..key.len], key);
+            entry.tag = admitted.tag;
+            fx.startTimer(.{ .key = delay_key_base + admitted.slot, .interval_ms = admitted.interval_ms, .mode = mode, .on_fire = delayFireMsg });
+        }
+        fn decimalFrame(value: anytype) []const u8 {
+            var buffer: [21]u8 = undefined;
+            const text = std.fmt.bufPrint(&buffer, "{d}", .{value}) catch unreachable;
+            if (value == 0) return "0";
+            const owned = core.rt.frameAlloc(u8, text.len);
+            @memcpy(owned, text);
+            return owned;
+        }
+        fn msgFromTimerResult(tag: u8, timer: runtime_effects.EffectTimer, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .timestampNs = decimalFrame(timer.timestamp_ns), .outcome = timer.outcome });
+        }
+        fn stageFileRejected(fx: *Fx, head: RoutedHead, operation: runtime_effects.EffectFileOp) void {
+            fx.stageLoopMsg(msgFromFileResult(head.ok_tag, .{ .key = 0, .op = operation, .outcome = .rejected }, fx.stageLoopKey(head.key)));
+        }
+        fn msgFromFileResult(tag: u8, result: runtime_effects.EffectFileResult, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .operation = result.op, .event = result.event, .outcome = result.outcome, .bytes = result.bytes, .totalBytes = decimalFrame(result.total), .mtimeMs = decimalFrame(result.mtime_ms), .exists = result.exists, .droppedBefore = result.dropped_before });
+        }
+        fn completeFileResultMsg(result: runtime_effects.EffectFileResult) Msg {
+            const route = bufferedCompletion(result.key, .complete_file, @intFromEnum(result.op), @intFromEnum(result.outcome), false);
+            if (route.payload != 6) @panic("ts core host: complete file received an incompatible payload plan");
+            if (route.swallow) swallow_next_dispatch = true;
+            return msgFromFileResult(route.tag, result, effects_table[route.slot].wireKey());
+        }
+
         fn fileResultMsg(result: runtime_effects.EffectFileResult) Msg {
-            const tags = takeEffectEntry(result.key);
-            if (tags.dropped) return swallowedMsg(tags.err_tag);
-            if (result.outcome == .ok) {
-                if (result.op == .read) return msgFromTagBytes(tags.ok_tag, result.bytes);
-                if (result.op == .stat) return msgFromTagFileStat(tags.ok_tag, result);
-                return msgFromTagVoid(tags.ok_tag);
-            }
-            return msgFromTagBytes(tags.err_tag, @tagName(result.outcome));
+            const route = bufferedCompletion(result.key, .file, @intFromEnum(result.op), @intFromEnum(result.outcome), false);
+            if (route.payload > 5) @panic("ts core host: file completion received an incompatible payload plan");
+            return switch (@as(EffectPayload, @enumFromInt(route.payload))) {
+                .swallow => swallowedMsg(route.tag),
+                .void_msg => msgFromTagVoid(route.tag),
+                .bytes => msgFromTagBytes(route.tag, result.bytes),
+                .stat => msgFromTagFileStat(route.tag, result),
+                .reason => msgFromTagBytes(route.tag, @tagName(result.outcome)),
+                .response => @panic("ts core host: file completion received a response payload plan"),
+            };
         }
 
         fn msgFromTagFileStat(tag: u8, result: runtime_effects.EffectFileResult) Msg {
@@ -3231,43 +4513,178 @@ pub fn TsCoreHost(comptime core: type) type {
         /// routes the err arm with the reason as bytes. A dropped
         /// entry's terminal routes nothing — the silent drop.
         fn fetchResultMsg(response: runtime_effects.EffectResponse) Msg {
-            const tags = takeEffectEntry(response.key);
-            if (tags.dropped) return swallowedMsg(tags.err_tag);
-            if (response.outcome == .ok and !response.truncated) {
-                return msgFromTagNumberBytes("fetch response", "{ status, body }", tags.ok_tag, response.status, response.body);
-            }
-            const reason = if (response.outcome == .ok) "truncated" else @tagName(response.outcome);
-            return msgFromTagBytes(tags.err_tag, reason);
+            const route = bufferedCompletion(response.key, .fetch, 0, @intFromEnum(response.outcome), response.truncated);
+            if (route.payload > 5) @panic("ts core host: fetch completion received an incompatible payload plan");
+            return switch (@as(EffectPayload, @enumFromInt(route.payload))) {
+                .swallow => swallowedMsg(route.tag),
+                .response => msgFromTagNumberBytes("fetch response", "{ status, body }", route.tag, response.status, response.body),
+                .reason => msgFromTagBytes(route.tag, if (route.reason == 2) "truncated" else @tagName(response.outcome)),
+                else => @panic("ts core host: fetch completion received an incompatible payload plan"),
+            };
         }
 
         /// `ClipboardMsgFn` for clip_read (writes are fire-and-forget
         /// and never route): ok routes the text bytes, everything else
         /// the outcome name. A dropped entry's terminal routes nothing
         /// — the silent drop.
+        fn compiledClipboardWritePlan(action: u8, key: []const u8, blocked: bool, slot: u8, tag: u8) [4]u8 {
+            var request: [8 + max_wire_key_bytes + clipboard_writes.len * (3 + max_wire_key_bytes)]u8 = @splat(0);
+            request[0..8].* = .{ 16, action, @intCast(key.len), @intFromBool(blocked), slot, tag, 0, 0 };
+            @memcpy(request[8..][0..key.len], key);
+            var at: usize = 8 + key.len;
+            for (&clipboard_writes) |*entry| {
+                const name = if (entry.used) entry.wireKey() else "";
+                request[at..][0..3].* = .{ @intFromBool(entry.used), entry.tag, @intCast(name.len) };
+                @memcpy(request[at + 3 ..][0..name.len], name);
+                at += 3 + name.len;
+            }
+            var result: [4]u8 = undefined;
+            if (core.nativeEffectPolicy(request[0..at], &result) != result.len or result[2] > 1 or result[3] != 0 or (result[0] != 255 and result[0] >= clipboard_writes.len))
+                @panic("ts core host: invalid compiled clipboard write plan");
+            if (action == 2) {
+                if (result[0] != slot) @panic("ts core host: invalid compiled clipboard completion owner");
+            } else if (result[0] != 255) {
+                const entry = &clipboard_writes[result[0]];
+                if (action == 0 and (key.len == 0 or !entry.used or !std.mem.eql(u8, entry.wireKey(), key)))
+                    @panic("ts core host: invalid compiled clipboard lookup owner");
+                if (action == 1 and entry.used) @panic("ts core host: compiled clipboard overwrites another owner");
+            }
+            return result;
+        }
+
+        fn findClipboardWrite(key: []const u8) ?usize {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledClipboardWritePlan(0, key, false, 0, 0);
+                return if (plan[0] == 255) null else plan[0];
+            }
+            if (key.len == 0) return null;
+            for (&clipboard_writes, 0..) |*entry, index| if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) return index;
+            return null;
+        }
+        fn issueClipboardWrite(fx: *Fx, key: []const u8, tag: u8, bytes: []const u8) void {
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledClipboardWritePlan(1, key, reservedWireKeyOccupied(key) or wireKeyOccupiedOutsideFileStreams(key), 0, tag);
+                if (plan[0] == 255) {
+                    fx.stageLoopMsg(msgFromClipboard(plan[1], .{ .key = 0, .outcome = .rejected }, fx.stageLoopKey(key)));
+                    return;
+                }
+                clipboard_writes[plan[0]] = .{ .used = true, .key = undefined, .key_len = key.len, .tag = plan[1] };
+                @memcpy(clipboard_writes[plan[0]].key[0..key.len], key);
+                fx.writeClipboard(.{ .key = clipboard_result_key_base + plan[0], .text = bytes, .on_result = clipboardWriteResultMsg });
+                return;
+            }
+            var slot: ?usize = null;
+            if (!reservedWireKeyOccupied(key) and !wireKeyOccupiedOutsideFileStreams(key)) {
+                for (&clipboard_writes, 0..) |*entry, index| if (!entry.used) {
+                    slot = index;
+                    break;
+                };
+            }
+            const index = slot orelse {
+                fx.stageLoopMsg(msgFromClipboard(tag, .{ .key = 0, .outcome = .rejected }, fx.stageLoopKey(key)));
+                return;
+            };
+            clipboard_writes[index] = .{ .used = true, .key = undefined, .key_len = key.len, .tag = tag };
+            @memcpy(clipboard_writes[index].key[0..key.len], key);
+            fx.writeClipboard(.{ .key = clipboard_result_key_base + index, .text = bytes, .on_result = clipboardWriteResultMsg });
+        }
+        fn clipboardWriteResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
+            if (result.key < clipboard_result_key_base) @panic("ts core host: clipboard result outside its namespace");
+            const index = result.key - clipboard_result_key_base;
+            if (index >= clipboard_writes.len or !clipboard_writes[index].used) @panic("ts core host: untracked clipboard completion");
+            const entry = &clipboard_writes[index];
+            if (comptime @hasDecl(core, "nativeEffectPolicy")) {
+                const plan = compiledClipboardWritePlan(2, "", false, @intCast(index), 0);
+                if (plan[2] == 1) entry.used = false;
+                return msgFromClipboard(plan[1], result, entry.wireKey());
+            }
+            entry.used = false;
+            return msgFromClipboard(entry.tag, result, entry.wireKey());
+        }
+        /// Match complete capability records by field NAME and type. Bytes are
+        /// borrowed only until this dispatch; the core ABI copies all retained
+        /// values into its committed graph. Native engine keys remain private.
+        fn msgFromCapability(tag: u8, record: anytype) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime @typeInfo(arm.type) == .@"struct" and @typeInfo(arm.type).@"struct".fields.len == @typeInfo(@TypeOf(record)).@"struct".fields.len) {
+                        var result: arm.type = undefined;
+                        inline for (@typeInfo(arm.type).@"struct".fields) |field| {
+                            if (comptime @hasField(@TypeOf(record), field.name)) {
+                                const value = @field(record, field.name);
+                                const V = @TypeOf(value);
+                                if (comptime @typeInfo(V) == .@"enum" and @typeInfo(field.type) == .@"enum") {
+                                    @field(result, field.name) = std.meta.stringToEnum(field.type, @tagName(value)) orelse @panic("ts core host: incomplete capability enum");
+                                } else if (comptime (@typeInfo(V) == .int or @typeInfo(V) == .comptime_int) and field.type == f64) {
+                                    @field(result, field.name) = @floatFromInt(value);
+                                } else if (comptime (@typeInfo(V) == .int or @typeInfo(V) == .comptime_int) and (@typeInfo(field.type) == .int)) {
+                                    @field(result, field.name) = @intCast(value);
+                                } else if (comptime V == f32 and field.type == f64) {
+                                    @field(result, field.name) = value;
+                                } else if (comptime V == field.type) {
+                                    @field(result, field.name) = value;
+                                } else @panic("ts core host: incompatible capability field type");
+                            } else @panic("ts core host: missing capability field");
+                        }
+                        return @unionInit(Msg, arm.name, result);
+                    }
+                    @panic("ts core host: invalid capability record arm");
+                }
+            }
+            @panic("ts core host: invalid capability message tag");
+        }
+        fn msgFromSpawnLine(tag: u8, line: runtime_effects.EffectLine, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .line = line.line, .truncated = line.truncated, .droppedBefore = line.dropped_before });
+        }
+        fn msgFromSpawnExit(tag: u8, exit: runtime_effects.EffectExit, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .code = exit.code, .reason = exit.reason, .droppedLines = exit.dropped_lines, .output = exit.output, .outputTruncated = exit.output_truncated, .stderrTail = exit.stderr_tail, .stderrTruncated = exit.stderr_truncated });
+        }
+        fn msgFromClipboard(tag: u8, result: runtime_effects.EffectClipboardResult, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .operation = result.op, .outcome = result.outcome, .text = result.text, .droppedBefore = result.dropped_before });
+        }
+        fn msgFromVideoSnapshot(tag: u8, snapshot: Fx.VideoSnapshot, key: []const u8) Msg {
+            return msgFromCapability(tag, .{ .key = key, .active = snapshot.active, .surface = snapshot.surface, .playing = snapshot.playing, .buffering = snapshot.buffering, .completed = snapshot.completed, .looping = snapshot.looping, .muted = snapshot.muted, .source = snapshot.source, .positionMs = snapshot.position_ms, .durationMs = snapshot.duration_ms, .width = snapshot.width, .height = snapshot.height, .volume = snapshot.volume });
+        }
+
         fn clipboardResultMsg(result: runtime_effects.EffectClipboardResult) Msg {
-            const tags = takeEffectEntry(result.key);
-            if (tags.dropped) return swallowedMsg(tags.err_tag);
-            if (result.outcome == .ok) return msgFromTagBytes(tags.ok_tag, result.text);
-            return msgFromTagBytes(tags.err_tag, @tagName(result.outcome));
+            const route = bufferedCompletion(result.key, .clipboard, 0, @intFromEnum(result.outcome), false);
+            if (route.payload > 5) @panic("ts core host: clipboard completion received an incompatible payload plan");
+            return switch (@as(EffectPayload, @enumFromInt(route.payload))) {
+                .swallow => swallowedMsg(route.tag),
+                .bytes => msgFromTagBytes(route.tag, result.text),
+                .reason => msgFromTagBytes(route.tag, @tagName(result.outcome)),
+                else => @panic("ts core host: clipboard completion received an incompatible payload plan"),
+            };
         }
 
         /// `TimerMsgFn` for one-shot delays: the slot retires on fire
         /// (platform one-shots self-stop) and the named arm dispatches
         /// with the fire time in fractional milliseconds.
         fn delayFireMsg(timer: runtime_effects.EffectTimer) Msg {
-            if (timer.outcome == .rejected) {
-                @panic("ts core host: the platform rejected a Cmd.delay timer (no timer service, or the fx timer table is full)");
+            if (comptime @hasDecl(core, "nativeTimerPolicy")) {
+                const plan = compiledTimerCompletion(timer, false);
+                const entry = &delays[plan[0]];
+                if (plan[3] == 1) entry.used = false;
+                return timerCompletionMsg(plan, timer, entry.wireKey());
             }
             if (timer.key < delay_key_base) {
                 @panic("ts core host: a delay fired outside the bridge's delay key namespace");
             }
             const index = timer.key - delay_key_base;
-            if (index >= delays.len or !delays[index].used) {
-                @panic("ts core host: a delay fired for a slot the bridge is not tracking");
+            if (index >= delays.len) @panic("ts core host: a delay fired outside the bridge's delay table");
+            const completion = blk: {
+                if (!delays[index].used) @panic("ts core host: a delay fired for a slot the bridge is not tracking");
+                break :blk .{ .slot = @as(usize, @intCast(index)), .tag = delays[index].tag };
+            };
+            const entry = &delays[completion.slot];
+            if (entry.full_result) {
+                if (entry.mode == .one_shot or timer.outcome == .rejected) entry.used = false;
+                return msgFromTimerResult(completion.tag, timer, entry.wireKey());
             }
-            delays[index].used = false;
+            if (timer.outcome == .rejected) @panic("ts core host: the platform rejected a Cmd.delay timer");
+            entry.used = false;
             const ms = @as(f64, @floatFromInt(timer.timestamp_ns)) / std.time.ns_per_ms;
-            return msgFromTagNumber(delays[index].tag, ms);
+            return msgFromTagNumber(completion.tag, ms);
         }
 
         // ----------------------------------------------- subscriptions
@@ -3280,9 +4697,20 @@ pub fn TsCoreHost(comptime core: type) type {
         /// everywhere, so record/replay walk identical tables.
         fn reconcileSubscriptions(fx: *Fx) void {
             if (comptime !has_subscriptions) return;
-            const subs = core.subscriptions(model_root);
+            const borrowed_subs = if (comptime use_runtime_model) core.runtimeSubscriptions(model_root) else core.subscriptions(model_root);
+            // A cycle policy may allocate in the compiler frame. Keep the
+            // stream in the shim arena, and reset both only in finishCycle.
+            const subs = if (comptime @hasDecl(core, "nativeTimerPolicy") or @hasDecl(core, "nativeDbPolicy") or @hasDecl(core, "nativeEffectPolicy")) blk: {
+                const copy = core.rt.frameAlloc(u8, borrowed_subs.len);
+                @memcpy(copy, borrowed_subs);
+                break :blk copy;
+            } else borrowed_subs;
             var seen_timers = [_]bool{false} ** timers.len;
             var seen_db = [_]bool{false} ** dbs.len;
+            var declared_shortcuts: [platform.max_global_shortcuts]DeclaredShortcut = undefined;
+            var declared_shortcut_count: usize = 0;
+            var rejected_now: [platform.max_global_shortcuts]u64 = undefined;
+            var rejected_now_count: usize = 0;
 
             // Free live DB slots whose wire keys disappeared before the pass
             // allocates replacements. Otherwise two independently valid sets
@@ -3307,18 +4735,51 @@ pub fn TsCoreHost(comptime core: type) type {
                         const every_bits = takeBytes(subs, &at, 8);
                         const every_ms: f64 = @bitCast(std.mem.readInt(u64, every_bits[0..8], .little));
                         const tag = takeByte(subs, &at);
-                        if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
-                            @panic("ts core host: Sub.timer interval must be between 1ms and one year");
-                        }
-                        var slot: ?usize = null;
-                        for (&timers, 0..) |*entry, index| {
-                            if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
-                        }
-                        if (slot) |index| {
-                            seen_timers[index] = true;
-                            const entry = &timers[index];
-                            if (entry.every_ms != every_ms) {
+                        if (comptime @hasDecl(core, "nativeTimerPolicy")) {
+                            const plan = compiledTimerDeclaration(key, every_ms, tag, &seen_timers);
+                            const entry = &timers[plan.slot];
+                            entry.used = true;
+                            entry.key_len = key.len;
+                            @memcpy(entry.key[0..key.len], key);
+                            entry.every_ms = every_ms;
+                            entry.tag = plan.tag;
+                            if (plan.start) fx.startTimer(.{
+                                .key = timer_key_base + plan.slot,
+                                .interval_ms = plan.interval_ms,
+                                .mode = .repeating,
+                                .on_fire = timerFireMsg,
+                            });
+                        } else {
+                            if (!(every_ms >= 1) or !(every_ms <= 31_536_000_000.0)) {
+                                @panic("ts core host: Sub.timer interval must be between 1ms and one year");
+                            }
+                            var slot: ?usize = null;
+                            for (&timers, 0..) |*entry, index| {
+                                if (entry.used and std.mem.eql(u8, entry.wireKey(), key)) slot = index;
+                            }
+                            if (slot) |index| {
+                                seen_timers[index] = true;
+                                const entry = &timers[index];
+                                if (entry.every_ms != every_ms) {
+                                    entry.every_ms = every_ms;
+                                    fx.startTimer(.{
+                                        .key = timer_key_base + index,
+                                        .interval_ms = intervalMs(every_ms),
+                                        .mode = .repeating,
+                                        .on_fire = timerFireMsg,
+                                    });
+                                }
+                                entry.tag = tag;
+                            } else {
+                                const index = freeTimerIndex() orelse
+                                    @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
+                                seen_timers[index] = true;
+                                const entry = &timers[index];
+                                entry.used = true;
+                                entry.key_len = key.len;
+                                @memcpy(entry.key[0..key.len], key);
                                 entry.every_ms = every_ms;
+                                entry.tag = tag;
                                 fx.startTimer(.{
                                     .key = timer_key_base + index,
                                     .interval_ms = intervalMs(every_ms),
@@ -3326,23 +4787,6 @@ pub fn TsCoreHost(comptime core: type) type {
                                     .on_fire = timerFireMsg,
                                 });
                             }
-                            entry.tag = tag;
-                        } else {
-                            const index = freeTimerIndex() orelse
-                                @panic("ts core host: more than 16 subscription timers - the timer table mirrors the engine's max_effect_timers");
-                            seen_timers[index] = true;
-                            const entry = &timers[index];
-                            entry.used = true;
-                            entry.key_len = key.len;
-                            @memcpy(entry.key[0..key.len], key);
-                            entry.every_ms = every_ms;
-                            entry.tag = tag;
-                            fx.startTimer(.{
-                                .key = timer_key_base + index,
-                                .interval_ms = intervalMs(every_ms),
-                                .mode = .repeating,
-                                .on_fire = timerFireMsg,
-                            });
                         }
                     },
                     // live query [op][key][page][done][err][sql bytes]
@@ -3365,23 +4809,29 @@ pub fn TsCoreHost(comptime core: type) type {
                         for (0..table_count) |index| tables[index] = takeShortBytes(subs, &at);
 
                         const signature = std.hash.Wyhash.hash(0, subs[record_start..at]);
-                        const index = findDb(key) orelse freeDbIndex() orelse
-                            @panic("ts core host: more relational commands and live queries are active than the database slot family can hold");
+                        const plan: DbPlan = if (comptime @hasDecl(core, "nativeDbPolicy")) compiledDbDeclaration(key, signature, page_tag, done_tag, err_tag, &seen_db) else blk: {
+                            const index = findDb(key) orelse freeDbIndex() orelse
+                                @panic("ts core host: more relational commands and live queries are active than the database slot family can hold");
+                            const entry = &dbs[index];
+                            if (entry.used and !entry.live) @panic("ts core host: a live-query key collides with an in-flight database command");
+                            if (seen_db[index]) @panic("ts core host: duplicate live-query subscription key");
+                            seen_db[index] = true;
+                            const changed = !entry.used or entry.signature != signature;
+                            break :blk .{ .slot = index, .start = changed, .stop = entry.used and changed, .page_tag = page_tag, .done_tag = done_tag, .err_tag = err_tag };
+                        };
+                        const index = plan.slot;
                         const entry = &dbs[index];
-                        if (entry.used and !entry.live) @panic("ts core host: a live-query key collides with an in-flight database command");
-                        if (seen_db[index]) @panic("ts core host: duplicate live-query subscription key");
-                        seen_db[index] = true;
-                        if (!entry.used or entry.signature != signature) {
-                            if (entry.used) fx.dbUnsubscribe(db_key_base + index);
+                        if (plan.stop) fx.dbUnsubscribe(db_key_base + index);
+                        if (plan.start) {
                             entry.* = .{
                                 .used = true,
                                 .query = true,
                                 .live = true,
                                 .signature = signature,
                                 .key_len = key.len,
-                                .page_tag = page_tag,
-                                .done_tag = done_tag,
-                                .err_tag = err_tag,
+                                .page_tag = plan.page_tag,
+                                .done_tag = plan.done_tag,
+                                .err_tag = plan.err_tag,
                             };
                             @memcpy(entry.key[0..key.len], key);
                             fx.dbSubscribe(.{
@@ -3393,15 +4843,258 @@ pub fn TsCoreHost(comptime core: type) type {
                             });
                         }
                     },
+                    0x03 => {
+                        const id = takeShortBytes(subs, &at);
+                        const key = takeLongBytes(subs, &at);
+                        const modifiers = @import("global_shortcuts.zig").modifiersFromMask(takeByte(subs, &at));
+                        const tag = takeByte(subs, &at);
+                        const duplicate = for (declared_shortcuts[0..declared_shortcut_count]) |declared| {
+                            if (std.mem.eql(u8, declared.shortcut.id, id)) break true;
+                        } else false;
+                        if (id.len == 0 or id.len > platform.max_shortcut_id_bytes or duplicate or declared_shortcut_count == declared_shortcuts.len) {
+                            const signature = std.hash.Wyhash.hash(tag, id);
+                            if (rejected_now_count == rejected_now.len) continue;
+                            rejected_now[rejected_now_count] = signature;
+                            rejected_now_count += 1;
+                            const reported = std.mem.indexOfScalar(u64, rejected_shortcuts[0..rejected_shortcut_count], signature) != null;
+                            if (!reported) fx.stageLoopMsg(msgFromTagGlobalShortcut(tag, .rejected, fx.stageLoopKey(id)));
+                            continue;
+                        }
+                        declared_shortcuts[declared_shortcut_count] = .{ .shortcut = .{ .id = id, .key = key[0..@min(key.len, platform.max_shortcut_key_bytes)], .modifiers = modifiers }, .tag = tag };
+                        declared_shortcut_count += 1;
+                    },
                     else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
                 }
             }
+            @memcpy(rejected_shortcuts[0..rejected_now_count], rejected_now[0..rejected_now_count]);
+            rejected_shortcut_count = rejected_now_count;
+            reconcileGlobalShortcuts(fx, declared_shortcuts[0..declared_shortcut_count]);
+            const cancellations: ?u16 = if (comptime @hasDecl(core, "nativeTimerPolicy")) compiledTimerCancellations(seen_timers) else null;
             for (&timers, 0..) |*entry, index| {
-                if (entry.used and !seen_timers[index]) {
+                const cancel = if (cancellations) |mask| mask & (@as(u16, 1) << @intCast(index)) != 0 else entry.used and !seen_timers[index];
+                if (cancel) {
                     entry.used = false;
                     fx.cancelTimer(timer_key_base + index);
                 }
             }
+        }
+
+        fn reconcileGlobalShortcuts(fx: *Fx, declared: []const DeclaredShortcut) void {
+            var changed = declared.len != global_shortcut_count;
+            var was_declared: [global_shortcuts.len]bool = undefined;
+            for (&global_shortcuts, &was_declared) |*entry, *was| {
+                was.* = entry.declared;
+                entry.declared = false;
+            }
+            var shortcuts: [platform.max_global_shortcuts]platform.Shortcut = undefined;
+            for (declared, 0..) |item, position| {
+                const index = findGlobalShortcut(item.shortcut.id) orelse freeGlobalShortcutIndex();
+                const entry = &global_shortcuts[index];
+                if (!was_declared[index] or !entry.binding.matches(item.shortcut)) changed = true;
+                entry.* = .{ .used = true, .declared = true, .binding = .init(item.shortcut), .tag = item.tag, .pressed = entry.pressed };
+                shortcuts[position] = entry.binding.shortcut();
+            }
+            global_shortcut_count = declared.len;
+            if (changed) fx.setGlobalShortcuts(.{ .key = global_shortcut_key, .shortcuts = shortcuts[0..declared.len], .on_event = globalShortcutEventMsg });
+        }
+
+        fn findGlobalShortcut(id: []const u8) ?usize {
+            for (&global_shortcuts, 0..) |*entry, index| {
+                if (entry.used and std.mem.eql(u8, entry.binding.shortcut().id, id)) return index;
+            }
+            return null;
+        }
+
+        fn freeGlobalShortcutIndex() usize {
+            for (&global_shortcuts, 0..) |*entry, index| {
+                if (!entry.used) return index;
+            }
+            for (&global_shortcuts, 0..) |*entry, index| {
+                if (!entry.declared and !entry.pressed) return index;
+            }
+            unreachable;
+        }
+
+        fn channelReportIndex() usize {
+            for (&global_shortcuts, 0..) |*entry, index| {
+                if (entry.declared) return index;
+            }
+            for (&global_shortcuts, 0..) |*entry, index| {
+                if (entry.used) return index;
+            }
+            @panic("ts core host: a global shortcut channel report arrived with no route");
+        }
+
+        fn globalShortcutEventMsg(event: runtime_effects.EffectChannelEvent) Msg {
+            const report = @import("global_shortcuts.zig").decodeChannelEvent(event);
+            const index = findGlobalShortcut(report.shortcut.id) orelse if (report.shortcut.id.len == 0)
+                channelReportIndex()
+            else
+                @panic("ts core host: a global shortcut report arrived with no bridge entry");
+            const entry = &global_shortcuts[index];
+            switch (report.kind) {
+                .pressed => entry.pressed = true,
+                .released => entry.pressed = false,
+                else => {},
+            }
+            var id: []const u8 = "";
+            if (report.shortcut.id.len > 0) {
+                const copy = core.rt.frameAlloc(u8, report.shortcut.id.len);
+                @memcpy(copy, report.shortcut.id);
+                id = copy;
+            }
+            return msgFromTagGlobalShortcut(entry.tag, report.kind, id);
+        }
+
+        const TimerPlan = struct { slot: usize, start: bool, tag: u8, interval_ms: u64 };
+
+        /// Native supplies owned table facts; TypeScript resolves slot order,
+        /// key matching, interval changes, routes and the seen set. The callback
+        /// copies the response and leaves both cycle arenas alive.
+        fn compiledTimerDeclaration(key: []const u8, every_ms: f64, tag: u8, seen: *[runtime_effects.max_effect_timers]bool) TimerPlan {
+            comptime std.debug.assert(runtime_effects.max_effect_timers == 16);
+            var request: [13 + max_wire_key_bytes + 16 * (10 + max_wire_key_bytes)]u8 = undefined;
+            request[0] = 0;
+            std.mem.writeInt(u16, request[1..3], timerSeenMask(seen.*), .little);
+            request[3] = @intCast(key.len);
+            @memcpy(request[4..][0..key.len], key);
+            var at: usize = 4 + key.len;
+            std.mem.writeInt(u64, request[at..][0..8], @bitCast(every_ms), .little);
+            request[at + 8] = tag;
+            at += 9;
+            for (&timers) |*entry| {
+                const length = if (entry.used) entry.key_len else 0;
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(length);
+                at += 2;
+                @memcpy(request[at..][0..length], entry.key[0..length]);
+                at += length;
+                std.mem.writeInt(u64, request[at..][0..8], @bitCast(if (entry.used) entry.every_ms else @as(f64, 0)), .little);
+                at += 8;
+            }
+            var result: [14]u8 = undefined;
+            if (core.nativeTimerPolicy(request[0..at], &result) != result.len or result[0] >= timers.len or result[1] > 1 or result[3] != 0)
+                @panic("ts core host: invalid compiled timer declaration result");
+            const rounded: f64 = @bitCast(std.mem.readInt(u64, result[4..12], .little));
+            if (!std.math.isFinite(rounded) or rounded < 1 or rounded > 31_536_000_000 or @floor(rounded) != rounded)
+                @panic("ts core host: invalid compiled timer interval result");
+            const mask = std.mem.readInt(u16, result[12..14], .little);
+            for (seen, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
+            return .{ .slot = result[0], .start = result[1] == 1, .tag = result[2], .interval_ms = @intFromFloat(rounded) };
+        }
+
+        const DelayPlan = struct { slot: usize, tag: u8, interval_ms: u64 };
+        const max_delay_policy_bytes = 12 + max_wire_key_bytes + 16 * (3 + max_wire_key_bytes);
+
+        /// Copy native-owned facts into a borrowed request. No policy call may
+        /// reset the command frame: later records in a batch still borrow it.
+        fn writeDelayTable(request: []u8, start: usize) usize {
+            comptime std.debug.assert(runtime_effects.max_effect_timers == 16);
+            var at = start;
+            for (&delays) |*entry| {
+                const length = if (entry.used) entry.key_len else 0;
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intCast(length);
+                at += 2;
+                @memcpy(request[at..][0..length], entry.key[0..length]);
+                at += length;
+                request[at] = entry.tag;
+                at += 1;
+            }
+            return at;
+        }
+
+        fn compiledDelayDeclaration(key: []const u8, after_ms: f64, tag: u8, blocked: bool, rejectable: bool) ?DelayPlan {
+            return compiledDelayDeclarationRange(key, after_ms, tag, blocked, rejectable, false);
+        }
+
+        fn compiledDelayDeclarationRange(key: []const u8, after_ms: f64, tag: u8, blocked: bool, rejectable: bool, native_range: bool) ?DelayPlan {
+            var request: [max_delay_policy_bytes]u8 = undefined;
+            request[0] = if (native_range) 8 else if (rejectable) 6 else 2;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const value_at = 2 + key.len;
+            std.mem.writeInt(u64, request[value_at..][0..8], @bitCast(after_ms), .little);
+            request[value_at + 8] = tag;
+            request[value_at + 9] = @intFromBool(blocked);
+            const at = writeDelayTable(&request, value_at + 10);
+            var result: [10]u8 = undefined;
+            if (core.nativeTimerPolicy(request[0..at], &result) != result.len)
+                @panic("ts core host: invalid compiled delay declaration result");
+            if (result[0] == 255) return null;
+            if (result[0] >= delays.len) @panic("ts core host: invalid compiled delay declaration slot");
+            const rounded: f64 = @bitCast(std.mem.readInt(u64, result[2..10], .little));
+            if (!std.math.isFinite(rounded) or rounded < 1 or rounded > (if (native_range) @as(f64, 18_446_744_073_709) else 31_536_000_000) or @floor(rounded) != rounded)
+                @panic("ts core host: invalid compiled delay interval result");
+            return .{ .slot = result[0], .tag = result[1], .interval_ms = @intFromFloat(rounded) };
+        }
+
+        fn compiledDelayLookup(key: []const u8) ?usize {
+            var request: [max_delay_policy_bytes]u8 = undefined;
+            request[0] = 3;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const at = writeDelayTable(&request, 2 + key.len);
+            var result: [1]u8 = undefined;
+            if (core.nativeTimerPolicy(request[0..at], &result) != result.len)
+                @panic("ts core host: invalid compiled delay lookup result");
+            if (result[0] == 255) return null;
+            if (result[0] >= delays.len or !delays[result[0]].used)
+                @panic("ts core host: invalid compiled delay lookup slot");
+            return result[0];
+        }
+
+        fn compiledTimerCompletion(timer: runtime_effects.EffectTimer, subscription: bool) [40]u8 {
+            var request: [96]u8 = @splat(0);
+            request[0..3].* = .{ 7, @intFromBool(subscription), @intFromEnum(timer.outcome) };
+            std.mem.writeInt(u64, request[4..12], timer.key, .little);
+            std.mem.writeInt(u64, request[12..20], timer.timestamp_ns, .little);
+            std.mem.writeInt(u64, request[20..28], if (subscription) timer_key_base else delay_key_base, .little);
+            for (0..16) |slot| {
+                request[32 + slot * 4 ..][0..4].* = if (subscription)
+                    .{ @intFromBool(timers[slot].used), 0, 0, timers[slot].tag }
+                else
+                    .{ @intFromBool(delays[slot].used), @intFromBool(delays[slot].full_result), @intFromEnum(delays[slot].mode), delays[slot].tag };
+            }
+            var result: [40]u8 = undefined;
+            if (core.nativeTimerPolicy(&request, &result) != result.len or result[0] >= 16 or result[2] > 1 or result[3] > 1 or result[4] < 1 or result[4] > 20 or
+                result[5] != 0 or result[6] != 0 or result[7] != 0 or !std.math.isFinite(@as(f64, @bitCast(std.mem.readInt(u64, result[8..16], .little)))))
+                @panic("ts core host: invalid compiled timer completion plan");
+            for (result[16..][0..result[4]]) |digit| if (digit < '0' or digit > '9') @panic("ts core host: invalid compiled timer timestamp");
+            return result;
+        }
+
+        fn timerCompletionMsg(plan: [40]u8, timer: runtime_effects.EffectTimer, key: []const u8) Msg {
+            if (plan[2] == 0) return msgFromTagNumber(plan[1], @bitCast(std.mem.readInt(u64, plan[8..16], .little)));
+            // The copied plan is stack-owned. Its decimal bytes must survive
+            // in the dispatch frame until the app consumes the complete Msg.
+            const timestamp = core.rt.frameAlloc(u8, plan[4]);
+            @memcpy(timestamp, plan[16..][0..plan[4]]);
+            return msgFromCapability(plan[1], .{ .key = key, .timestampNs = @as([]const u8, timestamp), .outcome = timer.outcome });
+        }
+
+        fn timerSeenMask(seen: [runtime_effects.max_effect_timers]bool) u16 {
+            var mask: u16 = 0;
+            for (seen, 0..) |value, index| if (value) {
+                mask |= @as(u16, 1) << @intCast(index);
+            };
+            return mask;
+        }
+
+        fn compiledTimerCancellations(seen: [runtime_effects.max_effect_timers]bool) u16 {
+            var used: u16 = 0;
+            for (&timers, 0..) |*entry, index| if (entry.used) {
+                used |= @as(u16, 1) << @intCast(index);
+            };
+            var request: [5]u8 = undefined;
+            request[0] = 1;
+            std.mem.writeInt(u16, request[1..3], used, .little);
+            std.mem.writeInt(u16, request[3..5], timerSeenMask(seen), .little);
+            var result: [2]u8 = undefined;
+            if (core.nativeTimerPolicy(&request, &result) != result.len) @panic("ts core host: invalid compiled timer cancellation result");
+            const mask = std.mem.readInt(u16, &result, .little);
+            if (mask & ~used != 0) @panic("ts core host: invalid compiled timer cancellation slots");
+            return mask;
         }
 
         /// Parse the inert subscription stream without mutating it and mark
@@ -3410,12 +5103,21 @@ pub fn TsCoreHost(comptime core: type) type {
         /// before it allocates any new ones.
         fn retainedDbSubscriptions(subs: []const u8) [runtime_effects.max_db_effects]bool {
             var retained = [_]bool{false} ** runtime_effects.max_db_effects;
+            // Keep the complete key list separate from the borrowed stream;
+            // policy allocation never revokes subsequent subscription records.
+            const request: []u8 = if (comptime @hasDecl(core, "nativeDbPolicy")) core.rt.frameAlloc(u8, subs.len + max_db_policy_bytes + 5) else &.{};
+            var keys_at: usize = 5;
             var at: usize = 0;
             while (at < subs.len) switch (takeByte(subs, &at)) {
                 0x01 => {
                     _ = takeShortBytes(subs, &at);
                     _ = takeBytes(subs, &at, 8);
                     _ = takeByte(subs, &at);
+                },
+                0x03 => {
+                    _ = takeShortBytes(subs, &at);
+                    _ = takeLongBytes(subs, &at);
+                    _ = takeBytes(subs, &at, 2);
                 },
                 0x02 => {
                     const key = takeShortBytes(subs, &at);
@@ -3430,13 +5132,80 @@ pub fn TsCoreHost(comptime core: type) type {
                     const table_count: usize = @intCast(takeU32(subs, &at));
                     if (table_count == 0 or table_count > runtime_effects.max_effect_db_live_tables) @panic("ts core host: a live query carries an invalid dependency table set");
                     for (0..table_count) |_| _ = takeShortBytes(subs, &at);
-                    if (findDb(key)) |index| {
+                    if (comptime @hasDecl(core, "nativeDbPolicy")) {
+                        request[keys_at] = @intCast(key.len);
+                        keys_at += 1;
+                        @memcpy(request[keys_at..][0..key.len], key);
+                        keys_at += key.len;
+                    } else if (findDb(key)) |index| {
                         if (dbs[index].live) retained[index] = true;
                     }
                 },
                 else => @panic("ts core host: unknown subscription wire record - the core and this runtime disagree on cmd_format_version"),
             };
+            if (comptime @hasDecl(core, "nativeDbPolicy")) {
+                request[0] = 1;
+                std.mem.writeInt(u32, request[1..5], @intCast(keys_at - 5), .little);
+                const end = writeDbTable(request, keys_at);
+                var result: [2]u8 = undefined;
+                if (core.nativeDbPolicy(request[0..end], &result) != result.len) @panic("ts core host: invalid compiled database retention result");
+                const mask = std.mem.readInt(u16, &result, .little);
+                for (&retained, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
+            }
             return retained;
+        }
+
+        const DbPlan = struct { slot: usize, start: bool, stop: bool, page_tag: u8, done_tag: u8, err_tag: u8 };
+        const max_db_policy_bytes = 15 + max_wire_key_bytes + 16 * (11 + max_wire_key_bytes);
+
+        fn writeDbTable(request: []u8, start: usize) usize {
+            comptime std.debug.assert(runtime_effects.max_db_effects == 16);
+            var at = start;
+            for (&dbs) |*entry| {
+                const length = if (entry.used) entry.key_len else 0;
+                request[at] = @intFromBool(entry.used);
+                request[at + 1] = @intFromBool(entry.live);
+                request[at + 2] = @intCast(length);
+                at += 3;
+                @memcpy(request[at..][0..length], entry.key[0..length]);
+                at += length;
+                std.mem.writeInt(u64, request[at..][0..8], entry.signature, .little);
+                at += 8;
+            }
+            return at;
+        }
+
+        fn compiledDbLookup(key: []const u8) ?usize {
+            var request: [max_db_policy_bytes]u8 = undefined;
+            request[0] = 0;
+            request[1] = @intCast(key.len);
+            @memcpy(request[2..][0..key.len], key);
+            const at = writeDbTable(&request, 2 + key.len);
+            var result: [1]u8 = undefined;
+            if (core.nativeDbPolicy(request[0..at], &result) != result.len) @panic("ts core host: invalid compiled database lookup result");
+            if (result[0] == 255) return null;
+            if (result[0] >= dbs.len or !dbs[result[0]].used) @panic("ts core host: invalid compiled database lookup slot");
+            return result[0];
+        }
+
+        fn compiledDbDeclaration(key: []const u8, signature: u64, page_tag: u8, done_tag: u8, err_tag: u8, seen: *[runtime_effects.max_db_effects]bool) DbPlan {
+            var request: [max_db_policy_bytes]u8 = undefined;
+            request[0] = 2;
+            std.mem.writeInt(u16, request[1..3], timerSeenMask(seen.*), .little);
+            request[3] = @intCast(key.len);
+            @memcpy(request[4..][0..key.len], key);
+            const at = 4 + key.len;
+            std.mem.writeInt(u64, request[at..][0..8], signature, .little);
+            request[at + 8] = page_tag;
+            request[at + 9] = done_tag;
+            request[at + 10] = err_tag;
+            const end = writeDbTable(&request, at + 11);
+            var result: [8]u8 = undefined;
+            if (core.nativeDbPolicy(request[0..end], &result) != result.len or result[0] >= dbs.len or result[1] > 1 or result[2] > 1)
+                @panic("ts core host: invalid compiled database declaration result");
+            const mask = std.mem.readInt(u16, result[6..8], .little);
+            for (seen, 0..) |*value, index| value.* = mask & (@as(u16, 1) << @intCast(index)) != 0;
+            return .{ .slot = result[0], .start = result[1] == 1, .stop = result[2] == 1, .page_tag = result[3], .done_tag = result[4], .err_tag = result[5] };
         }
 
         fn freeTimerIndex() ?usize {
@@ -3455,6 +5224,11 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `TimerMsgFn` for every bridge timer: dispatch the slot's arm
         /// with the fire time in fractional milliseconds.
         fn timerFireMsg(timer: runtime_effects.EffectTimer) Msg {
+            if (comptime @hasDecl(core, "nativeTimerPolicy")) {
+                const plan = compiledTimerCompletion(timer, true);
+                if (plan[3] == 1) timers[plan[0]].used = false;
+                return timerCompletionMsg(plan, timer, timers[plan[0]].wireKey());
+            }
             if (timer.outcome == .rejected) {
                 @panic("ts core host: the platform rejected a subscription timer (no timer service, or the fx timer table is full)");
             }
@@ -3607,6 +5381,69 @@ pub fn TsCoreHost(comptime core: type) type {
             return ok;
         }
 
+        fn exactAudioArmShape(comptime T: type) bool {
+            if (@typeInfo(T) != .@"struct") return false;
+            const fields = @typeInfo(T).@"struct".fields;
+            if (fields.len != 7) return false;
+            for (fields) |field| {
+                if (std.mem.eql(u8, field.name, "state")) {
+                    if (@typeInfo(field.type) != .@"enum") return false;
+                    const states = @typeInfo(field.type).@"enum".fields;
+                    if (states.len != 6) return false;
+                    for (states) |state| {
+                        var found = false;
+                        for (@typeInfo(runtime_effects.EffectAudioEventKind).@"enum".fields) |expected|
+                            if (std.mem.eql(u8, expected.name, state.name)) {
+                                found = true;
+                            };
+                        if (!found) return false;
+                    }
+                } else if (std.mem.eql(u8, field.name, "playing") or std.mem.eql(u8, field.name, "buffering")) {
+                    if (field.type != bool) return false;
+                } else if (std.mem.eql(u8, field.name, "key") or std.mem.eql(u8, field.name, "positionMs") or
+                    std.mem.eql(u8, field.name, "durationMs") or std.mem.eql(u8, field.name, "bands"))
+                {
+                    if (field.type != []const u8) return false;
+                } else return false;
+            }
+            return true;
+        }
+
+        fn exactSpawnArmShape(comptime T: type, comptime line: bool) bool {
+            if (@typeInfo(T) != .@"struct") return false;
+            const fields = @typeInfo(T).@"struct".fields;
+            if (fields.len != (if (line) @as(usize, 4) else 8)) return false;
+            for (fields) |field| {
+                if (std.mem.eql(u8, field.name, "key") or
+                    (line and std.mem.eql(u8, field.name, "line")) or
+                    (!line and (std.mem.eql(u8, field.name, "output") or std.mem.eql(u8, field.name, "stderrTail"))))
+                {
+                    if (field.type != []const u8) return false;
+                } else if ((line and std.mem.eql(u8, field.name, "truncated")) or
+                    (!line and (std.mem.eql(u8, field.name, "outputTruncated") or std.mem.eql(u8, field.name, "stderrTruncated"))))
+                {
+                    if (field.type != bool) return false;
+                } else if ((line and std.mem.eql(u8, field.name, "droppedBefore")) or
+                    (!line and (std.mem.eql(u8, field.name, "code") or std.mem.eql(u8, field.name, "droppedLines"))))
+                {
+                    if (field.type != f64 and field.type != i64 and field.type != u64) return false;
+                } else if (!line and std.mem.eql(u8, field.name, "reason")) {
+                    if (@typeInfo(field.type) != .@"enum") return false;
+                    const reasons = @typeInfo(field.type).@"enum".fields;
+                    const expected = @typeInfo(runtime_effects.EffectExitReason).@"enum".fields;
+                    if (reasons.len != expected.len) return false;
+                    for (reasons) |reason| {
+                        var found = false;
+                        for (expected) |value| if (std.mem.eql(u8, reason.name, value.name)) {
+                            found = true;
+                        };
+                        if (!found) return false;
+                    }
+                } else return false;
+            }
+            return true;
+        }
+
         /// The arm's `state` member for an engine event kind, matched
         /// by member NAME (the frontend pins the member set, so the
         /// app's declaration order never matters to the wire).
@@ -3732,12 +5569,13 @@ pub fn TsCoreHost(comptime core: type) type {
             const info = @typeInfo(T);
             if (info != .@"struct") return false;
             const fields = info.@"struct".fields;
-            if (fields.len != 5) return false;
+            if (fields.len != 5 and fields.len != 6) return false;
+            const words = fields.len == 6;
             var ok = true;
             for (fields) |f| {
                 if (std.mem.eql(u8, f.name, "state")) {
                     if (@typeInfo(f.type) != .@"enum") ok = false;
-                } else if (std.mem.eql(u8, f.name, "id") or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
+                } else if ((!words and std.mem.eql(u8, f.name, "id")) or (words and (std.mem.eql(u8, f.name, "imageLower") or std.mem.eql(u8, f.name, "imageUpper"))) or std.mem.eql(u8, f.name, "width") or std.mem.eql(u8, f.name, "height") or std.mem.eql(u8, f.name, "status")) {
                     if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
                 } else {
                     ok = false;
@@ -3769,6 +5607,9 @@ pub fn TsCoreHost(comptime core: type) type {
                         inline for (fields) |f| {
                             if (comptime std.mem.eql(u8, f.name, "state")) {
                                 @field(payload, f.name) = imageStateValue(f.type, result.outcome);
+                            } else if (comptime std.mem.eql(u8, f.name, "imageLower") or std.mem.eql(u8, f.name, "imageUpper")) {
+                                const word: u32 = if (comptime std.mem.eql(u8, f.name, "imageLower")) @truncate(result.id) else @truncate(result.id >> 32);
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(word) else @intCast(word);
                             } else if (comptime std.mem.eql(u8, f.name, "id")) {
                                 @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(result.id) else @intCast(result.id);
                             } else if (comptime std.mem.eql(u8, f.name, "width")) {
@@ -3791,6 +5632,77 @@ pub fn TsCoreHost(comptime core: type) type {
         /// `imageArmShape`'s twin: `key` (number), `state` (any enum;
         /// members matched by name at delivery), `bytes` (bytes),
         /// `droppedPending`/`droppedTotal` (numbers).
+        fn channelSourceArmShape(comptime T: type) bool {
+            const info = @typeInfo(T);
+            if (info != .@"struct") return false;
+            const fields = info.@"struct".fields;
+            if (fields.len != 3) return false;
+            var ok = true;
+            for (fields) |f| {
+                if (std.mem.eql(u8, f.name, "state")) {
+                    if (@typeInfo(f.type) != .@"enum") ok = false;
+                } else if (std.mem.eql(u8, f.name, "bytes")) {
+                    if (f.type != []const u8) ok = false;
+                } else if (std.mem.eql(u8, f.name, "key")) {
+                    if (f.type != i64 and f.type != u64 and f.type != f64) ok = false;
+                } else {
+                    ok = false;
+                }
+            }
+            return ok;
+        }
+
+        /// The arm's `state` member for an engine channel source result kind,
+        /// matched by member NAME — `imageStateValue`'s twin.
+        fn channelSourceStateValue(comptime E: type, kind: runtime_effects.EffectChannelSourceState) E {
+            const name = @tagName(kind);
+            inline for (@typeInfo(E).@"enum".fields) |f| {
+                if (std.mem.eql(u8, f.name, name)) return @enumFromInt(f.value);
+            }
+            @panic("ts core host: a channel source result kind has no member in the event arm's state union - the frontend's own shape check should have stopped this build");
+        }
+
+        /// Build the three-field channel source result arm at index `tag` from
+        /// an engine event, by field name. The bytes copy into the
+        /// core's frame arena like every routed payload (the engine's
+        /// slice is drain scratch); `key` is the channel key echoed
+        /// verbatim (always below 2^53 — the bridge refused anything
+        /// wider — so both number classes carry it exactly), and the
+        /// drop counters widen the way the subset's number model
+        /// classes them.
+        fn msgFromTagChannelSource(tag: u8, event: runtime_effects.EffectChannelSourceResult) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    if (comptime channelSourceArmShape(arm.type)) {
+                        const fields = @typeInfo(arm.type).@"struct".fields;
+                        var payload: arm.type = undefined;
+                        inline for (fields) |f| {
+                            if (comptime std.mem.eql(u8, f.name, "state")) {
+                                @field(payload, f.name) = channelSourceStateValue(f.type, event.state);
+                            } else if (comptime std.mem.eql(u8, f.name, "key")) {
+                                @field(payload, f.name) = if (comptime f.type == f64) @floatFromInt(event.key) else @intCast(event.key);
+                            } else if (event.bytes.len == 0) {
+                                // Payload-free events (rejected/closed
+                                // terminals, and the staged rejection
+                                // Msgs that must be self-contained
+                                // across the frame reset) carry the
+                                // static empty slice, never a
+                                // zero-length frame pointer.
+                                @field(payload, f.name) = "";
+                            } else {
+                                const copy = core.rt.frameAlloc(u8, event.bytes.len);
+                                @memcpy(copy, event.bytes);
+                                @field(payload, f.name) = copy;
+                            }
+                        }
+                        return @unionInit(Msg, arm.name, payload);
+                    }
+                    @panic("ts core host: a channel source result targets Msg arm '" ++ arm.name ++ "', which is not the three-field channel source result record");
+                }
+            }
+            @panic("ts core host: a channel source result names a Msg tag outside the union");
+        }
+
         fn channelArmShape(comptime T: type) bool {
             const info = @typeInfo(T);
             if (info != .@"struct") return false;
@@ -3864,6 +5776,21 @@ pub fn TsCoreHost(comptime core: type) type {
                 }
             }
             @panic("ts core host: a channel event names a Msg tag outside the union");
+        }
+
+        fn msgFromTagGlobalShortcut(tag: u8, kind: runtime_effects.EffectGlobalShortcutEventKind, id: []const u8) Msg {
+            inline for (msg_arms, 0..) |arm, index| {
+                if (tag == index) {
+                    const T = arm.type;
+                    if (comptime @typeInfo(T) != .@"struct" or @typeInfo(T).@"struct".fields.len != 2 or !@hasField(T, "id") or !@hasField(T, "state") or
+                        @FieldType(T, "id") != []const u8 or @typeInfo(@FieldType(T, "state")) != .@"enum")
+                        @panic("ts core host: a global shortcut report targets Msg arm '" ++ arm.name ++ "', which is not the { id, state } record");
+                    const state = std.meta.stringToEnum(@FieldType(T, "state"), if (kind == .stopped) "rejected" else @tagName(kind)) orelse
+                        @panic("ts core host: a global shortcut report state has no member in the arm's state union");
+                    return @unionInit(Msg, arm.name, .{ .id = id, .state = state });
+                }
+            }
+            @panic("ts core host: a global shortcut report names a Msg tag outside the union");
         }
 
         fn audioCaptureArmShape(comptime T: type) bool {
@@ -4134,4 +6061,117 @@ pub fn TsCoreHost(comptime core: type) type {
             return takeBytes(bytes, at, len);
         }
     };
+}
+
+const PtyBindingTestCore = struct {
+    pub const Model = struct {};
+    const PtyState = enum { output, exit };
+    const Reason = enum { exited, signaled, cancelled, rejected, spawn_failed };
+    pub const Msg = union(enum) { event: struct { key: []const u8, state: PtyState, bytes: []const u8, code: f64, reason: Reason, signal: f64, droppedWrites: f64 } };
+    var value: Model = .{};
+    pub fn initialModel() *const Model {
+        return &value;
+    }
+    pub fn update(model: *const Model, _: Msg) *const Model {
+        return model;
+    }
+    pub fn commitModelRoot(model: *const Model) *const Model {
+        return model;
+    }
+    pub const rt = struct {
+        var arena: std.heap.ArenaAllocator = undefined;
+        pub fn frameAlloc(comptime T: type, len: usize) []T {
+            return arena.allocator().alloc(T, len) catch unreachable;
+        }
+        pub fn frameReset() void {
+            _ = arena.reset(.retain_capacity);
+        }
+        pub fn resetAll() void {
+            frameReset();
+        }
+    };
+};
+
+test "exact timer wire admission preserves unsigned decimal ownership and nanosecond limits" {
+    const Host = TsCoreHost(PtyBindingTestCore);
+    for ([_]u64{ 0, 1, 31_536_000_001, std.math.maxInt(u64) / std.time.ns_per_ms }) |value| {
+        var decimal: [20]u8 = undefined;
+        const text = try std.fmt.bufPrint(&decimal, "{d}", .{value});
+        try std.testing.expectEqual(value, Host.parseExactTimerInterval(text).?);
+        @memset(&decimal, 'x');
+    }
+    for ([_][]const u8{ "", "00", "+1", "-0", "1_0", "1.0", "1e2", " 1", "1 ", "1\x00", "18446744073710", "18446744073709551615", "18446744073709551616", "123456789012345678901" }) |text|
+        try std.testing.expect(Host.parseExactTimerInterval(text) == null);
+}
+
+test "exact audio identities and seek positions admit every canonical u64 without rounding" {
+    const Host = TsCoreHost(PtyBindingTestCore);
+    for ([_]u64{ 0, 1, 9007199254740991, 9007199254740993, std.math.maxInt(u64) }) |value| {
+        var buffer: [20]u8 = undefined;
+        const text = try std.fmt.bufPrint(&buffer, "{d}", .{value});
+        try std.testing.expectEqual(value, Host.parseExactUnsigned(text).?);
+        @memset(&buffer, 'x');
+    }
+    for ([_][]const u8{ "", "00", "01", "+1", "-0", "-1", "1.0", "1e2", " 1", "1 ", "1\x00", "18446744073709551616", "123456789012345678901" }) |text|
+        try std.testing.expect(Host.parseExactUnsigned(text) == null);
+}
+
+test "PTY name bindings own bytes and retain ended identities without restricting unbound reuse" {
+    const Core = PtyBindingTestCore;
+    const Host = TsCoreHost(Core);
+    Core.rt.arena = .init(std.testing.allocator);
+    defer Core.rt.arena.deinit();
+    var fx = Host.Fx.init(std.testing.allocator);
+    defer fx.deinit();
+    fx.executor = .fake;
+    Host.boot();
+    var name = [_]u8{ 's', 'h', 255, 0 };
+    Host.issuePtySpawn(&fx, &name, 0, 80, 24, "", &.{"/bin/sh"});
+    const original = Host.resolvePtyKey(&name);
+    try std.testing.expect(original != 0);
+    @memset(&name, 'x');
+    try std.testing.expectEqual(original, Host.resolvePtyKey("sh\xff\x00"));
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey(&name));
+    try fx.feedPtyOutput(original, "owned screen");
+    const output = fx.takeMsg().?.event;
+    try std.testing.expectEqualStrings("sh\xff\x00", output.key);
+    try std.testing.expectEqualStrings("owned screen", output.bytes);
+    try fx.feedPtyExit(original, 0, 0, .exited, 0);
+    _ = fx.takeMsg();
+    try std.testing.expectEqual(original, Host.resolvePtyKey("sh\xff\x00"));
+    // Distinct unbound names repeatedly reuse an available effect slot, while
+    // the named terminal's ended screen keeps its identity through every exit.
+    for (0..8) |i| {
+        var buffer: [30]u8 = undefined;
+        const other = try std.fmt.bufPrint(&buffer, "unbound-{d}", .{i});
+        Host.issuePtySpawn(&fx, other, 0, 80, 24, "", &.{"/bin/sh"});
+        const key = fx.pendingPtyAt(0).?.key;
+        try std.testing.expect(key != original);
+        try fx.feedPtyExit(key, 0, 0, .exited, 0);
+        _ = fx.takeMsg();
+        try std.testing.expectEqual(original, Host.resolvePtyKey("sh\xff\x00"));
+    }
+    Host.issuePtySpawn(&fx, "sh\xff\x00", 0, 80, 24, "", &.{"/bin/sh"});
+    try std.testing.expectEqual(original, fx.pendingPtyAt(0).?.key);
+    Host.issuePtySpawn(&fx, "sh\xff\x00", 0, 80, 24, "", &.{"/bin/sh"});
+    const refused = fx.takeMsg().?.event;
+    try std.testing.expectEqual(Core.Reason.rejected, refused.reason);
+    try std.testing.expectEqualStrings("sh\xff\x00", refused.key);
+    try std.testing.expectEqual(@as(usize, 1), fx.pendingPtyCount());
+    // Bound ended grids occupy the documented budget. Exhaustion still
+    // delivers the normal one rejected terminal instead of aliasing a screen.
+    for ([_][]const u8{ "second", "third", "fourth" }) |name_key| {
+        Host.issuePtySpawn(&fx, name_key, 0, 80, 24, "", &.{"/bin/sh"});
+        const key = Host.resolvePtyKey(name_key);
+        try std.testing.expect(key != 0 and key != original);
+        try fx.feedPtyExit(key, 0, 0, .exited, 0);
+        _ = fx.takeMsg();
+    }
+    Host.issuePtySpawn(&fx, "fifth", 0, 80, 24, "", &.{"/bin/sh"});
+    const full = fx.takeMsg().?.event;
+    try std.testing.expectEqual(Core.Reason.rejected, full.reason);
+    try std.testing.expectEqualStrings("fifth", full.key);
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("fifth"));
+    Host.boot();
+    try std.testing.expectEqual(@as(u64, 0), Host.resolvePtyKey("sh\xff\x00"));
 }

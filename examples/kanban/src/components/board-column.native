@@ -1,0 +1,26 @@
+<template name="board-card-list" args="cards">
+  <column gap="8">
+    <for each="cards" key="id" as="c">
+      <row global-key="{c.id}" on-drag="card_dropped:{c.id}" background="surface" radius="md" gap="8" padding="10" cross="center" role="listitem" label="{c.title}">
+        <column grow="1" gap="8">
+          <text>{c.title}</text>
+          <row height="24" gap="6" cross="center">
+            <text size="sm" foreground="text_muted">NAT-{c.ticketNumber}</text>
+            <spacer grow="1" />
+            <if test="{c.assignee == 'openai'}">
+              <avatar width="24" height="24" image="{c.avatarId}" label="OpenAI agent">OA</avatar>
+            </if>
+            <else>
+              <avatar width="24" height="24" image="{c.avatarId}" label="Claude agent">CL</avatar>
+            </else>
+          </row>
+        </column>
+      </row>
+    </for>
+  </column>
+</template>
+<template name="board-column" args="title">
+  <column grow="1" gap="8" padding="10" label="{title}">
+    <slot/>
+  </column>
+</template>

@@ -1,19 +1,17 @@
 # ui-inbox
 
-A native-rendered task inbox written entirely with the experimental `canvas.Ui` declarative builder. The whole app is one elm-style loop — `Model` → `Msg` → `update` → `view` — with no hand-assigned widget ids, no absolute frames, and no string command dispatch:
+A task inbox authored in TypeScript and Native markup. The compiled core owns task capacity, UTF-8 editing and composition, filtering, clear-on-submit, and titlebar insets. Keyed rows retain widget identities while native hosts present their declared context menus.
 
-- Widget identity is structural (tree path + keys), so keyed rows keep their ids across rebuilds, reorders, and filtering.
-- Layout is flex (`gap`, `padding`, `grow`, alignment) resolved by the canvas engine.
-- Pointer and keyboard events resolve to typed `Msg` values through the tree's handler table (`tree.msgForPointer` / `tree.msgForKeyboard`).
-
-Run it (macOS):
-
-```bash
-zig build run
+```sh
+native dev
+native test
+native test -Dtypescript-view=true
 ```
 
-Run the model/view tests on any platform:
+The example retains its build entry for native-only platform link audits and the host-built mobile embed archive:
 
-```bash
-zig build test
+```sh
+zig build lib -Dmobile=true
 ```
+
+Mobile targets use the same core through the standard `lib` build step. The native behavior reference and layout audit remain in the SDK test suite.

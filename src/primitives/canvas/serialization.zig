@@ -1,3 +1,4 @@
+const std = @import("std");
 const geometry = @import("geometry");
 const json = @import("json");
 const canvas = @import("root.zig");
@@ -1253,7 +1254,13 @@ pub fn writeCanvasGpuPacketBinary(packet: CanvasGpuPacket, writer: anytype) !voi
     }, packet.generation, packet.scissor, &.{}, packet.images, packet.image_actions, writer);
 
     try writer.writeInt(u32, @intCast(packet.commands.len), .little);
-    for (packet.commands) |command| {
+    if (packet.preparation_policy) |owner| {
+        const preparation = @import("gpu_packet_preparation_policy.zig");
+        const identities = try std.heap.page_allocator.alloc(preparation.Identity, packet.commands.len);
+        defer std.heap.page_allocator.free(identities);
+        _ = preparation.identities(packet.commands, identities, false, owner);
+        for (packet.commands, identities) |command, identity| try writeCanvasGpuCommandBinaryKeyed(identity.key, command, writer);
+    } else for (packet.commands) |command| {
         const fingerprint = canvasGpuCommandFingerprint(command);
         try writeCanvasGpuCommandBinaryKeyed(canvasGpuPacketCommandKey(command, fingerprint), command, writer);
     }

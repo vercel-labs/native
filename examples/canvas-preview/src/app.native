@@ -1,0 +1,19 @@
+<column gap="0" background="background">
+  <row height="56" padding="12" gap="8" cross="center">
+    <text size="lg">Canvas Preview</text>
+    <spacer grow="1" />
+    <button variant="{exampleVariant}" on-press="show_example">Example</button>
+    <button variant="{docsVariant}" on-press="show_docs">Docs</button>
+    <button on-press="reload">Reload</button>
+  </row>
+  <row grow="1" gap="0">
+    <column width="224" padding="12" gap="8" background="surface">
+      <text foreground="text_muted">Native canvas rail</text>
+      <text>{urlLabel}</text>
+      <text>{reloadLabel}</text>
+      <spacer grow="1" />
+      <status-bar>{presentingLabel}</status-bar>
+    </column>
+    <panel grow="1" label="preview-pane"></panel>
+  </row>
+</column>

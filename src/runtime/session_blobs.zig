@@ -30,6 +30,8 @@
 
 const std = @import("std");
 const runtime_effects = @import("effects.zig");
+const policy = @import("blob_policy.zig");
+const reference = @import("session_blobs_reference.zig");
 
 const blob_log = std.log.scoped(.zero_session_blobs);
 
@@ -124,14 +126,26 @@ pub const SessionBlobSource = struct {
 /// verified mismatch or absence stays `BlobIoFailed`).
 pub const DirBlobStore = struct {
     io: std.Io,
+    policy: policy.Policy = null,
     dir_storage: [max_dir_bytes]u8 = undefined,
     dir_len: usize = 0,
 
     pub const max_dir_bytes: usize = 1024;
 
+    /// Test-only access to the atomic-install boundary; no production API.
+    pub const TestAccess = if (@import("builtin").is_test) struct {
+        pub fn install(store: *DirBlobStore, partial: []const u8, addressed: []const u8, bytes: []const u8) BlobError!void {
+            return store.installPartial(partial, addressed, bytes);
+        }
+    } else struct {};
+
     pub fn init(io: std.Io, dir_path: []const u8) error{BlobDirTooLong}!DirBlobStore {
-        if (dir_path.len == 0 or dir_path.len > max_dir_bytes) return error.BlobDirTooLong;
-        var store: DirBlobStore = .{ .io = io };
+        return initWithPolicy(io, dir_path, null);
+    }
+
+    pub fn initWithPolicy(io: std.Io, dir_path: []const u8, callback: policy.Policy) error{BlobDirTooLong}!DirBlobStore {
+        if (policy.plan(callback, .directory, .{ .words = .{ dir_path.len, max_dir_bytes, 0, 0, 0, 0 } }).action != .proceed) return error.BlobDirTooLong;
+        var store: DirBlobStore = .{ .io = io, .policy = callback };
         @memcpy(store.dir_storage[0..dir_path.len], dir_path);
         store.dir_len = dir_path.len;
         return store;
@@ -150,11 +164,19 @@ pub const DirBlobStore = struct {
     }
 
     pub fn write(self: *DirBlobStore, hash: BlobHash, bytes: []const u8) BlobError!void {
-        if (bytes.len > max_blob_bytes) return error.BlobOverBudget;
+        if (self.policy == null) {
+            var original = reference.DirBlobStore{ .io = self.io, .dir_storage = self.dir_storage, .dir_len = self.dir_len };
+            return original.write(hash, bytes);
+        }
+        if (policy.plan(self.policy, .write, .{ .words = .{ bytes.len, max_blob_bytes, 0, 0, 0, 0 } }).action == .over_budget) return error.BlobOverBudget;
         const cwd = std.Io.Dir.cwd();
         var path_buffer: [max_dir_bytes + hash_len * 2 + 16]u8 = undefined;
-        const name = hexName(hash);
-        const blob_path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ self.dir(), name }) catch return error.BlobIoFailed;
+        const name_plan = policy.plan(self.policy, .name, .{ .a = &hash });
+        const name = name_plan.bytes();
+        const path_plan = policy.plan(self.policy, .path, .{ .a = self.dir(), .b = name, .words = .{ 0, path_buffer.len, 0, 0, 0, 0 } });
+        if (path_plan.action != .proceed) return error.BlobIoFailed;
+        @memcpy(path_buffer[0..path_plan.len], path_plan.bytes());
+        const blob_path = path_buffer[0..path_plan.len];
         // Content addressing dedups by name, but recording never TRUSTS
         // the name alone: replay verifies what it reads, so a damaged
         // blob accepted here would seal a journal replay must refuse.
@@ -184,7 +206,10 @@ pub const DirBlobStore = struct {
         self.io.random(&token_bytes);
         const token = std.mem.readInt(u64, &token_bytes, .little);
         var partial_buffer: [max_dir_bytes + hash_len * 2 + 48]u8 = undefined;
-        const partial_path = blobPartialPath(&partial_buffer, self.dir(), &name, token) catch return error.BlobIoFailed;
+        const partial_plan = policy.plan(self.policy, .path, .{ .flags = 1, .a = self.dir(), .b = name, .words = .{ token, partial_buffer.len, 0, 0, 0, 0 } });
+        if (partial_plan.action != .proceed) return error.BlobIoFailed;
+        @memcpy(partial_buffer[0..partial_plan.len], partial_plan.bytes());
+        const partial_path = partial_buffer[0..partial_plan.len];
         cwd.writeFile(self.io, .{ .sub_path = partial_path, .data = bytes }) catch {
             cwd.deleteFile(self.io, partial_path) catch {};
             return error.BlobIoFailed;
@@ -206,10 +231,9 @@ pub const DirBlobStore = struct {
         const cwd = std.Io.Dir.cwd();
         cwd.rename(partial_path, cwd, blob_path, self.io) catch {
             defer cwd.deleteFile(self.io, partial_path) catch {};
-            switch (self.probeExisting(blob_path, bytes)) {
-                .matches => return,
-                .absent, .mismatch => return error.BlobIoFailed,
-            }
+            const probe = self.probeExisting(blob_path, bytes);
+            if (policy.plan(self.policy, .install, .{ .flags = @intFromBool(probe == .matches) }).action == .proceed) return;
+            return error.BlobIoFailed;
         };
     }
 
@@ -222,43 +246,64 @@ pub const DirBlobStore = struct {
     /// blob-sized buffer is ever staged. A read failure mid-probe
     /// counts as a mismatch: the repair path rewrites the file whole.
     fn probeExisting(self: *DirBlobStore, blob_path: []const u8, bytes: []const u8) ProbeResult {
-        var file = std.Io.Dir.cwd().openFile(self.io, blob_path, .{}) catch return .absent;
+        var file = std.Io.Dir.cwd().openFile(self.io, blob_path, .{}) catch {
+            _ = policy.plan(self.policy, .open, .{});
+            return .absent;
+        };
         defer file.close(self.io);
+        _ = policy.plan(self.policy, .open, .{ .flags = 1 });
         var chunk: [4096]u8 = undefined;
         var at: usize = 0;
         while (true) {
-            const len = file.readPositionalAll(self.io, &chunk, at) catch return .mismatch;
-            if (len == 0) break;
-            if (at + len > bytes.len) return .mismatch;
-            if (!std.mem.eql(u8, chunk[0..len], bytes[at .. at + len])) return .mismatch;
-            at += len;
-            if (len < chunk.len) break;
+            const len = file.readPositionalAll(self.io, &chunk, at) catch {
+                _ = policy.plan(self.policy, .probe, .{});
+                return .mismatch;
+            };
+            const wanted = @min(len, bytes.len -| at);
+            const decision = policy.plan(self.policy, .probe, .{ .flags = 1, .words = .{ bytes.len, at, len, chunk.len, 0, 0 }, .a = chunk[0..len], .b = bytes[@min(at, bytes.len)..][0..wanted] });
+            switch (decision.action) {
+                .matches => return .matches,
+                .mismatch => return .mismatch,
+                .more => {
+                    if (decision.words[0] > bytes.len or decision.words[0] <= at) @panic("invalid blob probe position");
+                    at = @intCast(decision.words[0]);
+                },
+                else => @panic("invalid blob probe action"),
+            }
         }
-        return if (at == bytes.len) .matches else .mismatch;
     }
 
     pub fn read(self: *DirBlobStore, hash: BlobHash, buffer: []u8) BlobError![]const u8 {
+        if (self.policy == null) {
+            var original = reference.DirBlobStore{ .io = self.io, .dir_storage = self.dir_storage, .dir_len = self.dir_len };
+            return original.read(hash, buffer);
+        }
         const cwd = std.Io.Dir.cwd();
         var path_buffer: [max_dir_bytes + hash_len * 2 + 16]u8 = undefined;
-        const name = hexName(hash);
-        const blob_path = std.fmt.bufPrint(&path_buffer, "{s}/{s}", .{ self.dir(), name }) catch return error.BlobIoFailed;
+        const name_plan = policy.plan(self.policy, .name, .{ .a = &hash });
+        const name = name_plan.bytes();
+        const path_plan = policy.plan(self.policy, .path, .{ .a = self.dir(), .b = name, .words = .{ 0, path_buffer.len, 0, 0, 0, 0 } });
+        if (path_plan.action != .proceed) return error.BlobIoFailed;
+        @memcpy(path_buffer[0..path_plan.len], path_plan.bytes());
+        const blob_path = path_buffer[0..path_plan.len];
         var file = cwd.openFile(self.io, blob_path, .{}) catch return error.BlobMissing;
         defer file.close(self.io);
-        const len = file.readPositionalAll(self.io, buffer, 0) catch return error.BlobIoFailed;
-        if (len == buffer.len) {
-            // A full buffer is ambiguous: `readPositionalAll` stops at
-            // `buffer.len`, so the blob is either exactly buffer-sized
-            // (the designed case — callers size the buffer from the
-            // journal record's byte length) or larger. Probe one byte
-            // past the end to tell them apart — the effects layer's
-            // one-spare-byte idiom, and a probe rather than a stat so
-            // no size/read race can disagree with what was just read.
+        const len = file.readPositionalAll(self.io, buffer, 0) catch {
+            _ = policy.plan(self.policy, .read, .{});
+            return error.BlobIoFailed;
+        };
+        const admission = policy.plan(self.policy, .read, .{ .flags = 1, .words = .{ len, buffer.len, 0, 0, 0, 0 } });
+        if (admission.action == .spare) {
             var spare: [1]u8 = undefined;
-            const extra = file.readPositionalAll(self.io, &spare, buffer.len) catch return error.BlobIoFailed;
-            if (extra != 0) return error.BlobOverBudget;
+            const extra = file.readPositionalAll(self.io, &spare, buffer.len) catch {
+                _ = policy.plan(self.policy, .read, .{ .flags = 2 });
+                return error.BlobIoFailed;
+            };
+            if (policy.plan(self.policy, .read, .{ .flags = 3, .words = .{ len, buffer.len, extra, 0, 0, 0 } }).action == .over_budget) return error.BlobOverBudget;
         }
         const bytes = buffer[0..len];
-        if (!std.mem.eql(u8, &hashBytes(bytes), &hash)) return error.BlobCorrupt;
+        const actual = hashBytes(bytes);
+        if (policy.plan(self.policy, .hash, .{ .a = &actual, .b = &hash }).action == .corrupt) return error.BlobCorrupt;
         return bytes;
     }
 
@@ -286,6 +331,7 @@ pub const DirBlobStore = struct {
 /// so there is no shared temp to fight over and no rename to lose.
 pub const MemoryBlobStore = struct {
     allocator: std.mem.Allocator,
+    policy: policy.Policy = null,
     entries: [max_entries]Entry = undefined,
     count: usize = 0,
     /// How many writes found their address already present — the dedup
@@ -317,42 +363,95 @@ pub const MemoryBlobStore = struct {
     }
 
     pub fn write(self: *MemoryBlobStore, hash: BlobHash, bytes: []const u8) BlobError!void {
-        if (bytes.len > max_blob_bytes) return error.BlobOverBudget;
-        if (self.find(hash)) |entry| {
-            // The dir store's verifying dedup, in memory: an entry that
-            // still holds its addressed bytes is the dedup hit; one
-            // that no longer does (a tampering test — the dir store's
-            // damaged-file case) is repaired in place rather than
-            // trusted or refused.
-            if (std.mem.eql(u8, entry.bytes, bytes)) {
-                self.dedup_hits += 1;
-                return;
-            }
-            const copy = self.allocator.dupe(u8, bytes) catch return error.BlobIoFailed;
-            self.allocator.free(entry.bytes);
-            entry.bytes = copy;
-            return;
+        if (self.policy == null) {
+            var original = self.referenceStore();
+            defer self.adoptReference(&original);
+            return original.write(hash, bytes);
         }
-        if (self.count == max_entries) return error.BlobIoFailed;
-        const copy = self.allocator.dupe(u8, bytes) catch return error.BlobIoFailed;
-        self.entries[self.count] = .{ .hash = hash, .bytes = copy };
-        self.count += 1;
+        if (policy.plan(self.policy, .write, .{ .words = .{ bytes.len, max_blob_bytes, 0, 0, 0, 0 } }).action == .over_budget) return error.BlobOverBudget;
+        const entry = self.find(hash);
+        const matches = if (entry) |value| self.equal(value.bytes, bytes) else false;
+        const decision = policy.plan(self.policy, .memory_write, .{ .flags = @as(u8, @intFromBool(entry != null)) | (@as(u8, @intFromBool(matches)) << 1), .words = .{ bytes.len, max_blob_bytes, self.count, max_entries, self.dedup_hits, 0 } });
+        switch (decision.action) {
+            .over_budget => return error.BlobOverBudget,
+            .io_failed => return error.BlobIoFailed,
+            .dedup => {
+                std.debug.assert(decision.words[1] == self.dedup_hits + 1);
+                self.dedup_hits = @intCast(decision.words[1]);
+            },
+            .repair => {
+                const existing = entry orelse @panic("invalid blob repair target");
+                const copy = self.allocator.dupe(u8, bytes) catch return error.BlobIoFailed;
+                self.allocator.free(existing.bytes);
+                existing.bytes = copy;
+            },
+            .append => {
+                if (decision.words[0] != self.count + 1 or decision.words[0] > max_entries) @panic("invalid blob entry capacity");
+                const copy = self.allocator.dupe(u8, bytes) catch return error.BlobIoFailed;
+                self.entries[self.count] = .{ .hash = hash, .bytes = copy };
+                self.count = @intCast(decision.words[0]);
+            },
+            else => @panic("invalid blob memory write action"),
+        }
     }
 
     pub fn read(self: *MemoryBlobStore, hash: BlobHash, buffer: []u8) BlobError![]const u8 {
-        const entry = self.find(hash) orelse return error.BlobMissing;
-        if (entry.bytes.len > buffer.len) return error.BlobOverBudget;
-        @memcpy(buffer[0..entry.bytes.len], entry.bytes);
-        const bytes = buffer[0..entry.bytes.len];
-        if (!std.mem.eql(u8, &hashBytes(bytes), &hash)) return error.BlobCorrupt;
+        if (self.policy == null) {
+            var original = self.referenceStore();
+            return original.read(hash, buffer);
+        }
+        const entry = self.find(hash);
+        const decision = policy.plan(self.policy, .memory_read, .{ .flags = @intFromBool(entry != null), .words = .{ if (entry) |value| value.bytes.len else 0, buffer.len, 0, 0, 0, 0 } });
+        switch (decision.action) {
+            .missing => return error.BlobMissing,
+            .over_budget => return error.BlobOverBudget,
+            .proceed => {},
+            else => @panic("invalid blob memory read action"),
+        }
+        const found = entry orelse @panic("invalid blob read target");
+        @memcpy(buffer[0..found.bytes.len], found.bytes);
+        const bytes = buffer[0..found.bytes.len];
+        const actual = hashBytes(bytes);
+        if (policy.plan(self.policy, .hash, .{ .a = &actual, .b = &hash }).action == .corrupt) return error.BlobCorrupt;
         return bytes;
     }
 
     fn find(self: *MemoryBlobStore, hash: BlobHash) ?*Entry {
-        for (self.entries[0..self.count]) |*entry| {
-            if (std.mem.eql(u8, &entry.hash, &hash)) return entry;
+        for (self.entries[0..self.count], 0..) |*entry, index| {
+            const decision = policy.plan(self.policy, .find, .{ .words = .{ index, self.count, 0, 0, 0, 0 }, .a = &entry.hash, .b = &hash });
+            if (decision.action == .found) {
+                if (decision.words[0] != index) @panic("invalid blob first match");
+                return entry;
+            }
         }
         return null;
+    }
+
+    fn referenceStore(self: *const MemoryBlobStore) reference.MemoryBlobStore {
+        var original = reference.MemoryBlobStore.init(self.allocator);
+        original.count = self.count;
+        original.dedup_hits = self.dedup_hits;
+        for (self.entries[0..self.count], 0..) |entry, i| original.entries[i] = .{ .hash = entry.hash, .bytes = entry.bytes };
+        return original;
+    }
+
+    fn adoptReference(self: *MemoryBlobStore, original: *const reference.MemoryBlobStore) void {
+        self.count = original.count;
+        self.dedup_hits = original.dedup_hits;
+        for (original.entries[0..original.count], 0..) |entry, i| self.entries[i] = .{ .hash = entry.hash, .bytes = entry.bytes };
+    }
+
+    fn equal(self: *MemoryBlobStore, left: []const u8, right: []const u8) bool {
+        const initial = policy.plan(self.policy, .equal, .{ .flags = 1, .words = .{ left.len, right.len, 0, 0, 0, 0 } });
+        if (initial.action != .more) return initial.action == .matches;
+        var at: usize = 0;
+        while (true) {
+            const len = @min(4096, left.len - at);
+            const decision = policy.plan(self.policy, .equal, .{ .words = .{ at, left.len, 0, 0, 0, 0 }, .a = left[at..][0..len], .b = right[at..][0..len] });
+            if (decision.action != .more) return decision.action == .matches;
+            if (decision.words[0] <= at or decision.words[0] >= left.len) @panic("invalid blob equality position");
+            at = @intCast(decision.words[0]);
+        }
     }
 
     fn writeErased(context: *anyopaque, hash: BlobHash, bytes: []const u8) BlobError!void {

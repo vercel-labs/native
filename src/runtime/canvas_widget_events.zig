@@ -1,3 +1,7 @@
+const host_regions = @import("host_input_regions_policy.zig");
+const input_composition = @import("input_composition_policy.zig");
+const drag_policy = @import("canvas_drag_policy.zig");
+const keyboard_focus = @import("canvas_keyboard_focus_policy.zig");
 const std = @import("std");
 const geometry = @import("geometry");
 const canvas = @import("canvas");
@@ -18,7 +22,7 @@ const CanvasWidgetPointerEvent = runtime_api.CanvasWidgetPointerEvent;
 const CanvasWidgetKeyboardEvent = runtime_api.CanvasWidgetKeyboardEvent;
 const CanvasWidgetFileDropEvent = runtime_api.CanvasWidgetFileDropEvent;
 const CanvasWidgetDragEvent = runtime_api.CanvasWidgetDragEvent;
-const validateViewLabel = validation.validateViewLabel;
+
 const platformCursorFromCanvas = widget_bridge.platformCursorFromCanvas;
 const canvasWidgetPointerEventFromGpuInput = canvas_frame_helpers.canvasWidgetPointerEventFromGpuInput;
 const canvasWidgetKeyboardEventFromGpuInput = canvas_frame_helpers.canvasWidgetKeyboardEventFromGpuInput;
@@ -28,11 +32,6 @@ const canvasWidgetKeyboardModifiers = canvas_frame_helpers.canvasWidgetKeyboardM
 const canvasWidgetInteractionTargetExists = canvas_widget_runtime.canvasWidgetInteractionTargetExists;
 const canvasWidgetCommandable = canvas_widget_runtime.canvasWidgetCommandable;
 const canvasWidgetCommandFiresOnPointerDown = canvas_widget_runtime.canvasWidgetCommandFiresOnPointerDown;
-const canvasWidgetGroupFocusEdgeFromInput = canvas_widget_runtime.canvasWidgetGroupFocusEdgeFromInput;
-const canvasWidgetSpatialFocusDirection = canvas_widget_runtime.canvasWidgetSpatialFocusDirection;
-const canvasWidgetSpatialFocusAllowed = canvas_widget_runtime.canvasWidgetSpatialFocusAllowed;
-const canvasWidgetGroupDirectionalFocusTarget = canvas_widget_runtime.canvasWidgetGroupDirectionalFocusTarget;
-const canvasWidgetGroupFocusEdgeTarget = canvas_widget_runtime.canvasWidgetGroupFocusEdgeTarget;
 
 /// Multi-click chain window: a primary pointer-down within this many
 /// nanoseconds of the previous one (and within the slop below) raises
@@ -63,10 +62,14 @@ pub fn canvasWidgetDragCrossedSlop(delta: geometry.OffsetF) bool {
 
 pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
     return struct {
+        fn normalizedInput(self: *const Runtime, input: GpuSurfaceInputEvent) ?input_composition.Program {
+            const index = runtimeFindViewIndex(self, input.window_id, input.label) orelse return null;
+            return input_composition.plan(self.views[index].canvas_widget_surface_scope_policy, .normalize, input, .{});
+        }
         pub fn routeCanvasWidgetPointerInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetPointerEvent {
             try validateRuntimeViewParent(self, input_event.window_id);
-            try validateViewLabel(input_event.label);
-            var pointer = canvasWidgetPointerEventFromGpuInput(input_event) orelse return null;
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, input_event.label);
+            var pointer = (if (normalizedInput(self, input_event)) |program| input_composition.pointerEvent(program, input_event) else canvasWidgetPointerEventFromGpuInput(input_event)) orelse return null;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             switch (pointer.phase) {
@@ -96,12 +99,40 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// made stays live for copy). A plain click collapses the
         /// selection on `.down`, so it reaches `.up` collapsed and the
         /// press lands normally.
-        fn canvasWidgetPressTargetForRoute(
+        pub fn canvasWidgetPressTargetForRoute(
             self: *const Runtime,
             view_index: usize,
             pointer: canvas.WidgetPointerEvent,
             route: canvas.WidgetEventRoute,
         ) ?canvas.WidgetHit {
+            const view = &self.views[view_index];
+            if (view.canvas_widget_surface_scope_policy) |policy| {
+                var facts: u8 = @intFromBool(route.press_target != null);
+                var kind: u16 = 0;
+                if (route.target) |raw| {
+                    kind = canvas.widgetKindCode(raw.kind);
+                    facts |= 2 | (@as(u8, @intFromBool(view.canvas_widget_selected_text_id == raw.id)) << 2) |
+                        (@as(u8, @intFromBool(view.canvas_widget_selected_text_group_id != 0)) << 3) |
+                        (@as(u8, @intFromBool(view.canvas_widget_selected_text_group_anchor != view.canvas_widget_selected_text_group_focus)) << 4);
+                    // Resolve only the storage capability described by the raw hit.
+                    if (raw.kind == .text or raw.kind == .terminal) {
+                        if (view.widgetLayoutTree().findById(raw.id)) |node| {
+                            if (raw.kind == .text) {
+                                if (node.widget.text_selection) |selection| {
+                                    facts |= @as(u8, @intFromBool(!selection.isCollapsed(node.widget.text.len))) << 5;
+                                }
+                            } else if (node.widget.terminal.grid) |grid| {
+                                facts |= @as(u8, @intFromBool(grid.selection_active)) << 6;
+                            }
+                        }
+                    }
+                }
+                var request = [5]u8{ 32, @intFromEnum(pointer.phase), facts, 0, 0 };
+                std.mem.writeInt(u16, request[3..5], kind, .little);
+                var result: [1]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 1) @panic("invalid compiled selection press result");
+                return if (result[0] != 0) route.press_target else null;
+            }
             const press_target = route.press_target orelse return null;
             if (pointer.phase != .up) return press_target;
             const raw = route.target orelse return press_target;
@@ -172,7 +203,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         pub fn routeCanvasWidgetKeyboardInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetKeyboardEvent {
             try validateRuntimeViewParent(self, input_event.window_id);
-            try validateViewLabel(input_event.label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, input_event.label);
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (!self.views[index].focused) return null;
@@ -190,7 +221,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // keys select, arrows walk rows. Tree rows (role treeitem)
             // are exempt — their roving-focus keymap is the feature.
             if (canvasWidgetQuietListRowFocus(self, index, focused_id)) return null;
-            const keyboard = canvasWidgetKeyboardEventFromGpuInput(input_event, focused_id) orelse return null;
+            const keyboard = (if (normalizedInput(self, input_event)) |program| input_composition.keyboardEvent(program, input_event, focused_id, false) else canvasWidgetKeyboardEventFromGpuInput(input_event, focused_id)) orelse return null;
 
             const route = try self.views[index].widgetLayoutTree().routeKeyboardEvent(keyboard, output);
             if (route.target == null) return null;
@@ -205,7 +236,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         pub fn routeCanvasWidgetTextInput(self: *const Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetKeyboardEvent {
             try validateRuntimeViewParent(self, input_event.window_id);
-            try validateViewLabel(input_event.label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, input_event.label);
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             if (!self.views[index].focused) return null;
@@ -221,7 +252,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // text_input is the sequence's own resolution — the hosts
             // never deliver ordinary typing while a composition is open.
             const ime_owner = self.views[index].canvas_widget_ime_owner_id;
-            const target_id = switch (input_event.kind) {
+            const target_id = if (input_composition.plan(self.views[index].canvas_widget_surface_scope_policy, .target, input_event, input_composition.observations(self, &self.views[index]))) |program| program.target else switch (input_event.kind) {
                 .ime_set_composition, .ime_commit_composition, .ime_cancel_composition, .text_input => id: {
                     if (ime_owner != 0) {
                         if (tree.findById(ime_owner)) |node| {
@@ -239,10 +270,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // text fall through to the app's target-less `on_text` seam
             // instead of being routed to a widget that drops it — the
             // terminal-with-a-focused-button case.
-            if (tree.findById(target_id)) |node| {
-                if (!canvas.isWidgetTextEntry(node.widget)) return null;
+            if (self.views[index].canvas_widget_surface_scope_policy == null) {
+                if (tree.findById(target_id)) |node| {
+                    if (!canvas.isWidgetTextEntry(node.widget)) return null;
+                }
             }
-            const keyboard = canvasWidgetTextInputEventFromGpuInput(input_event, target_id) orelse return null;
+            const keyboard = (if (normalizedInput(self, input_event)) |program| input_composition.keyboardEvent(program, input_event, target_id, true) else canvasWidgetTextInputEventFromGpuInput(input_event, target_id)) orelse return null;
 
             const route = try tree.routeKeyboardEvent(keyboard, output);
             if (route.target == null) return null;
@@ -258,7 +291,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         pub fn routeCanvasWidgetFileDrop(self: *const Runtime, drop: platform.FileDropEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetFileDropEvent {
             try validateRuntimeViewParent(self, drop.window_id);
             if (drop.view_label.len == 0 or drop.paths.len == 0) return null;
-            try validateViewLabel(drop.view_label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, drop.view_label);
             const point = drop.point orelse return null;
             const index = runtimeFindViewIndex(self, drop.window_id, drop.view_label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
@@ -280,17 +313,21 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         pub fn routeCanvasWidgetDragInput(self: *Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
             try validateRuntimeViewParent(self, input_event.window_id);
-            try validateViewLabel(input_event.label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, input_event.label);
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const previous_render_state = self.views[index].canvasWidgetRenderState();
 
-            if (input_event.kind == .pointer_down) {
+            const policy = self.views[index].canvas_widget_surface_scope_policy;
+            const active_source = self.views[index].canvas_widget_drag_source_id;
+            const admission = drag_policy.decide(policy, .{ .stage = .admission, .phase = drag_policy.inputPhase(input_event.kind), .facts = @as(u8, if (active_source != 0) 1 else 0) | @as(u8, if (input_event.pointer_id == self.views[index].canvas_widget_drag_pointer_id) 2 else 0) |
+                @as(u8, if (self.views[index].canvas_widget_pressed_id != 0) 4 else 0) });
+            if (admission == 0) return null;
+            if (admission == 1) {
                 // A live drag belongs to the pointer that crossed slop. A
                 // second contact may still run the ordinary pointer pipeline,
                 // but it cannot silently erase the first contact's preview or
                 // strand the app after its phase-0 Msg.
-                if (self.views[index].canvas_widget_drag_source_id != 0) return null;
                 self.views[index].canvas_widget_drag_source_id = 0;
                 self.views[index].canvas_widget_drag_source_attached = false;
                 self.views[index].canvas_widget_drag_pointer_id = input_event.pointer_id;
@@ -308,22 +345,11 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 }
                 return null;
             }
-            if (input_event.kind != .pointer_drag and input_event.kind != .pointer_up and input_event.kind != .pointer_cancel) return null;
-            // Pointer capture is per sequence. An unrelated touch/pen/mouse
-            // edge must not move or terminate the candidate/live drag.
-            if (input_event.pointer_id != self.views[index].canvas_widget_drag_pointer_id) return null;
-
-            const active_source = self.views[index].canvas_widget_drag_source_id;
-            // A release/cancel belongs to the drag channel only after motion
-            // crossed the slop and installed an active source. Until then it
-            // is the terminal edge of an ordinary click (or an abandoned
-            // press), so it must not arm a landing from the zero origin.
-            if (active_source == 0 and input_event.kind != .pointer_drag) {
+            if (admission == 2) {
                 self.views[index].canvas_widget_drag_pointer_id = 0;
                 return null;
             }
-            const candidate_source = if (active_source != 0) active_source else self.views[index].canvas_widget_pressed_id;
-            if (candidate_source == 0) return null;
+            const candidate_source = if (admission & 16 != 0) active_source else self.views[index].canvas_widget_pressed_id;
 
             const point = geometry.PointF.init(input_event.x, input_event.y);
             const phase: canvas.WidgetDragPhase = switch (input_event.kind) {
@@ -343,7 +369,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 ),
             };
             const route = try self.views[index].widgetLayoutTree().routeDragEvent(drag, output);
-            if (route.target == null) {
+            const action = drag_policy.decide(policy, .{ .stage = .route, .phase = drag_policy.dragPhase(phase), .delta = drag.delta, .facts = @as(u8, if (active_source != 0) 1 else 0) | @as(u8, if (route.target != null) 2 else 0) |
+                @as(u8, if (self.views[index].canvas_widget_drag_source_hit != null) 4 else 0) });
+            if (action & 15 == 4 or action & 15 == 5) {
                 // A source removed, hidden, or disabled after a live change
                 // still owes the consumer one terminal phase. Its last valid
                 // hit/route are POD snapshots owned by the view, so they stay
@@ -357,14 +385,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 self.views[index].canvas_widget_drag_delta = .{};
                 self.views[index].canvas_widget_drag_source_hit = null;
                 self.views[index].canvas_widget_drag_route_len = 0;
-                if (active_source != 0) self.views[index].canvas_widget_pressed_id = 0;
+                if (action & 32 != 0) self.views[index].canvas_widget_pressed_id = 0;
                 self.views[index].canvas_widget_drag_landing_source_id = 0;
                 self.views[index].canvas_widget_drag_landing_origin = .{};
                 const next_render_state = self.views[index].canvasWidgetRenderState();
                 if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
                     try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
                 }
-                if (active_source != 0 and captured_source != null) {
+                if (action & 15 == 5) {
                     drag.source_id = captured_source.?.id;
                     drag.phase = .cancel;
                     return .{
@@ -383,7 +411,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // pointer-drag fidelity. Do not promote it into runtime drag state:
             // UiApp filters these change messages, and a matching release
             // remains a press because no active source was installed.
-            if (active_source == 0 and !canvasWidgetDragCrossedSlop(drag.delta)) {
+            if (action == 6) {
                 return .{
                     .window_id = input_event.window_id,
                     .view_label = self.views[index].label,
@@ -403,10 +431,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // phases where the source itself moves into (or back from) the
             // reserved slot.
             self.views[index].canvas_widget_drag_layout_motion_armed = true;
-            if (phase == .change) {
+            if (action & 15 == 7) {
                 self.views[index].canvas_widget_drag_landing_source_id = 0;
                 self.views[index].canvas_widget_drag_landing_origin = .{};
-                if (active_source == 0) {
+                if (action & 64 != 0) {
                     const source_bounds = route.target.?.bounds.normalized();
                     self.views[index].canvas_widget_drag_source_origin = geometry.PointF.init(source_bounds.x, source_bounds.y);
                 }
@@ -449,16 +477,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// app's phase-2 rebuild can therefore restore the source slot while
         /// the card under the pointer eases back into it.
         pub fn routeCanvasWidgetDragCancelFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent, output: []canvas.WidgetEventRouteEntry) anyerror!?CanvasWidgetDragEvent {
-            if (input_event.kind != .key_down or !canvasWidgetEscapeKey(input_event.key)) return null;
-            const modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers);
-            if (modifiers.shift or modifiers.hasNavigationModifier()) return null;
+            const policy = if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |view_index| self.views[view_index].canvas_widget_surface_scope_policy else null;
+            if (drag_policy.decide(policy, .{ .stage = .escape, .phase = if (input_event.kind == .key_down) 0 else 4, .facts = @intFromBool(if (normalizedInput(self, input_event)) |program| program.has(2) else canvasWidgetEscapeKey(input_event.key)), .modifiers = drag_policy.modifiers(input_event.modifiers) }) == 0) return null;
 
             try validateRuntimeViewParent(self, input_event.window_id);
-            try validateViewLabel(input_event.label);
+            try @import("shell_admission_policy.zig").label(self.shell_admission_policy, 0, input_event.label);
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return error.ViewNotFound;
             if (self.views[index].kind != .gpu_surface) return error.InvalidViewOptions;
             const source_id = self.views[index].canvas_widget_drag_source_id;
-            if (source_id == 0) return null;
+            if (drag_policy.decide(policy, .{ .stage = .source, .facts = @intFromBool(source_id != 0) }) == 0) return null;
 
             const previous_render_state = self.views[index].canvasWidgetRenderState();
             const delta = self.views[index].canvas_widget_drag_delta;
@@ -473,7 +500,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 .delta = delta,
             };
             const route = try self.views[index].widgetLayoutTree().routeDragEvent(drag, output);
-            if (route.target == null) {
+            const action = drag_policy.decide(policy, .{ .stage = .route, .phase = 3, .delta = delta, .facts = 1 | @as(u8, if (route.target != null) 2 else 0) | @as(u8, if (self.views[index].canvas_widget_drag_source_hit != null) 4 else 0) });
+            if (action & 15 == 4 or action & 15 == 5) {
                 const captured_source = self.views[index].canvas_widget_drag_source_hit;
                 const captured_route = self.views[index].canvas_widget_drag_route_entries[0..self.views[index].canvas_widget_drag_route_len];
                 self.views[index].canvas_widget_drag_source_id = 0;
@@ -490,7 +518,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 if (!canvasWidgetRenderStatesEqual(previous_render_state, next_render_state)) {
                     try invalidateForCanvasWidgetRenderStateChange(self, index, previous_render_state, next_render_state);
                 }
-                if (captured_source) |source| {
+                if (action & 15 == 5) {
+                    const source = captured_source.?;
                     drag.source_id = source.id;
                     return .{
                         .window_id = input_event.window_id,
@@ -541,10 +570,33 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// treeitem role: ARIA tree rows carry a roving-focus keymap by
         /// design and keep every key they have today.
         fn canvasWidgetQuietListRowFocus(self: *const Runtime, index: usize, focused_id: canvas.ObjectId) bool {
-            if (focused_id == 0) return false;
-            if (self.views[index].canvas_widget_focus_visible_id == focused_id) return false;
-            const node_index = self.views[index].canvasWidgetNodeIndexById(focused_id) orelse return false;
-            const widget = self.views[index].widget_layout_nodes[node_index].widget;
+            return canvasWidgetKeyboardFocusParticipation(self, index, focused_id, 0);
+        }
+
+        /// Shared keyboard participation for routed focus and explicit
+        /// keyboard actions. Exact ids and retained nodes stay native;
+        /// compiled views own the classification through copied bytes.
+        pub fn canvasWidgetKeyboardFocusParticipation(self: *const Runtime, index: usize, id: canvas.ObjectId, stage: u8) bool {
+            const view = &self.views[index];
+            if (view.canvas_widget_surface_scope_policy) |policy| {
+                var facts: u8 = @as(u8, @intFromBool(id != 0)) |
+                    (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == id)) << 1);
+                var kind: u16 = 0;
+                if (view.canvasWidgetNodeIndexById(id)) |node_index| {
+                    const widget = view.widget_layout_nodes[node_index].widget;
+                    facts |= 4 | (@as(u8, @intFromBool(widget.semantics.role == .treeitem)) << 3);
+                    kind = canvas.widgetKindCode(widget.kind);
+                }
+                var request = [5]u8{ 33, stage, facts, 0, 0 };
+                std.mem.writeInt(u16, request[3..5], kind, .little);
+                var result: [1]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 1) @panic("invalid compiled keyboard participation result");
+                return result[0] != 0;
+            }
+            if (stage == 0 and id == 0) return false;
+            if (view.canvas_widget_focus_visible_id == id) return false;
+            const node_index = view.canvasWidgetNodeIndexById(id) orelse return false;
+            const widget = view.widget_layout_nodes[node_index].widget;
             return widget.kind == .list_item and widget.semantics.role != .treeitem;
         }
 
@@ -560,6 +612,47 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         pub fn updateCanvasWidgetClickCountFromPointer(self: *Runtime, input_event: GpuSurfaceInputEvent, pointer_event: *CanvasWidgetPointerEvent) void {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
+            if (self.views[index].canvas_widget_surface_scope_policy) |policy| {
+                const view = &self.views[index];
+                const point = pointer_event.pointer.point;
+                const target_id: canvas.ObjectId = if (pointer_event.press_target) |target| target.id else if (pointer_event.target) |target| target.id else 0;
+                var facts: u8 = @intFromBool(input_event.button == 0);
+                if (pointer_event.pointer.phase == .down and input_event.button == 0) {
+                    const ordered = input_event.timestamp_ns >= view.canvas_widget_click_timestamp_ns;
+                    facts |= (@as(u8, @intFromBool(view.canvas_widget_click_timestamp_ns != 0)) << 1) |
+                        (@as(u8, @intFromBool(pointer_event.pointer.pointer_id == view.canvas_widget_click_pointer_id)) << 2) |
+                        (@as(u8, @intFromBool(target_id == view.canvas_widget_click_target_id)) << 3) |
+                        (@as(u8, @intFromBool(ordered)) << 4) |
+                        (@as(u8, @intFromBool(ordered and input_event.timestamp_ns - view.canvas_widget_click_timestamp_ns <= canvas_widget_multi_click_interval_ns)) << 5) |
+                        (@as(u8, @intFromBool(@abs(point.x - view.canvas_widget_click_point.x) <= canvas_widget_multi_click_slop)) << 6) |
+                        (@as(u8, @intFromBool(@abs(point.y - view.canvas_widget_click_point.y) <= canvas_widget_multi_click_slop)) << 7);
+                }
+                const request = [4]u8{ 31, @intFromEnum(pointer_event.pointer.phase), view.canvas_widget_click_count, facts };
+                var result: [2]u8 = undefined;
+                if (policy(&request, &result) != result.len or result[0] > 3 or result[1] > 3 or
+                    ((result[0] == 0 or result[0] == 1) and result[1] != 0) or
+                    ((result[0] == 2 or result[0] == 3) and result[1] == 0)) @panic("invalid compiled click sequence result");
+                switch (result[0]) {
+                    0 => {},
+                    1 => {
+                        view.canvas_widget_click_count = 0;
+                        view.canvas_widget_click_timestamp_ns = 0;
+                        view.canvas_widget_click_pointer_id = 0;
+                        view.canvas_widget_click_target_id = 0;
+                    },
+                    2 => {
+                        view.canvas_widget_click_count = result[1];
+                        view.canvas_widget_click_timestamp_ns = input_event.timestamp_ns;
+                        view.canvas_widget_click_point = point;
+                        view.canvas_widget_click_pointer_id = pointer_event.pointer.pointer_id;
+                        view.canvas_widget_click_target_id = target_id;
+                        pointer_event.pointer.click_count = result[1];
+                    },
+                    3 => pointer_event.pointer.click_count = result[1],
+                    else => unreachable,
+                }
+                return;
+            }
             switch (pointer_event.pointer.phase) {
                 .down => {
                     if (input_event.button != 0) {
@@ -621,7 +714,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // item's label focuses the item, and clicking an editable
             // field (which claims its own presses) focuses the field
             // exactly as before.
-            const next_focus_id: canvas.ObjectId = if (pointer_event.press_target) |target| blk: {
+            var focus_action: [1]u8 = undefined;
+            const press = pointer_event.press_target;
+            var focus_compiled = false;
+            if (self.views[index].canvas_widget_surface_scope_policy != null) {
+                const focus_facts = @as(u8, @intFromBool(press != null)) |
+                    (@as(u8, @intFromBool(if (press) |target| self.views[index].widgetLayoutTree().focusTargetById(target.id) != null else false)) << 1);
+                focus_compiled = compiledCanvasPointerIntent(&self.views[index], 0, .down, focus_facts, if (press) |target| canvas.widgetKindCode(target.kind) else 0, &focus_action);
+            }
+            const next_focus_id: canvas.ObjectId = if (focus_compiled)
+                (if ((focus_action[0] & 1) != 0) press.?.id else 0)
+            else if (pointer_event.press_target) |target| blk: {
                 if (self.views[index].widgetLayoutTree().focusTargetById(target.id) != null) break :blk target.id;
                 break :blk 0;
             } else 0;
@@ -630,7 +733,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // editable text widget shows its focus affordances (ring and
             // caret) however focus arrived — the :focus-visible contract
             // text inputs have on every platform.
-            const next_focus_visible_id: canvas.ObjectId = if (pointer_event.press_target) |target| blk: {
+            const next_focus_visible_id: canvas.ObjectId = if (focus_compiled)
+                (if ((focus_action[0] & 2) != 0) next_focus_id else 0)
+            else if (pointer_event.press_target) |target| blk: {
                 if (target.id == next_focus_id and canvas_widget_runtime.canvasWidgetShowsPointerFocusRing(target.kind)) break :blk next_focus_id;
                 break :blk 0;
             } else 0;
@@ -641,8 +746,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // converts a keyboard ring into the caret contract, which
             // never reveals tooltips — Base UI's focus-visible guard
             // against click-focus opens).
-            self.views[index].canvas_widget_focus_visible_keyboard = false;
-            if (self.views[index].canvas_widget_focused_id == next_focus_id and self.views[index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+            if (focus_compiled and (focus_action[0] & 8) == 0) return;
+            if (!focus_compiled or (focus_action[0] & 4) != 0) self.views[index].canvas_widget_focus_visible_keyboard = false;
+            const changed = @as(u8, @intFromBool(self.views[index].canvas_widget_focused_id != next_focus_id)) |
+                (@as(u8, @intFromBool(self.views[index].canvas_widget_focus_visible_id != next_focus_visible_id)) << 1);
+            var commit: [1]u8 = undefined;
+            if (compiledCanvasPointerIntent(&self.views[index], 5, .hover, changed, 0, &commit)) {
+                if (commit[0] == 0) return;
+            } else if (changed == 0) return;
             const previous_state = self.views[index].canvasWidgetRenderState();
             self.views[index].canvas_widget_focused_id = next_focus_id;
             self.views[index].canvas_widget_focus_visible_id = next_focus_visible_id;
@@ -698,7 +809,33 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // mouse's proof.
             const hover_pointer_proven = self.views[index].canvas_widget_hover_pointer_live and
                 self.views[index].canvas_widget_hover_pointer_id == pointer_event.pointer.pointer_id;
-            switch (pointer_event.pointer.phase) {
+            const intent_facts = @as(u8, @intFromBool(hover_pointer_proven)) |
+                (@as(u8, @intFromBool(pointer_event.pointer.pointer_id & platform.touch_pointer_id_bit != 0)) << 1) |
+                (@as(u8, @intFromBool(geometry.RectF.fromSize(self.views[index].gpu_size).containsPoint(pointer_event.pointer.point))) << 2);
+            var intent: [4]u8 = undefined;
+            if (compiledCanvasPointerIntent(&self.views[index], 1, pointer_event.pointer.phase, intent_facts, 0, &intent)) {
+                next_hovered_id = switch (intent[0]) {
+                    0 => next_hovered_id,
+                    1 => 0,
+                    2 => hover_target_id,
+                    3 => hit_target_id,
+                    else => unreachable,
+                };
+                next_pressed_id = switch (intent[1]) {
+                    0 => next_pressed_id,
+                    1 => 0,
+                    2 => target_id,
+                    else => unreachable,
+                };
+                next_cursor = switch (intent[2]) {
+                    0 => next_cursor,
+                    1 => .arrow,
+                    2 => platformCursorFromCanvas(layout_tree.cursorForHit(hover_target)),
+                    3 => hit_cursor,
+                    else => unreachable,
+                };
+                applyCanvasPointerContainment(&self.views[index], intent[3], pointer_event.pointer.pointer_id, pointer_event.pointer.point, hover_raw_hit);
+            } else switch (pointer_event.pointer.phase) {
                 .hover, .move => {
                     next_hovered_id = hit_target_id;
                     next_cursor = hit_cursor;
@@ -787,8 +924,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // whenever the pointer is over a hover-detail widget, and a
             // repaint fires only when the snapped sample index changes —
             // gliding within one sample costs nothing.
-            const next_hover_point: ?geometry.PointF = if (pointer_event.pointer.phase != .cancel and
-                canvasChartHoverIndexForId(self, index, next_hovered_id, pointer_event.pointer.point) != null)
+            const chart_sample_present = pointer_event.pointer.phase != .cancel and
+                canvasChartHoverIndexForId(self, index, next_hovered_id, pointer_event.pointer.point) != null;
+            var point_action: [1]u8 = undefined;
+            const keep_point = if (compiledCanvasPointerIntent(&self.views[index], 2, pointer_event.pointer.phase, @intFromBool(chart_sample_present), 0, &point_action))
+                point_action[0] != 0
+            else
+                chart_sample_present;
+            const next_hover_point: ?geometry.PointF = if (keep_point)
                 pointer_event.pointer.point
             else
                 null;
@@ -819,15 +962,69 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // any other interaction) changes: hover chrome is a pure
             // function of the snapped index, so a stale point that maps
             // to the same sample renders the same pixels.
-            if (!interaction_changed and !cursor_changed) return;
+            const commit_facts = @as(u8, @intFromBool(self.views[index].canvas_widget_hovered_id != next_hovered_id)) |
+                (@as(u8, @intFromBool(self.views[index].canvas_widget_pressed_id != next_pressed_id)) << 1) |
+                (@as(u8, @intFromBool(hover_detail_changed)) << 2) | (@as(u8, @intFromBool(cursor_changed)) << 3);
+            var commit_action: [1]u8 = undefined;
+            const commit_compiled = compiledCanvasPointerIntent(&self.views[index], 3, .hover, commit_facts, 0, &commit_action);
+            if (commit_compiled) {
+                if ((commit_action[0] & 1) == 0) return;
+            } else if (!interaction_changed and !cursor_changed) return;
 
             const previous_state = self.views[index].canvasWidgetRenderState();
             self.views[index].canvas_widget_hovered_id = next_hovered_id;
             self.views[index].canvas_widget_pressed_id = next_pressed_id;
             self.views[index].canvas_widget_hover_point = next_hover_point;
             self.views[index].canvas_widget_cursor = next_cursor;
-            if (cursor_changed) try syncCanvasWidgetCursorForView(self, index);
-            if (interaction_changed) try invalidateForCanvasWidgetRenderStateChange(self, index, previous_state, self.views[index].canvasWidgetRenderState());
+            if (if (commit_compiled) (commit_action[0] & 2) != 0 else cursor_changed) try syncCanvasWidgetCursorForView(self, index);
+            if (if (commit_compiled) (commit_action[0] & 4) != 0 else interaction_changed) try invalidateForCanvasWidgetRenderStateChange(self, index, previous_state, self.views[index].canvasWidgetRenderState());
+        }
+
+        fn compiledCanvasPointerIntent(view: anytype, stage: u8, phase: canvas.WidgetPointerPhase, facts: u8, kind: u16, output: []u8) bool {
+            const policy = view.canvas_widget_surface_scope_policy orelse return false;
+            var request = [6]u8{ 29, stage, @intFromEnum(phase), facts, 0, 0 };
+            std.mem.writeInt(u16, request[4..6], kind, .little);
+            if (policy(&request, output) != output.len) @panic("invalid compiled pointer intent result");
+            if (stage == 1) {
+                if (output.len != 4 or output[0] > 3 or output[1] > 2 or output[2] > 3 or output[3] > 31)
+                    @panic("invalid compiled pointer intent selectors");
+            } else {
+                const limit: u8 = if (stage == 0) 15 else if (stage == 3) 7 else if (stage == 4) 24 else 1;
+                if (output.len != 1 or output[0] > limit or (stage == 4 and output[0] != 0 and output[0] != 24))
+                    @panic("invalid compiled pointer intent action");
+            }
+            return true;
+        }
+
+        fn applyCanvasPointerContainment(view: anytype, actions: u8, pointer_id: u64, point: geometry.PointF, hit: ?canvas.WidgetHit) void {
+            if ((actions & 1) != 0) {
+                view.canvas_widget_hover_pointer_live = true;
+                view.canvas_widget_hover_pointer_id = pointer_id;
+            }
+            if ((actions & 2) != 0) view.canvas_widget_hover_pointer_position = point;
+            if ((actions & 4) != 0) view.setCanvasWidgetHoverMsgChainForHit(hit);
+            if ((actions & 8) != 0) view.canvas_widget_hover_msg_chain_len = 0;
+            if ((actions & 16) != 0) view.canvas_widget_hover_pointer_live = false;
+        }
+
+        pub fn retireCanvasWidgetHoverForConsumedPointer(view: anytype, input: GpuSurfaceInputEvent, inside: bool) void {
+            const proven = view.canvas_widget_hover_pointer_live and view.canvas_widget_hover_pointer_id == input.pointer_id;
+            const phase: canvas.WidgetPointerPhase = switch (input.kind) {
+                .pointer_move => .hover,
+                .pointer_down => .down,
+                .pointer_drag => .move,
+                .pointer_up => .up,
+                .pointer_cancel => .cancel,
+                else => return,
+            };
+            const facts = @as(u8, @intFromBool(proven)) | (@as(u8, @intFromBool(inside)) << 2);
+            var action: [1]u8 = undefined;
+            if (compiledCanvasPointerIntent(view, 4, phase, facts, 0, &action)) {
+                applyCanvasPointerContainment(view, action[0], input.pointer_id, .{ .x = input.x, .y = input.y }, null);
+            } else if (proven and (input.kind == .pointer_cancel or input.kind == .pointer_up and !inside)) {
+                view.canvas_widget_hover_msg_chain_len = 0;
+                view.canvas_widget_hover_pointer_live = false;
+            }
         }
 
         /// The (widget id, snapped sample index) pair chart hover chrome
@@ -1041,12 +1238,21 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // transition resolution, per cause.
             switch (cause) {
                 .pointer => |event| {
+                    const phase: u8 = switch (event.phase) {
+                        .hover => 0,
+                        .down => 1,
+                        .move => 2,
+                        .up => 3,
+                        .cancel => 4,
+                        .wheel => 5,
+                    };
                     const had_pointer_shown = view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus;
                     // Hover transitions step the machine (a pointer
                     // gliding within one trigger is free); the armed
                     // delay itself fires on presented-frame timestamps
                     // in advanceCanvasTooltipIntentForFrame.
-                    if (view.canvas_widget_hovered_id != event.next_hovered_id) {
+                    const hover_changed = view.canvas_widget_hovered_id != event.next_hovered_id;
+                    if (canvasTooltipReconcileNeeded(view, .hover_change, @intFromBool(hover_changed), hover_changed)) {
                         try updateCanvasTooltipIntentForHoverChange(self, view_index, event.next_hovered_id, event.point);
                     }
                     // While a pointer-shown tooltip is up, EVERY move
@@ -1055,7 +1261,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     // usually changes no hover target (the tooltip is
                     // deliberately not hit-tested), so the transition
                     // gate above cannot see it.
-                    if (event.phase == .hover or event.phase == .move) {
+                    const travels = event.phase == .hover or event.phase == .move;
+                    if (canvasTooltipReconcileNeeded(view, .pointer_travel, phase, travels)) {
                         try updateCanvasTooltipIntentForPointerTravel(self, view_index, event.next_hovered_id, event.point);
                         // Content-hold release reprocessing: when this
                         // move hid the held tooltip (travel left both
@@ -1071,7 +1278,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                         // pointer is honestly on that trigger NOW.
                         // Idempotent when the transition above already
                         // armed it.
-                        if (had_pointer_shown and view.canvas_tooltip_shown_id == 0 and event.next_hovered_id != 0) {
+                        const release_facts: u8 = @as(u8, @intFromBool(had_pointer_shown)) |
+                            (@as(u8, @intFromBool(view.canvas_tooltip_shown_id != 0)) << 1) |
+                            (@as(u8, @intFromBool(event.next_hovered_id != 0)) << 2);
+                        if (canvasTooltipReconcileNeeded(view, .content_release, release_facts, had_pointer_shown and view.canvas_tooltip_shown_id == 0 and event.next_hovered_id != 0)) {
                             try updateCanvasTooltipIntentForHoverChange(self, view_index, event.next_hovered_id, event.point);
                         }
                     }
@@ -1080,7 +1290,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     // alike (after the hover step above, so a down that
                     // also moved the hover cannot re-arm or warm past
                     // the press).
-                    if (event.phase == .down) {
+                    const down = event.phase == .down;
+                    if (canvasTooltipReconcileNeeded(view, .press, phase, down)) {
                         try updateCanvasTooltipIntentForPress(self, view_index);
                     }
                 },
@@ -1090,7 +1301,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                     // still dismisses ("pointer-down dismisses" is
                     // documented for ANY down — shadcn's Base UI-backed
                     // default; macOS help tags vanish on any click).
-                    if (event.down) try updateCanvasTooltipIntentForPress(self, view_index);
+                    if (canvasTooltipReconcileNeeded(view, .press, if (event.down) 1 else 3, event.down))
+                        try updateCanvasTooltipIntentForPress(self, view_index);
                 },
                 // `.pointer_cancel` — the pointer LEAVING the view —
                 // short-circuits ahead of any transition gate: its
@@ -1121,7 +1333,9 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 // Pointer-owned tooltips are untouched — hover holds
                 // them, and a focus move says nothing about the pointer.
                 .programmatic_focus => {
-                    if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_from_focus) {
+                    if (view.applyCompiledCanvasTooltipIntent(.programmatic_focus, 0, 0, false)) |changed| {
+                        if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                    } else if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_from_focus) {
                         view.canvas_tooltip_shown_id = 0;
                         view.canvas_tooltip_shown_owner_id = 0;
                         view.canvas_tooltip_shown_from_focus = false;
@@ -1140,16 +1354,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 // is a stale affordance, and its semantics node would
                 // keep claiming visible in the a11y tree.
                 .view_blur => {
-                    const had_shown = view.canvas_tooltip_shown_id != 0;
-                    view.canvas_tooltip_armed_id = 0;
-                    view.canvas_tooltip_armed_owner_id = 0;
-                    view.canvas_tooltip_deadline_ns = 0;
-                    view.canvas_tooltip_warm_until_ns = 0;
-                    view.canvas_tooltip_transit_deadline_ns = 0;
-                    view.canvas_tooltip_shown_id = 0;
-                    view.canvas_tooltip_shown_owner_id = 0;
-                    view.canvas_tooltip_shown_from_focus = false;
-                    if (had_shown) try commitCanvasTooltipVisibility(self, view_index);
+                    if (view.applyCompiledCanvasTooltipIntent(.blur, 0, 0, false)) |changed| {
+                        if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                    } else {
+                        const had_shown = view.canvas_tooltip_shown_id != 0;
+                        view.canvas_tooltip_armed_id = 0;
+                        view.canvas_tooltip_armed_owner_id = 0;
+                        view.canvas_tooltip_deadline_ns = 0;
+                        view.canvas_tooltip_warm_until_ns = 0;
+                        view.canvas_tooltip_transit_deadline_ns = 0;
+                        view.canvas_tooltip_shown_id = 0;
+                        view.canvas_tooltip_shown_owner_id = 0;
+                        view.canvas_tooltip_shown_from_focus = false;
+                        if (had_shown) try commitCanvasTooltipVisibility(self, view_index);
+                    }
                 },
             }
 
@@ -1160,9 +1378,39 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // an app that receives no further input. The per-frame pump
             // in planCanvasFrameForView takes over from the first
             // planned frame.
-            if (view.canvasTooltipIntentArmed()) {
+            const frame_facts: u8 = @as(u8, @intFromBool(view.canvas_tooltip_armed_id != 0)) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_transit_deadline_ns != 0)) << 1);
+            if (canvasTooltipReconcileNeeded(view, .frame, frame_facts, view.canvasTooltipIntentArmed())) {
                 self.invalidateFor(.state, view.frame);
             }
+        }
+
+        const CanvasTooltipReconcileStage = enum(u8) {
+            hover_change,
+            pointer_travel,
+            content_release,
+            press,
+            point_source,
+            adoption_point,
+            moved_hover,
+            hover_binding_owner,
+            changed_binding,
+            focus_binding_owner,
+            reseed,
+            frame,
+        };
+
+        fn compiledCanvasTooltipReconcileAction(view: anytype, stage: CanvasTooltipReconcileStage, facts: u8) ?u8 {
+            const policy = view.canvas_widget_tooltip_policy orelse return null;
+            const request = [3]u8{ 26, @intFromEnum(stage), facts };
+            var response: [1]u8 = undefined;
+            if (policy(&request, &response) != response.len or response[0] > @as(u8, if (stage == .point_source) 2 else 1))
+                @panic("invalid compiled tooltip reconciliation action");
+            return response[0];
+        }
+
+        fn canvasTooltipReconcileNeeded(view: anytype, stage: CanvasTooltipReconcileStage, facts: u8, native_reference: bool) bool {
+            return if (compiledCanvasTooltipReconcileAction(view, stage, facts)) |action| action != 0 else native_reference;
         }
 
         /// How a content-moved reconcile treats the transition step:
@@ -1200,7 +1448,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // 2. Hover re-hit-test from the stored position (the wheel
             // passes its live point; whichever is used is the truth the
             // rest of this reconcile measures against).
-            const effective_point = live_point orelse view.canvas_last_pointer_position orelse {
+            const point_facts: u8 = @as(u8, @intFromBool(live_point != null)) |
+                (@as(u8, @intFromBool(view.canvas_last_pointer_position != null)) << 1);
+            const point_source = compiledCanvasTooltipReconcileAction(view, .point_source, point_facts) orelse
+                @as(u8, if (live_point != null) 1 else if (view.canvas_last_pointer_position != null) 2 else 0);
+            const selected_point = switch (point_source) {
+                0 => null,
+                1 => live_point orelse @panic("missing compiled tooltip live point"),
+                2 => view.canvas_last_pointer_position orelse @panic("missing compiled tooltip stored point"),
+                else => unreachable,
+            };
+            const effective_point = selected_point orelse {
                 view.reconcileCanvasWidgetRenderStateAfterScroll(null);
                 try closeCanvasTooltipPointerIntent(self, view_index);
                 // A keyboard-only session has no pointer to place, but
@@ -1234,7 +1492,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // continuous scrolls or rebuilds re-arm the bounded grace
             // forever under a stationary pointer.
             var held_released = false;
-            if (view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus) {
+            if (view.canvas_widget_tooltip_policy != null) {
+                const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
+                    (@as(u16, @intFromBool(next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id)) << 2) |
+                    (@as(u16, @intFromBool(canvasTooltipShownContentContains(view, effective_point))) << 3);
+                const actions = compiledCanvasTooltipPointerActions(view, 4, facts, 11);
+                if ((actions & 1) != 0) view.canvas_tooltip_transit_deadline_ns = 0;
+                if ((actions & 2) != 0) view.canvas_tooltip_pointer_from = effective_point;
+                if ((actions & 8) != 0) {
+                    hideShownCanvasTooltipWithWarmth(view, canvasRenderAnimationStartNsForView(view));
+                    try commitCanvasTooltipVisibility(self, view_index);
+                    held_released = true;
+                }
+            } else if (view.canvas_tooltip_shown_id != 0 and !view.canvas_tooltip_shown_from_focus) {
                 const on_owner = next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id;
                 if (on_owner or canvasTooltipShownContentContains(view, effective_point)) {
                     view.canvas_tooltip_pointer_from = effective_point;
@@ -1249,21 +1520,13 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // 4. Transition resolution. Scroll transitions run
             // point-blind (no corridor — see the mode doc above);
             // adoption's pass the stored point through.
-            const transition_point: ?geometry.PointF = switch (cause) {
-                .scroll => null,
-                .adoption => effective_point,
-            };
-            if (next_hovered_id != previous_hovered_id) {
-                try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, transition_point);
-            } else if (held_released and next_hovered_id != 0) {
-                // Content-hold release reprocessing, the content-moved
-                // shape: the hold broke while the hover id stayed put
-                // on a trigger the pointer had reached THROUGH the
-                // tooltip's frame. That id was recorded under stale
-                // ownership — the frame claimed the hover — so it never
-                // stepped the machine; reprocess it as a fresh
-                // transition so the trigger under the pointer arms (or
-                // warm-shows) per the normal rules.
+            const adoption = cause == .adoption;
+            const transition_point: ?geometry.PointF = if (canvasTooltipReconcileNeeded(view, .adoption_point, @intFromBool(adoption), adoption)) effective_point else null;
+            const hover_changed = next_hovered_id != previous_hovered_id;
+            const transition_facts: u8 = @as(u8, @intFromBool(hover_changed)) |
+                (@as(u8, @intFromBool(held_released)) << 1) |
+                (@as(u8, @intFromBool(next_hovered_id != 0)) << 2);
+            if (canvasTooltipReconcileNeeded(view, .moved_hover, transition_facts, hover_changed or (held_released and next_hovered_id != 0))) {
                 try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, transition_point);
             }
             // Binding-change step, adoption only: the transition gate
@@ -1313,9 +1576,13 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // pointer activity keeps the instant-show courtesy.
             switch (cause) {
                 .adoption => |bindings| {
-                    if (bindings.hovered_owner_id != 0 and next_hovered_id == bindings.hovered_owner_id) {
+                    const owner_facts: u8 = @as(u8, @intFromBool(bindings.hovered_owner_id != 0)) |
+                        (@as(u8, @intFromBool(next_hovered_id == bindings.hovered_owner_id)) << 1);
+                    if (canvasTooltipReconcileNeeded(view, .hover_binding_owner, owner_facts, bindings.hovered_owner_id != 0 and next_hovered_id == bindings.hovered_owner_id)) {
                         const adopted_tooltip_id = view.canvasWidgetOwnedTooltipIdForOwner(next_hovered_id);
-                        if (adopted_tooltip_id != 0 and adopted_tooltip_id != bindings.hovered_tooltip_id) {
+                        const binding_facts: u8 = @as(u8, @intFromBool(adopted_tooltip_id != 0)) |
+                            (@as(u8, @intFromBool(adopted_tooltip_id != bindings.hovered_tooltip_id)) << 1);
+                        if (canvasTooltipReconcileNeeded(view, .changed_binding, binding_facts, adopted_tooltip_id != 0 and adopted_tooltip_id != bindings.hovered_tooltip_id)) {
                             try updateCanvasTooltipIntentForHoverChange(self, view_index, next_hovered_id, transition_point);
                         }
                     }
@@ -1326,8 +1593,12 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // Whichever position drove this reconcile re-seeds the
             // corridor apex for whatever the step armed or warm-showed,
             // so a later leave fans out from the truth.
-            if (next_hovered_id != 0 and (view.canvas_tooltip_armed_owner_id == next_hovered_id or
-                (view.canvas_tooltip_shown_owner_id == next_hovered_id and !view.canvas_tooltip_shown_from_focus)))
+            const reseed_facts: u8 = @as(u8, @intFromBool(next_hovered_id != 0)) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_armed_owner_id == next_hovered_id)) << 1) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_shown_owner_id == next_hovered_id)) << 2) |
+                (@as(u8, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 3);
+            if (canvasTooltipReconcileNeeded(view, .reseed, reseed_facts, next_hovered_id != 0 and (view.canvas_tooltip_armed_owner_id == next_hovered_id or
+                (view.canvas_tooltip_shown_owner_id == next_hovered_id and !view.canvas_tooltip_shown_from_focus))))
             {
                 view.canvas_tooltip_pointer_from = effective_point;
             }
@@ -1351,11 +1622,16 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// rebuild path must stay silent).
         fn reconcileCanvasTooltipIntentForAdoptedFocusBinding(self: *Runtime, view_index: usize, bindings: CanvasTooltipAdoptionBindingSnapshot) anyerror!void {
             const view = &self.views[view_index];
-            if (bindings.focus_visible_owner_id == 0) return;
-            if (!view.focused or !view.canvas_widget_focus_visible_keyboard) return;
-            if (view.canvas_widget_focus_visible_id != bindings.focus_visible_owner_id) return;
+            const owner_facts: u8 = @as(u8, @intFromBool(bindings.focus_visible_owner_id != 0)) |
+                (@as(u8, @intFromBool(view.focused)) << 1) |
+                (@as(u8, @intFromBool(view.canvas_widget_focus_visible_keyboard)) << 2) |
+                (@as(u8, @intFromBool(view.canvas_widget_focus_visible_id == bindings.focus_visible_owner_id)) << 3);
+            if (!canvasTooltipReconcileNeeded(view, .focus_binding_owner, owner_facts, bindings.focus_visible_owner_id != 0 and view.focused and view.canvas_widget_focus_visible_keyboard and
+                view.canvas_widget_focus_visible_id == bindings.focus_visible_owner_id)) return;
             const adopted_tooltip_id = view.canvasWidgetOwnedTooltipIdForOwner(bindings.focus_visible_owner_id);
-            if (adopted_tooltip_id == 0 or adopted_tooltip_id == bindings.focus_visible_tooltip_id) return;
+            const binding_facts: u8 = @as(u8, @intFromBool(adopted_tooltip_id != 0)) |
+                (@as(u8, @intFromBool(adopted_tooltip_id != bindings.focus_visible_tooltip_id)) << 1);
+            if (!canvasTooltipReconcileNeeded(view, .changed_binding, binding_facts, adopted_tooltip_id != 0 and adopted_tooltip_id != bindings.focus_visible_tooltip_id)) return;
             try updateCanvasTooltipIntentForFocusVisibleChange(self, view_index, bindings.focus_visible_owner_id);
         }
 
@@ -1397,6 +1673,41 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             };
             const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
 
+            if (view.canvas_widget_tooltip_policy != null) {
+                const delay_ns = if (tooltip_index) |i| canvasTooltipShowDelayNs(view.widget_layout_nodes[i].widget, view.widget_tokens) else 0;
+                const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
+                    (@as(u16, @intFromBool(tooltip_id != 0)) << 2) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_id == tooltip_id)) << 3) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_armed_id != 0)) << 4) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_armed_id == tooltip_id)) << 5) |
+                    (@as(u16, @intFromBool(canvasTooltipShownContentContains(view, point))) << 6) |
+                    (@as(u16, @intFromBool(canvasTooltipTravelRegionContains(view, point))) << 7) |
+                    (@as(u16, @intFromBool(canvasTooltipIntentActionAllowed(self, view_index))) << 8) |
+                    (@as(u16, @intFromBool(delay_ns == 0)) << 9) |
+                    (@as(u16, @intFromBool(now_ns < view.canvas_tooltip_warm_until_ns)) << 10) |
+                    (@as(u16, @intFromBool(canvasTooltipWarmWindowNs(view.widget_tokens) != 0)) << 11);
+                const actions = compiledCanvasTooltipPointerActions(view, 0, facts, 15);
+                if ((actions & (4 | 8)) != 0 and (tooltip_id == 0 or !canvasTooltipIntentActionAllowed(self, view_index)))
+                    @panic("ineligible compiled tooltip pointer reveal");
+                if ((actions & 2) != 0) hideShownCanvasTooltipWithWarmth(view, now_ns);
+                if ((actions & 1) != 0) clearCanvasTooltipArm(view);
+                if ((actions & 4) != 0) {
+                    view.canvas_tooltip_shown_id = tooltip_id;
+                    view.canvas_tooltip_shown_owner_id = next_hovered_id;
+                    view.canvas_tooltip_shown_from_focus = false;
+                    clearCanvasTooltipArm(view);
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                    if (point) |value| view.canvas_tooltip_pointer_from = value;
+                } else if ((actions & 8) != 0) {
+                    view.canvas_tooltip_armed_id = tooltip_id;
+                    view.canvas_tooltip_armed_owner_id = next_hovered_id;
+                    view.canvas_tooltip_deadline_ns = now_ns + delay_ns;
+                    if (point) |value| view.canvas_tooltip_pointer_from = value;
+                }
+                if ((actions & (2 | 4)) != 0) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             var shown_changed = false;
             // The pointer sitting inside the shown tooltip's own frame
             // holds it open (WCAG 1.4.13: hover-revealed content must be
@@ -1497,6 +1808,22 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// deterministic (Base UI's safe polygon is unbounded).
         fn updateCanvasTooltipIntentForPointerTravel(self: *Runtime, view_index: usize, next_hovered_id: canvas.ObjectId, point: geometry.PointF) anyerror!void {
             const view = &self.views[view_index];
+            if (view.canvas_widget_tooltip_policy != null) {
+                const facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 1) |
+                    (@as(u16, @intFromBool(next_hovered_id != 0 and next_hovered_id == view.canvas_tooltip_shown_owner_id)) << 2) |
+                    (@as(u16, @intFromBool(canvasTooltipShownContentContains(view, point))) << 3) |
+                    (@as(u16, @intFromBool(canvasTooltipTravelRegionContains(view, point))) << 4);
+                const actions = compiledCanvasTooltipPointerActions(view, 1, facts, 15);
+                if ((actions & 1) != 0) view.canvas_tooltip_transit_deadline_ns = 0;
+                if ((actions & 2) != 0) view.canvas_tooltip_pointer_from = point;
+                if ((actions & 4) != 0) view.canvas_tooltip_transit_deadline_ns = canvasRenderAnimationStartNsForView(view) + tooltip_transit_grace_ms * std.time.ns_per_ms;
+                if ((actions & 8) != 0) {
+                    hideShownCanvasTooltipWithWarmth(view, canvasRenderAnimationStartNsForView(view));
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+                return;
+            }
             if (view.canvas_tooltip_shown_id == 0 or view.canvas_tooltip_shown_from_focus) {
                 view.canvas_tooltip_transit_deadline_ns = 0;
                 return;
@@ -1514,6 +1841,22 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             }
             hideShownCanvasTooltipWithWarmth(view, now_ns);
             try commitCanvasTooltipVisibility(self, view_index);
+        }
+
+        /// The existing callback copies the borrowed result before another
+        /// compiled call; neither input nor output escapes or resets the cycle.
+        fn compiledCanvasTooltipPointerActions(view: anytype, cause: u8, facts: u16, allowed: u8) u8 {
+            const request = [4]u8{ 25, cause, @truncate(facts), @truncate(facts >> 8) };
+            var output: [1]u8 = undefined;
+            if (view.canvas_widget_tooltip_policy.?(&request, &output) != output.len or (output[0] & ~allowed) != 0)
+                @panic("invalid compiled tooltip pointer result");
+            return output[0];
+        }
+
+        fn clearCanvasTooltipArm(view: anytype) void {
+            view.canvas_tooltip_armed_id = 0;
+            view.canvas_tooltip_armed_owner_id = 0;
+            view.canvas_tooltip_deadline_ns = 0;
         }
 
         /// Hide the pointer-shown tooltip and open the shared warm
@@ -1658,6 +2001,36 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// frames coming while a delay is armed.
         pub fn advanceCanvasTooltipIntentForFrame(self: *Runtime, view_index: usize, timestamp_ns: u64) anyerror!void {
             const view = &self.views[view_index];
+            if (view.canvas_widget_tooltip_policy != null) {
+                const allowed = canvasTooltipIntentActionAllowed(self, view_index);
+                const facts: u16 = @as(u16, @intFromBool(allowed)) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_id != 0)) << 1) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_shown_from_focus)) << 2) |
+                    (@as(u16, @intFromBool(view.canvas_tooltip_transit_deadline_ns != 0 and timestamp_ns >= view.canvas_tooltip_transit_deadline_ns)) << 3);
+                const expiry = compiledCanvasTooltipPointerActions(view, 2, facts, 3);
+                if ((expiry & 1) != 0) {
+                    clearCanvasTooltipArm(view);
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                    return;
+                }
+                if ((expiry & 2) != 0) {
+                    hideShownCanvasTooltipWithWarmth(view, timestamp_ns);
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+                const promote_facts: u16 = @as(u16, @intFromBool(view.canvas_tooltip_armed_id != 0)) |
+                    (@as(u16, @intFromBool(timestamp_ns >= view.canvas_tooltip_deadline_ns)) << 1);
+                if (compiledCanvasTooltipPointerActions(view, 3, promote_facts, 1) != 0) {
+                    if (!allowed or view.canvas_tooltip_armed_id == 0 or timestamp_ns < view.canvas_tooltip_deadline_ns)
+                        @panic("ineligible compiled tooltip deadline promotion");
+                    view.canvas_tooltip_shown_id = view.canvas_tooltip_armed_id;
+                    view.canvas_tooltip_shown_owner_id = view.canvas_tooltip_armed_owner_id;
+                    view.canvas_tooltip_shown_from_focus = false;
+                    clearCanvasTooltipArm(view);
+                    view.canvas_tooltip_transit_deadline_ns = 0;
+                    try commitCanvasTooltipVisibility(self, view_index);
+                }
+                return;
+            }
             // A suppressed view promotes nothing: with the arm paths
             // gated on the same predicate and both suppression edges
             // (app deactivation, window key-loss) resetting the armed
@@ -1788,6 +2161,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
 
         fn updateCanvasTooltipIntentForPress(self: *Runtime, view_index: usize) anyerror!void {
             const view = &self.views[view_index];
+            if (view.applyCompiledCanvasTooltipIntent(.press, 0, 0, false)) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             view.canvas_tooltip_armed_id = 0;
             view.canvas_tooltip_armed_owner_id = 0;
             view.canvas_tooltip_deadline_ns = 0;
@@ -1823,6 +2200,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             };
             const tooltip_id: canvas.ObjectId = if (tooltip_index) |node_index| view.widget_layout_nodes[node_index].widget.id else 0;
 
+            if (view.applyCompiledCanvasTooltipIntent(.focus, tooltip_id, focus_visible_id, canvasTooltipIntentActionAllowed(self, view_index))) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             var shown_changed = false;
             if (view.canvas_tooltip_shown_id != 0 and view.canvas_tooltip_shown_from_focus and view.canvas_tooltip_shown_id != tooltip_id) {
                 view.canvas_tooltip_shown_id = 0;
@@ -1896,6 +2277,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 break :blk view.widget_layout_nodes[tooltip_index].widget.id;
             };
             if (tooltip_id == 0) return;
+            if (view.applyCompiledCanvasTooltipIntent(.activation, tooltip_id, target.id, false)) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, index);
+                return;
+            }
             var matched = false;
             if (view.canvas_tooltip_armed_id == tooltip_id) {
                 view.canvas_tooltip_armed_id = 0;
@@ -2013,10 +2398,20 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (self.options.platform.services.set_window_drag_regions_fn == null) return;
             const view = &self.views[view_index];
             var regions: [canvas_limits.max_canvas_widget_window_drag_regions_per_view]platform.WindowDragRegion = undefined;
-            const count = collectCanvasWidgetWindowDragRegions(view.widgetLayoutTree(), &regions);
-            if (view.canvas_widget_drag_regions_pushed) {
+            const compiled = host_regions.plan(view.canvas_widget_surface_scope_policy, .drag, .{
+                .nodes = view.widgetLayoutTree().nodes,
+                .drag_service = true,
+                .drag_pushed = view.canvas_widget_drag_regions_pushed,
+                .previous = view.canvas_widget_drag_regions[0..view.canvas_widget_drag_region_count],
+            });
+            const count = if (compiled) |program| count: {
+                if (program.detail == 0) return;
+                @memcpy(regions[0..program.region_count], program.regions[0..program.region_count]);
+                break :count program.region_count;
+            } else collectCanvasWidgetWindowDragRegions(view.widgetLayoutTree(), &regions);
+            if (compiled == null and view.canvas_widget_drag_regions_pushed) {
                 if (count == view.canvas_widget_drag_region_count and windowDragRegionsEqual(regions[0..count], view.canvas_widget_drag_regions[0..count])) return;
-            } else if (count == 0) {
+            } else if (compiled == null and count == 0) {
                 return;
             }
             try self.options.platform.services.setWindowDragRegions(view.window_id, view.label, regions[0..count]);
@@ -2118,6 +2513,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// courtesy earned by a pointer we cannot place.
         fn closeCanvasTooltipPointerIntent(self: *Runtime, view_index: usize) anyerror!void {
             const view = &self.views[view_index];
+            if (view.applyCompiledCanvasTooltipIntent(.pointer_close, 0, 0, false)) |changed| {
+                if (changed) try commitCanvasTooltipVisibility(self, view_index);
+                return;
+            }
             view.canvas_tooltip_armed_id = 0;
             view.canvas_tooltip_armed_owner_id = 0;
             view.canvas_tooltip_deadline_ns = 0;
@@ -2171,7 +2570,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, pointer_event.window_id, pointer_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
 
-            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, .wheel) orelse return;
+            const source: runtime_view.CanvasWidgetScrollSource = if (pointer_event.pointer.scroll_is_detented) .detented_wheel else .wheel;
+            const dirty = try self.views[index].applyCanvasWidgetScrollRoute(pointer_event.route, pointer_event.pointer.delta, source) orelse return;
             const previous_cursor = self.views[index].canvas_widget_cursor;
             try reconcileCanvasWidgetRenderStateAfterScrollWithTooltipIntent(self, index, pointer_event.pointer.point);
             if (previous_cursor != self.views[index].canvas_widget_cursor) try syncCanvasWidgetCursorForView(self, index);
@@ -2210,13 +2610,18 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             paste_buffer: []u8,
         ) anyerror!void {
             if (input_event.kind != .key_down) return;
-            const action = canvas.widgetKeyboardClipboardAction(.{
-                .phase = .key_down,
-                .key = input_event.key,
-                .modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers),
-            }) orelse return;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return;
             if (self.views[index].kind != .gpu_surface or !self.views[index].focused) return;
+            const keyboard = canvas.WidgetKeyboardEvent{
+                .phase = .key_down,
+                .key = input_event.key,
+                .modifiers = if (normalizedInput(self, input_event)) |program| program.keyboardModifiers() else canvasWidgetKeyboardModifiers(input_event.modifiers),
+            };
+            const focused_index = self.views[index].canvasWidgetNodeIndexById(self.views[index].canvas_widget_focused_id);
+            const action = (if (focused_index) |node_index|
+                canvas.widgetKeyboardClipboardActionForWidget(self.views[index].widget_layout_nodes[node_index].widget, keyboard)
+            else
+                canvas.widgetKeyboardClipboardAction(keyboard)) orelse return;
 
             switch (action) {
                 .copy => {
@@ -2275,8 +2680,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(target.id) orelse return null;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
             if (!canvas_widget_runtime.canvasWidgetEditableTextKind(widget.kind) or widget.state.disabled) return null;
-            const range = canvas.widgetTextSelectionRange(widget) orelse return null;
-            if (range.isCollapsed(widget.text.len)) return null;
+            const range = canvas.widgetTextClipboardState(widget).selection orelse return null;
             return widget.text[range.start..range.end];
         }
 
@@ -2299,6 +2703,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
             const target = keyboard_event.target orelse return;
+            const target_node = self.views[index].widgetLayoutTree().findById(target.id) orelse return;
             const history_shortcut = if (!keyboard_event.history_replay)
                 self.views[index].canvasWidgetTextHistoryShortcut(target, keyboard_event.keyboard)
             else
@@ -2326,7 +2731,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             const edit = if (keyboard_event.history_replay)
                 derived
             else
-                canvas.sanitizedSingleLineTextInputEvent(target.kind, derived) orelse {
+                canvas.sanitizedTextInputEventForWidget(target_node.widget, derived) orelse {
                     keyboard_event.keyboard.edit = null;
                     return;
                 };
@@ -2342,6 +2747,23 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
                 try self.views[index].applyCanvasWidgetTextEditWithoutHistory(target.id, edit) orelse return
             else
                 try self.views[index].applyCanvasWidgetTextEdit(target.id, edit) orelse return;
+            // Keyboard Escape closes this editor's composition directly. It
+            // must release the native IME owner too, or later text intended
+            // for a newly focused editor still routes to the canceled one.
+            // Host IME cancel events keep their separate converted-commit
+            // grace (cancel followed by text_input), handled by GPU routing.
+            var escape_facts = input_composition.observations(self, &self.views[index]);
+            escape_facts.claimed = edit == .cancel_composition;
+            escape_facts.routed_id = target.id;
+            const escape_input = GpuSurfaceInputEvent{ .window_id = keyboard_event.window_id, .label = keyboard_event.view_label, .kind = if (keyboard_event.keyboard.phase == .key_down) .key_down else .text_input };
+            if (input_composition.plan(self.views[index].canvas_widget_surface_scope_policy, .escape, escape_input, escape_facts)) |program| {
+                input_composition.installWidget(&self.views[index], program);
+            } else if (edit == .cancel_composition and keyboard_event.keyboard.phase == .key_down and
+                self.views[index].canvas_widget_ime_owner_id == target.id)
+            {
+                self.views[index].canvas_widget_ime_owner_id = 0;
+                self.views[index].canvas_widget_ime_commit_grace = .none;
+            }
             if (keyboard_event.history_replay) {
                 self.views[index].commitCanvasWidgetTextHistoryReplayIfComplete(
                     target,
@@ -2543,10 +2965,10 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// focus back on the trigger).
         pub fn dismissCanvasWidgetSurfaceFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!canvas.ObjectId {
             if (input_event.kind != .key_down) return 0;
-            const escape = canvasWidgetEscapeKey(input_event.key);
+            const escape = if (normalizedInput(self, input_event)) |program| program.has(2) else canvasWidgetEscapeKey(input_event.key);
             const tab = std.ascii.eqlIgnoreCase(input_event.key, "tab");
             if (!escape and !tab) return 0;
-            const modifiers = canvasWidgetKeyboardModifiers(input_event.modifiers);
+            const modifiers = if (normalizedInput(self, input_event)) |program| program.keyboardModifiers() else canvasWidgetKeyboardModifiers(input_event.modifiers);
             if (modifiers.hasNavigationModifier()) return 0;
             // Shift+Tab is still focus departure; Shift+Escape is not a
             // dismissal chord at all.
@@ -2592,7 +3014,8 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             if (view_index >= self.view_count) return error.ViewNotFound;
             const node_index = self.views[view_index].canvasWidgetNodeIndexById(id) orelse return;
             const widget = self.views[view_index].widget_layout_nodes[node_index].widget;
-            if (!canvasWidgetCommandable(widget.kind)) return;
+            const eligible = compiledCanvasCommandActivation(&self.views[view_index], 0, 0, 0, 0, widget.kind) orelse canvasWidgetCommandable(widget.kind);
+            if (!eligible) return;
             const command = self.views[view_index].canvasWidgetCommand(id) orelse return;
             try self.dispatchCommand(app, .{
                 .name = command,
@@ -2613,21 +3036,27 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // press); the release may land anywhere within the claiming
             // widget's bounds or the raw target's own bounds.
             const press = pointer_event.press_target orelse return;
-            switch (pointer_event.pointer.phase) {
+            if (self.views[index].canvas_widget_surface_scope_policy != null) {
+                const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
+                const facts: u8 = @as(u8, @intFromBool(pressed_id == target.id)) |
+                    (@as(u8, @intFromBool(press.id != target.id)) << 1) |
+                    (@as(u8, @intFromBool(press.bounds.normalized().containsPoint(pointer_event.pointer.point))) << 2) |
+                    (@as(u8, @intFromBool(target.bounds.normalized().containsPoint(pointer_event.pointer.point))) << 3);
+                if (!compiledCanvasCommandActivation(&self.views[index], 1, @intFromEnum(pointer_event.pointer.phase), 0, facts, press.kind).?) return;
+            } else switch (pointer_event.pointer.phase) {
                 .down => {
                     if (!canvasWidgetCommandFiresOnPointerDown(press.kind)) return;
                     if (!canvasWidgetPressReleaseInBounds(press, target, pointer_event.pointer.point)) return;
-                    try dispatchCanvasWidgetCommandForId(self, app, index, press.id);
                 },
                 .up => {
                     if (canvasWidgetCommandFiresOnPointerDown(press.kind)) return;
                     const pressed_id = if (pointer_event.pointer.captured_id != 0) pointer_event.pointer.captured_id else self.views[index].canvas_widget_pressed_id;
                     if (pressed_id != target.id) return;
                     if (!canvasWidgetPressReleaseInBounds(press, target, pointer_event.pointer.point)) return;
-                    try dispatchCanvasWidgetCommandForId(self, app, index, press.id);
                 },
                 .hover, .move, .cancel, .wheel => return,
             }
+            try dispatchCanvasWidgetCommandForId(self, app, index, press.id);
         }
 
         fn canvasWidgetPressReleaseInBounds(press: canvas.WidgetHit, target: canvas.WidgetHit, point: geometry.PointF) bool {
@@ -2636,21 +3065,32 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         }
 
         pub fn dispatchCanvasWidgetCommandFromKeyboard(self: *Runtime, app: runtime_api.App(Runtime), keyboard_event: CanvasWidgetKeyboardEvent) anyerror!void {
-            if (keyboard_event.keyboard.phase != .key_down or keyboard_event.keyboard.modifiers.hasNavigationModifier()) return;
             const target = keyboard_event.target orelse return;
-            // Activation keys press any commandable target; the menu-open
-            // arrows press select/combobox triggers too — the same keymap
-            // the control-intent resolver applies for `on_press`, kept in
-            // lockstep so command-string apps open their pickers from the
-            // keyboard exactly like TEA apps.
-            const arrow_opens = (target.kind == .select or target.kind == .combobox) and
-                canvas.isWidgetMenuOpenArrowKey(keyboard_event.keyboard.key) and
-                !(target.state.expanded orelse false);
-            if (!canvas.isWidgetActivationKey(keyboard_event.keyboard.key) and !arrow_opens) return;
-            if (arrow_opens and keyboard_event.keyboard.focus_moved) return;
             const index = runtimeFindViewIndex(self, keyboard_event.window_id, keyboard_event.view_label) orelse return;
             if (self.views[index].kind != .gpu_surface) return;
+            if (self.views[index].canvas_widget_surface_scope_policy != null) {
+                const key: u8 = if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "space")) 1 else if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "enter")) 2 else if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "arrowup")) 3 else if (std.ascii.eqlIgnoreCase(keyboard_event.keyboard.key, "arrowdown")) 4 else 0;
+                const facts: u8 = @as(u8, @intFromBool(keyboard_event.keyboard.modifiers.hasNavigationModifier())) |
+                    (@as(u8, @intFromBool(target.state.expanded orelse false)) << 1) |
+                    (@as(u8, @intFromBool(keyboard_event.keyboard.focus_moved)) << 2);
+                if (!compiledCanvasCommandActivation(&self.views[index], 2, @intFromEnum(keyboard_event.keyboard.phase), key, facts, target.kind).?) return;
+            } else {
+                if (keyboard_event.keyboard.phase != .key_down or keyboard_event.keyboard.modifiers.hasNavigationModifier()) return;
+                const arrow_opens = (target.kind == .select or target.kind == .combobox) and
+                    canvas.isWidgetMenuOpenArrowKey(keyboard_event.keyboard.key) and !(target.state.expanded orelse false);
+                if (!canvas.isWidgetActivationKey(keyboard_event.keyboard.key) and !arrow_opens) return;
+                if (arrow_opens and keyboard_event.keyboard.focus_moved) return;
+            }
             try dispatchCanvasWidgetCommandForId(self, app, index, target.id);
+        }
+
+        fn compiledCanvasCommandActivation(view: anytype, stage: u8, phase: u8, key: u8, facts: u8, kind: canvas.WidgetKind) ?bool {
+            const policy = view.canvas_widget_surface_scope_policy orelse return null;
+            var request = [7]u8{ 30, stage, phase, key, facts, 0, 0 };
+            std.mem.writeInt(u16, request[5..7], canvas.widgetKindCode(kind), .little);
+            var result: [1]u8 = undefined;
+            if (policy(&request, &result) != result.len or result[0] > 1) @panic("invalid compiled command activation result");
+            return result[0] != 0;
         }
 
         /// Returns true for an auto-repeat or release belonging to the
@@ -2658,15 +3098,17 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// The caller suppresses that transition; the release also
         /// retires the gesture latch.
         pub fn consumeCanvasWidgetTabInputFocusEntry(self: *Runtime, input_event: GpuSurfaceInputEvent) bool {
-            if (input_event.kind != .key_down and input_event.kind != .key_up) return false;
-            if (!std.ascii.eqlIgnoreCase(input_event.key, "tab")) return false;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return false;
-            if (self.views[index].kind != .gpu_surface) return false;
-            if (!self.views[index].canvas_widget_tab_input_focus_entry_held) return false;
-            if (input_event.kind == .key_up) {
-                self.views[index].canvas_widget_tab_input_focus_entry_held = false;
-            }
-            return true;
+            const view = &self.views[index];
+            if (view.kind != .gpu_surface) return false;
+            const decision = keyboard_focus.decide(view.canvas_widget_surface_scope_policy, .{
+                .stage = .lifetime,
+                .a = keyboard_focus.phase(input_event),
+                .b = keyboard_focus.key(input_event.key),
+                .facts = @intFromBool(view.canvas_widget_tab_input_focus_entry_held),
+            });
+            if (decision == 2) view.canvas_widget_tab_input_focus_entry_held = false;
+            return decision != 0;
         }
 
         /// Consume the physical V release paired with a terminal Paste
@@ -2678,6 +3120,14 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// the clipboard pass later in this input cycle re-arms it when
         /// that fresh down is another terminal Paste.
         pub fn consumeCanvasWidgetTerminalPasteKeyLifetime(self: *Runtime, input_event: GpuSurfaceInputEvent) bool {
+            if (runtimeFindViewIndex(self, input_event.window_id, input_event.label)) |i| {
+                var facts = input_composition.observations(self, &self.views[i]);
+                facts.latch = self.views[i].canvas_widget_terminal_paste_v_held;
+                if (input_composition.plan(self.views[i].canvas_widget_surface_scope_policy, .paste, input_event, facts)) |program| {
+                    if (program.has(2048)) self.views[i].canvas_widget_terminal_paste_v_held = false;
+                    return program.has(8192);
+                }
+            }
             if (input_event.kind != .key_down and input_event.kind != .key_up) return false;
             if (!std.ascii.eqlIgnoreCase(input_event.key, "v")) return false;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return false;
@@ -2692,186 +3142,127 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         /// (`focus_moved`) so tree rows can tell selection-follows-focus
         /// arrivals from in-place collapse/expand intents.
         pub fn updateCanvasWidgetFocusFromKeyboardInput(self: *Runtime, input_event: GpuSurfaceInputEvent) anyerror!bool {
-            if (input_event.kind != .key_down) return false;
             const index = runtimeFindViewIndex(self, input_event.window_id, input_event.label) orelse return false;
-            if (self.views[index].kind != .gpu_surface) return false;
-
-            const current_id: ?canvas.ObjectId = if (self.views[index].canvas_widget_focused_id == 0) null else self.views[index].canvas_widget_focused_id;
-            const layout = self.views[index].widgetLayoutTree();
-            if (std.ascii.eqlIgnoreCase(input_event.key, "tab")) {
-                // Live terminals own Tab/Shift+Tab as input; editable code
-                // owns plain Tab as indentation while Shift+Tab remains an
-                // accessible way to leave the editor.
-                if (current_id) |id| {
-                    if (layout.focusTargetById(id)) |current| {
-                        if (canvasWidgetTerminalOwnsTabInput(layout, current)) return false;
-                        if (!input_event.modifiers.shift and
-                            !input_event.modifiers.primary and
-                            !input_event.modifiers.command and
-                            !input_event.modifiers.control and
-                            !input_event.modifiers.option and
-                            canvasWidgetCodeEditorOwnsTabInput(layout, current))
-                        {
-                            return false;
+            const view = &self.views[index];
+            if (view.kind != .gpu_surface) return false;
+            const policy = view.canvas_widget_surface_scope_policy;
+            const layout = view.widgetLayoutTree();
+            const current_id: ?canvas.ObjectId = if (view.canvas_widget_focused_id == 0) null else view.canvas_widget_focused_id;
+            const focused = if (current_id) |id| layout.focusTargetById(id) else null;
+            const owner_facts: u16 = if (focused) |target| @as(u16, if (canvasWidgetTerminalOwnsTabInput(layout, target)) 1 else 0) |
+                @as(u16, if (canvasWidgetCodeEditorOwnsTabInput(layout, target)) 2 else 0) else 0;
+            const intent: keyboard_focus.Intent = @enumFromInt(keyboard_focus.decide(policy, .{
+                .stage = .intent,
+                .a = keyboard_focus.phase(input_event),
+                .b = keyboard_focus.key(input_event.key),
+                .c = keyboard_focus.modifiers(input_event),
+                .facts = owner_facts,
+            }));
+            if (intent == .none) return false;
+            const direction = keyboard_focus.direction(intent);
+            const edge: canvas_widget_runtime.CanvasWidgetGroupFocusEdge = if (intent == .end) .last else .first;
+            const focus_visible = keyboard_focus.decide(policy, .{ .stage = .visibility, .a = @intFromEnum(intent), .facts = @intFromBool(current_id != null and view.canvas_widget_focus_visible_id == current_id.?) }) != 0;
+            const F = keyboard_focus.Facts;
+            const base: u16 = @as(u16, if (focused != null) F.focused else 0) |
+                @as(u16, if (intent != .tab and intent != .back_tab and current_id != null and canvasWidgetQuietListRowFocus(self, index, current_id.?)) F.quiet else 0) |
+                @as(u16, if (focused != null and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.?.index) != null) F.radio_scope else 0);
+            var facts = base;
+            var action: keyboard_focus.Action = .stop;
+            var target: ?canvas.WidgetFocusTarget = null;
+            var target_id: canvas.ObjectId = 0;
+            var initial_id: canvas.ObjectId = 0;
+            var attempts: usize = 0;
+            var moved = false;
+            while (true) {
+                action = @enumFromInt(keyboard_focus.decide(policy, .{ .stage = .coordinate, .a = @intFromEnum(intent), .b = @intFromEnum(action), .kind = if (focused) |value| value.kind else null, .facts = facts }));
+                facts = base;
+                switch (action) {
+                    .stop => return false,
+                    .moved => return true,
+                    .capture_tab => {
+                        view.canvas_widget_tab_input_focus_entry_held = true;
+                        return true;
+                    },
+                    .tab_target, .tab_visible, .tab_fallback => {
+                        const previous_target = target_id;
+                        const next = switch (action) {
+                            .tab_target => view.canvasWidgetRovingTabTarget(current_id, direction),
+                            .tab_visible => blk: {
+                                const node_index = view.canvasWidgetNodeIndexById(target_id) orelse break :blk null;
+                                const scope = canvas_widget_runtime.canvasWidgetRovingTabScope(layout, node_index) orelse break :blk null;
+                                break :blk canvas_widget_runtime.canvasWidgetRovingTabVisibleEntryTarget(layout, scope);
+                            },
+                            .tab_fallback => view.canvasWidgetRovingTabTarget(target_id, direction),
+                            else => unreachable,
+                        };
+                        if (next) |value| {
+                            target = value;
+                            target_id = value.id;
                         }
-                    }
-                }
-                const direction: canvas.WidgetFocusDirection = if (input_event.modifiers.shift) .backward else .forward;
-                var target = self.views[index].canvasWidgetRovingTabTarget(current_id, direction) orelse return false;
-                var moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
-                if (!moved and target.id != (current_id orelse 0)) {
-                    // A selected radio may be a valid LOGICAL group entry
-                    // while fully hidden by a fixed clip. The focus setter
-                    // first gave every runtime scroll ancestor a chance to
-                    // reveal it; if it is still unreachable, keep the group
-                    // in the Tab order through a visible radio. When the
-                    // entire group is clipped, continue the one-stop walk
-                    // from the failed entry to the next visible control.
-                    if (self.views[index].canvasWidgetNodeIndexById(target.id)) |target_index| {
-                        if (canvas_widget_runtime.canvasWidgetRovingTabScope(layout, target_index)) |scope| {
-                            if (canvas_widget_runtime.canvasWidgetRovingTabVisibleEntryTarget(layout, scope)) |visible| {
-                                if (visible.id != target.id) {
-                                    target = visible;
-                                    moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
-                                }
-                            }
+                        facts |= keyboardFocusCandidateFacts(target_id, current_id, previous_target, initial_id, next != null, true);
+                    },
+                    .tab_commit, .tab_visible_commit, .tab_fallback_commit, .commit, .radio_commit => {
+                        if (action == .radio_commit) attempts += 1;
+                        moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target_id, focus_visible);
+                        facts |= keyboardFocusCandidateFacts(target_id, current_id, 0, initial_id, true, attempts < view.widget_layout_node_count);
+                        if (moved) facts |= F.moved;
+                    },
+                    .tab_finish => {
+                        if (moved) facts |= F.moved;
+                        if (target) |value| if (canvasWidgetTerminalOwnsTabInput(layout, value) or canvasWidgetCodeEditorOwnsTabInput(layout, value)) {
+                            facts |= F.owner;
+                        };
+                    },
+                    .menu => {
+                        const current = focused orelse return false;
+                        const surface = view.canvasWidgetOwnedMenuSurfaceIndex(current.index);
+                        const entry = if (surface) |surface_index| view.canvasWidgetMenuSurfaceEntryId(surface_index, direction == .up) else null;
+                        if (entry) |id| target_id = id;
+                        facts |= keyboardFocusCandidateFacts(target_id, current_id, 0, 0, entry != null, true);
+                    },
+                    .tree_edge, .group_edge, .tree, .group, .spatial => {
+                        const current = focused orelse return false;
+                        const next = switch (action) {
+                            .tree_edge => canvas_widget_runtime.canvasWidgetTreeFocusEdgeTarget(layout, current, edge),
+                            .group_edge => canvas_widget_runtime.canvasWidgetGroupFocusEdgeTargetWithPolicy(layout, current, edge, policy),
+                            .tree => canvas_widget_runtime.canvasWidgetTreeDirectionalFocusTarget(layout, current, direction),
+                            .group => canvas_widget_runtime.canvasWidgetGroupDirectionalFocusTargetWithPolicy(layout, current, direction, policy),
+                            .spatial => layout.focusTarget(current_id, direction),
+                            else => unreachable,
+                        };
+                        if (next) |value| {
+                            target = value;
+                            target_id = value.id;
+                            initial_id = value.id;
+                            if (action == .spatial and canvas_widget_runtime.canvasWidgetSpatialFocusAllowedWithPolicy(layout, current, value, direction, policy)) facts |= F.allowed;
                         }
-                    }
-                    if (!moved) {
-                        const fallback = self.views[index].canvasWidgetRovingTabTarget(target.id, direction) orelse return false;
-                        if (fallback.id == target.id) return false;
-                        target = fallback;
-                        moved = try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, true);
-                    }
+                        facts |= keyboardFocusCandidateFacts(target_id, current_id, 0, initial_id, next != null, attempts < view.widget_layout_node_count);
+                    },
+                    .radio_next => {
+                        const previous_target = target_id;
+                        const next = canvas_widget_runtime.canvasWidgetRadioGroupDirectionalFocusTarget(view.widgetLayoutTree(), target orelse return false, direction);
+                        if (next) |value| {
+                            target = value;
+                            target_id = value.id;
+                        }
+                        facts |= keyboardFocusCandidateFacts(target_id, current_id, previous_target, initial_id, next != null, attempts < view.widget_layout_node_count);
+                    },
                 }
-                if (moved and
-                    (canvasWidgetTerminalOwnsTabInput(layout, target) or
-                        canvasWidgetCodeEditorOwnsTabInput(layout, target)))
-                {
-                    // The key-down entered this input owner through focus
-                    // traversal. Hold that classification through repeats
-                    // and key-up so the gesture never becomes editor input.
-                    self.views[index].canvas_widget_tab_input_focus_entry_held = true;
-                }
-                return moved;
             }
+        }
 
-            const focused_id = current_id orelse return false;
-            const focused = layout.focusTargetById(focused_id) orelse return false;
-            // Roving within a composite preserves how focus ENTERED it:
-            // pointer/programmatic entry stays quiet, while a ring earned
-            // through Tab follows the active descendant. Arrow/Home/End
-            // are not themselves a fresh focus-visible entry.
-            const preserve_focus_visible = self.views[index].canvas_widget_focus_visible_id == focused_id;
-            // FRAMEWORK BEHAVIOR CHANGE (deliberate, scoped — the same
-            // seam as the keyboard-routing gate below): arrows and
-            // Home/End never escalate QUIET focus on a plain list row
-            // into the visible ring register. Only Tab (handled above)
-            // enters the keyboard-contract; from quiet row focus the
-            // navigation keys fall through to the app, whose selection
-            // model owns them. Tree rows are exempt from that fallthrough
-            // because the runtime owns their ARIA keymap; the roving move
-            // below still preserves quiet versus focus-visible entry.
-            if (canvasWidgetQuietListRowFocus(self, index, focused_id)) return false;
-            if (canvasWidgetGroupFocusEdgeFromInput(input_event)) |edge| {
-                // A tree row's Home/End jump to the SCOPE's edges (rows
-                // nest, so the group edge walk's same-parent rule would
-                // stop at one level).
-                if (canvas_widget_runtime.canvasWidgetTreeFocusEdgeTarget(layout, focused, edge)) |target| {
-                    return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
-                }
-                const target = canvasWidgetGroupFocusEdgeTarget(layout, focused, edge) orelse return false;
-                if (focused.kind == .radio and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.index) != null) {
-                    const retry_direction: canvas.WidgetFocusDirection = switch (edge) {
-                        .first => .right,
-                        .last => .left,
-                    };
-                    return try setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
-                        self,
-                        index,
-                        current_id,
-                        target,
-                        retry_direction,
-                        preserve_focus_visible,
-                    );
-                }
-                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
-            }
-            const direction = canvasWidgetSpatialFocusDirection(input_event) orelse return false;
-            // The open-menu keymap: ArrowDown/Up on a menu-owning trigger
-            // whose anchored surface is MOUNTED moves the keyboard into
-            // the menu (the marked row when one is selected, else the
-            // first/last row). Select/combobox and ordinary menu buttons
-            // share this ownership contract; the surface relationship,
-            // not an example-specific key handler, identifies the popup.
-            // Without a mounted menu, select/combobox arrows fall through
-            // to the control resolver for the model-owned open.
-            if (canvasWidgetAnchoredMenuTriggerKind(focused.kind) and (direction == .down or direction == .up)) {
-                if (self.views[index].canvasWidgetOwnedMenuSurfaceIndex(focused.index)) |surface_index| {
-                    if (self.views[index].canvasWidgetMenuSurfaceEntryId(surface_index, direction == .up)) |entry_id| {
-                        return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, entry_id, preserve_focus_visible);
-                    }
-                }
-            }
-            // The ARIA tree keymap first: Up/Down walk the scope's
-            // visible rows, Left/Right move to parent / first child when
-            // they are moves (collapse/expand stay routed intents).
-            if (canvas_widget_runtime.canvasWidgetTreeDirectionalFocusTarget(layout, focused, direction)) |target| {
-                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
-            }
-            if (canvasWidgetGroupDirectionalFocusTarget(layout, focused, direction)) |target| {
-                if (focused.kind == .radio and canvas_widget_runtime.canvasWidgetRadioGroupScopeIndex(layout, focused.index) != null) {
-                    return try setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
-                        self,
-                        index,
-                        current_id,
-                        target,
-                        direction,
-                        preserve_focus_visible,
-                    );
-                }
-                return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
-            }
-            const target = layout.focusTarget(focused_id, direction) orelse return false;
-            if (!canvasWidgetSpatialFocusAllowed(layout, focused, target, direction)) return false;
-            return try setCanvasWidgetFocusFromKeyboardMoved(self, index, current_id, target.id, preserve_focus_visible);
+        fn keyboardFocusCandidateFacts(target_id: canvas.ObjectId, current_id: ?canvas.ObjectId, previous_target: canvas.ObjectId, initial_id: canvas.ObjectId, present: bool, budget: bool) u16 {
+            const F = keyboard_focus.Facts;
+            return @as(u16, if (present) F.present else 0) | @as(u16, if (target_id != (current_id orelse 0)) F.different else 0) |
+                @as(u16, if (target_id == previous_target) F.same else 0) | @as(u16, if (target_id == initial_id) F.initial else 0) |
+                @as(u16, if (target_id != 0) F.nonzero else 0) | @as(u16, if (budget) F.budget else 0);
         }
 
         fn setCanvasWidgetFocusFromKeyboardMoved(self: *Runtime, view_index: usize, previous_id: ?canvas.ObjectId, target_id: canvas.ObjectId, focus_visible: bool) anyerror!bool {
             try setCanvasWidgetFocusFromKeyboardWithVisibility(self, view_index, target_id, focus_visible);
-            const previous = previous_id orelse 0;
-            return target_id != 0 and target_id != previous and self.views[view_index].canvas_widget_focused_id == target_id;
-        }
-
-        /// Logical radio traversal admits scroll-clipped targets so the
-        /// focus setter can reveal them. A fixed clip cannot be scrolled;
-        /// after such a candidate stays unreachable, continue around the
-        /// same nearest group until a visible radio accepts focus or the
-        /// bounded walk returns to its starting point.
-        fn setCanvasWidgetRadioGroupFocusFromKeyboardMoved(
-            self: *Runtime,
-            view_index: usize,
-            previous_id: ?canvas.ObjectId,
-            initial_target: canvas.WidgetFocusTarget,
-            direction: canvas.WidgetFocusDirection,
-            focus_visible: bool,
-        ) anyerror!bool {
-            const previous = previous_id orelse 0;
-            var target = initial_target;
-            var attempts: usize = 0;
-            while (attempts < self.views[view_index].widget_layout_node_count) : (attempts += 1) {
-                if (target.id == 0 or target.id == previous) return false;
-                if (try setCanvasWidgetFocusFromKeyboardMoved(self, view_index, previous_id, target.id, focus_visible)) return true;
-
-                const next = canvas_widget_runtime.canvasWidgetRadioGroupDirectionalFocusTarget(
-                    self.views[view_index].widgetLayoutTree(),
-                    target,
-                    direction,
-                ) orelse return false;
-                if (next.id == target.id or next.id == initial_target.id) return false;
-                target = next;
-            }
-            return false;
+            const facts: u16 = @as(u16, if (target_id != 0) 1 else 0) | @as(u16, if (target_id != (previous_id orelse 0)) 2 else 0) |
+                @as(u16, if (self.views[view_index].canvas_widget_focused_id == target_id) 4 else 0);
+            return keyboard_focus.decide(self.views[view_index].canvas_widget_surface_scope_policy, .{ .stage = .moved, .facts = facts }) != 0;
         }
 
         pub fn setCanvasWidgetFocusFromKeyboard(self: *Runtime, view_index: usize, target_id: canvas.ObjectId) anyerror!void {
@@ -2931,8 +3322,13 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
         }
 
         fn setCanvasWidgetFocusFromKeyboardWithVisibility(self: *Runtime, view_index: usize, target_id: canvas.ObjectId, focus_visible: bool) anyerror!void {
-            const next_focus_visible_id: canvas.ObjectId = if (focus_visible) target_id else 0;
-            if (self.views[view_index].canvas_widget_focused_id == target_id and self.views[view_index].canvas_widget_focus_visible_id == next_focus_visible_id) return;
+            const view = &self.views[view_index];
+            const desired_ring: canvas.ObjectId = if (focus_visible) target_id else 0;
+            const facts: u16 = @as(u16, if (view.canvas_widget_focused_id == target_id) 1 else 0) |
+                @as(u16, if (view.canvas_widget_focus_visible_id == desired_ring) 2 else 0) | @as(u16, if (target_id != 0) 4 else 0);
+            const decision = keyboard_focus.decide(view.canvas_widget_surface_scope_policy, .{ .stage = .commit, .a = @intFromBool(focus_visible), .facts = facts });
+            if (decision & 1 == 0) return;
+            const next_focus_visible_id: canvas.ObjectId = if (decision & 2 != 0) target_id else 0;
 
             const reveal = try revealCanvasWidgetFocusTarget(self, view_index, target_id) orelse return;
             const previous_state = self.views[view_index].canvasWidgetRenderState();
@@ -2945,7 +3341,7 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // that intent where it dismisses — the register clears
             // there and only a fresh arrival through this write
             // re-grants it.
-            self.views[view_index].canvas_widget_focus_visible_keyboard = next_focus_visible_id != 0;
+            self.views[view_index].canvas_widget_focus_visible_keyboard = decision & 4 != 0;
             // Keyboard focus-visible is the tooltip's second reveal
             // path: landing on a tooltip-owning trigger shows it
             // immediately, moving on hides the previous one (the
@@ -2956,14 +3352,15 @@ pub fn RuntimeCanvasWidgetEvents(comptime Runtime: type) type {
             // tabbed-into field would render its ring but no insertion
             // point. Collapse at the end of the text, the plain caret
             // placement; a selection the widget already carries survives.
-            if (target_id != 0 and self.views[view_index].canEditCanvasWidgetText(target_id)) {
-                if (self.views[view_index].canvasWidgetNodeIndexById(target_id)) |node_index| {
-                    const widget = &self.views[view_index].widget_layout_nodes[node_index].widget;
-                    if (widget.text_selection == null) {
-                        widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
-                        try self.views[view_index].refreshCanvasWidgetSemantics();
-                        self.views[view_index].widget_revision += 1;
-                    }
+            const node_index = view.canvasWidgetNodeIndexById(target_id);
+            const caret_facts: u16 = @as(u16, if (target_id != 0) 1 else 0) | @as(u16, if (view.canEditCanvasWidgetText(target_id)) 2 else 0) |
+                @as(u16, if (node_index != null and view.widget_layout_nodes[node_index.?].widget.text_selection == null) 4 else 0);
+            if (keyboard_focus.decide(view.canvas_widget_surface_scope_policy, .{ .stage = .caret, .facts = caret_facts }) != 0) {
+                if (node_index) |editable_index| {
+                    const widget = &view.widget_layout_nodes[editable_index].widget;
+                    widget.text_selection = canvas.TextSelection.collapsed(widget.text.len);
+                    try self.views[view_index].refreshCanvasWidgetSemantics();
+                    self.views[view_index].widget_revision += 1;
                 }
             }
             try invalidateForCanvasWidgetRenderStateChange(self, view_index, previous_state, self.views[view_index].canvasWidgetRenderState());
@@ -3026,13 +3423,6 @@ fn canvasWidgetCodeEditorOwnsTabInput(layout: canvas.WidgetLayoutTree, target: c
     if (target.kind != .textarea or target.index >= layout.nodes.len) return false;
     const widget = layout.nodes[target.index].widget;
     return widget.runtime_flags.code_editor and !widget.state.disabled;
-}
-
-fn canvasWidgetAnchoredMenuTriggerKind(kind: canvas.WidgetKind) bool {
-    return switch (kind) {
-        .button, .icon_button, .select, .combobox => true,
-        else => false,
-    };
 }
 
 fn canvasDirtyRegionForView(view_frame: geometry.RectF, local_dirty: geometry.RectF) ?geometry.RectF {

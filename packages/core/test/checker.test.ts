@@ -137,6 +137,24 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   assert.equal(unused.warnings.filter((d) => d.id === "NS1071").length, 1);
 });
 
+test("NS1075 keeps keyboard input behind its manifest permission", () => {
+  const source = `
+import { Cmd, asciiBytes } from "@native-sdk/core";
+export interface Model { readonly ok: boolean; }
+export type Msg = { readonly kind: "go" } | { readonly kind: "done"; readonly bytes: Uint8Array };
+export function initialModel(): Model { return { ok: false }; }
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
+  if (msg.kind === "go") return [model, Cmd.keyboard.sendChord({ key: asciiBytes("v"), primary: true }, { ok: "done", err: "done" })];
+  return model;
+}
+`;
+  assert.equal(check(source, { permissions: ["keyboard_input"] }).ok, true);
+  const missing = check(source, { permissions: ["clipboard"] });
+  assert.equal(missing.diagnostics.filter((d) => d.id === "NS1075").length, 1);
+  const raw = check(source.replace("Cmd.keyboard.sendChord({ key: asciiBytes(\"v\"), primary: true },", "Cmd.request(\"native-sdk.keyboard.accessStatus\", new Uint8Array([0]),"), { permissions: [] });
+  assert.equal(raw.diagnostics.filter((d) => d.id === "NS1075").length, 1);
+});
+
 test("NS1073 reserves the core credential request namespace for typed factories", () => {
   const result = check(`
 import { Cmd } from "@native-sdk/core";
@@ -655,6 +673,24 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
     ),
   );
   assert.ok(ids.includes("NS1017"), `got ${ids}`);
+});
+
+test("Cmd.batch consumes returned array maps without escaping commands", () => {
+  const returned = `return [model, Cmd.batch([1, 2].map(at => Cmd.batch([at > 0 ? Cmd.persist() : Cmd.none])))];`;
+  assert.deepEqual(ruleIds(checkOnly(cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] { ${returned} }
+`))), []);
+  for (const body of [
+    `const commands = [1, 2].map(at => Cmd.persist()); return [model, Cmd.batch(commands)];`,
+    `const make = () => Cmd.persist(); return [model, Cmd.batch([1, 2].map(make))];`,
+    `return [model, Cmd.batch([1, 2].filter(at => Cmd.persist()))];`,
+    `return [[1, 2].map(at => Cmd.persist())[0], Cmd.none];`,
+    `const consume = { map: (fn: (at: number) => Cmd<Msg>): Cmd<Msg>[] => [] }; return [model, Cmd.batch(consume.map(at => Cmd.persist()))];`,
+  ]) {
+    assert.ok(ruleIds(checkOnly(cmdCore(`
+export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] { ${body} }
+`))).includes("NS1017"), body);
+  }
 });
 
 test("NS1017 Cmd built in a helper", () => {
@@ -1866,4 +1902,78 @@ export function update(model: Model, msg: Msg): Model {
 }
 `);
   assert.ok(ruleIds(asserted).includes("NS1061"), `got ${ruleIds(asserted)}`);
+});
+
+test("model token overrides require the complete SDK register and remain entry-owned", () => {
+  const result = check(`
+import type { ThemeDesignTokenOverrides } from "@native-sdk/core/theme";
+export interface Model { readonly dark: boolean; }
+export type Msg = { readonly kind: "toggle" };
+export function initialModel(): Model { return { dark: false }; }
+export function update(model: Model, msg: Msg): Model { return { dark: !model.dark }; }
+export function tokenOverrides(model: Model): ThemeDesignTokenOverrides {
+  return { typography: { display_size: 36, mono_font_id: 64 }, radius: { sm: 7 },
+    colors: { accent: { r: 0.1, g: 0.2, b: model.dark ? 0.9 : 0.5, a: 1 } },
+    controls: { button_primary: { radius: 10, stroke_width: 1 } }, pixel_snap: { geometry: true, text: true } };
+}
+`, { contractEntry: "core.ts" });
+  assert.equal(result.ok, true, result.diagnostics.map(d => d.message).join("\n"));
+  const contract = JSON.parse(result.contract!);
+  const register = contract.types.structs.find((record: { name: string }) => record.name === "ThemeDesignTokenOverrides");
+  assert.equal(register.fields.length, 15);
+  assert.ok(register.fields.every((field: { type: { kind: string } }) => field.type.kind === "optional"));
+  const colors = contract.types.structs.find((record: { name: string }) => record.name === "ThemeColorTokenOverrides");
+  const typography = contract.types.structs.find((record: { name: string }) => record.name === "ThemeTypographyTokenOverrides");
+  assert.ok(typography.fields.every((field: { type: { inner: { kind: string } } }) => field.type.inner.kind !== "i64"));
+  assert.equal(colors.fields.length, 28);
+  assert.ok(colors.fields.every((field: { type: { kind: string } }) => field.type.kind === "optional"));
+  const wrong = checkOnly(`
+export interface Model { readonly value: number; }
+export type Msg = { readonly kind: "tick" };
+export function initialModel(): Model { return { value: 0 }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export type PartialTokens = { readonly radius?: number };
+export function tokenOverrides(model: Model): PartialTokens { return {}; }
+`);
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+});
+
+
+test("NS1033 webPanes requires the complete model-derived pane descriptor", () => {
+  const source = `
+import { asciiBytes } from "@native-sdk/core";
+import type { WebViewPane } from "@native-sdk/core/events";
+export interface Model { readonly docs: boolean; }
+export type Msg = { readonly kind: "show" } | { readonly kind: "hide" };
+export function initialModel(): Model { return { docs: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function webPanes(model: Model): readonly WebViewPane[] {
+  return [{ label: asciiBytes("preview"), anchor: null, url: asciiBytes("zero://app"), x: 0.125, y: 0, width: 400, height: 300, reloadToken: 0 }];
+}
+`;
+  const clean = check(source);
+  assert.equal(clean.ok, true, clean.typeErrors.join("\n") || clean.diagnostics.map(d => d.message).join("\n"));
+  const wrong = checkOnly(source.replace("readonly WebViewPane[]", "readonly number[]").replace(/return \[\{ label:[^\n]+/, "return [];"));
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+  const parameter = checkOnly(source.replace("webPanes(model: Model)", "webPanes(model: Model, extra: number)"));
+  assert.ok(ruleIds(parameter).includes("NS1033"));
+});
+
+test("NS1033 layoutTweens requires the complete Model-derived declaration", () => {
+  const source = `
+import type { LayoutTween } from "@native-sdk/core/events";
+export interface Model { readonly closed: boolean; }
+export type Msg = { readonly kind: "close" } | { readonly kind: "open" };
+export function initialModel(): Model { return { closed: false }; }
+export function update(model: Model, msg: Msg): Model { return model; }
+export function layoutTweens(model: Model): readonly LayoutTween[] {
+  return [{ label: null, index: 0, to: model.closed ? 0.06 : 0.35, durationMs: 180, easing: "standard" }];
+}
+`;
+  const clean = check(source);
+  assert.equal(clean.ok, true, clean.typeErrors.join("\n") || clean.diagnostics.map(d => d.message).join("\n"));
+  const wrong = checkOnly(source.replace("readonly LayoutTween[]", "readonly number[]").replace(/return \[\{ label:[^\n]+/, "return [];"));
+  assert.ok(ruleIds(wrong).includes("NS1033"));
+  const parameter = checkOnly(source.replace("layoutTweens(model: Model)", "layoutTweens(model: Model, extra: number)"));
+  assert.ok(ruleIds(parameter).includes("NS1033"));
 });

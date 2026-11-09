@@ -50,11 +50,15 @@ test("the SQLite CLI emits a complete loadable SDK module directory", async () =
     for (const file of [
       "core.ts", "core.d.ts", "core_static.ts", "events.ts", "text.ts",
       "bytes_text_methods.d.ts", "events.d.ts", "text.d.ts", "migrations.zig", "metadata.json",
+      "internal/image_identity.ts", "internal/image_identity.d.ts", "internal/markdown_policy.ts", "internal/markdown_policy.d.ts",
+      "bytes.ts", "bytes.d.ts", "theme.ts", "theme.d.ts",
     ]) {
       assert.equal(fs.existsSync(path.join(out, file)), true, `${file} was not generated`);
     }
     const generated = await import(`${pathToFileURL(path.join(out, "core.ts")).href}?test=${Date.now()}`);
     assert.equal(typeof generated.windowDescriptor, "function");
+    assert.deepEqual(generated.imageSourceIdentity(new TextEncoder().encode("https://images.test/a.png")),
+      (await import("../sdk/internal/image_identity.ts")).imageSourceIdentity(new TextEncoder().encode("https://images.test/a.png")));
   } finally {
     fs.rmSync(src, { recursive: true, force: true });
     fs.rmSync(out, { recursive: true, force: true });

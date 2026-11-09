@@ -5,10 +5,12 @@ const platform_mod = @import("../root.zig");
 const policy_values = @import("../policy_values.zig");
 const security = @import("../../security/root.zig");
 const canvas = @import("canvas");
+const keyboard_input = @import("keyboard_input.zig");
 // The packaging pipeline's one-image icon machinery: dev runs borrow its
 // macOS mask/inset render so the Dock tile matches `native package`.
 const app_icon = canvas.app_icon;
 const updater_c_api = @import("../../updater/c_api.zig");
+const global_shortcuts = @import("global_shortcuts.zig");
 
 comptime {
     _ = updater_c_api.native_sdk_update_verify_feed;
@@ -176,8 +178,9 @@ const shortcut_modifier_control: u32 = 1 << 2;
 const shortcut_modifier_option: u32 = 1 << 3;
 const shortcut_modifier_shift: u32 = 1 << 4;
 
-extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, dock_visible: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) ?*AppKitHost;
+extern fn native_sdk_appkit_create(app_name: [*]const u8, app_name_len: usize, display_name: [*]const u8, display_name_len: usize, version: [*]const u8, version_len: usize, about_description: [*]const u8, about_description_len: usize, has_web_content: c_int, webview_inspection: c_int, dock_visible: c_int, window_title: [*]const u8, window_title_len: usize, bundle_id: [*]const u8, bundle_id_len: usize, icon_path: [*]const u8, icon_path_len: usize, window_label: [*]const u8, window_label_len: usize, x: f64, y: f64, width: f64, height: f64, restore_frame: c_int, initial_placement: c_int, restore_policy: c_int, resizable: c_int, titlebar_style: c_int, show_policy: c_int, window_flags: u32) ?*AppKitHost;
 extern fn native_sdk_appkit_destroy(host: *AppKitHost) void;
+extern fn native_sdk_appkit_set_window_color_scheme(host: *AppKitHost, window_id: u64, color_scheme: c_int) c_int;
 extern fn native_sdk_appkit_set_dock_icon_rgba(host: *AppKitHost, pixels: [*]const u8, width: usize, height: usize) void;
 extern fn native_sdk_appkit_set_dock_icon_file(host: *AppKitHost, path: [*]const u8, path_len: usize) void;
 extern fn native_sdk_appkit_configure_updates(host: *AppKitHost, feed_url: [*]const u8, feed_url_len: usize, public_key: [*]const u8, public_key_len: usize, check_on_start: c_int, target: [*]const u8, target_len: usize) void;
@@ -657,6 +660,7 @@ pub const MacPlatform = struct {
     /// a run-loop timer), so a plain field is race-free.
     video_sink: platform_mod.VideoFrameSink = .{},
     audio_capture_sinks: [2]platform_mod.AudioCaptureSink = [_]platform_mod.AudioCaptureSink{.{}} ** 2,
+    global_shortcuts: global_shortcuts.Registry = .{},
 
     pub fn init(title: []const u8, size: geometry.SizeF) Error!MacPlatform {
         return initWithEngine(title, size, .system);
@@ -684,7 +688,7 @@ pub const MacPlatform = struct {
         // the classic load byte-for-byte.
         const dock_icon = planDockIcon(app_info.icon_path);
         const icon_path = if (dock_icon == .host_file) app_info.icon_path else "";
-        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
+        const host = native_sdk_appkit_create(app_info.app_name.ptr, app_info.app_name.len, display_name.ptr, display_name.len, app_info.version.ptr, app_info.version.len, app_info.description.ptr, app_info.description.len, if (app_info.has_web_content) 1 else 0, if (app_info.webview_inspection) 1 else 0, if (app_info.dock_visible) 1 else 0, window_title.ptr, window_title.len, app_info.bundle_id.ptr, app_info.bundle_id.len, icon_path.ptr, icon_path.len, window_options.label.ptr, window_options.label.len, frame.x, frame.y, frame.width, frame.height, if (window_options.restore_state) 1 else 0, initialPlacementInt(window_options.initial_placement), restorePolicyInt(window_options.restore_policy), if (window_options.resizable) 1 else 0, titlebarStyleInt(window_options.titlebar), showModeInt(window_options.show), windowFlags(window_options)) orelse return error.CreateFailed;
         const update_target = comptime switch (builtin.cpu.arch) {
             .aarch64 => "macos-aarch64",
             .x86_64 => "macos-x86_64",
@@ -754,6 +758,7 @@ pub const MacPlatform = struct {
             std.debug.print("macos platform teardown: an abandoned platform call may still enter this host; skipping destruction and leaking it (and the wrapper it enters through), process-lived, so the stale call stays safe\n", .{});
             return;
         }
+        self.global_shortcuts.deinit();
         native_sdk_appkit_destroy(self.host);
     }
 
@@ -787,6 +792,7 @@ pub const MacPlatform = struct {
                 .quit_app_fn = quitApp,
                 .start_window_drag_fn = startWindowDrag,
                 .window_chrome_fn = windowChrome,
+                .set_window_color_scheme_fn = setWindowColorScheme,
                 .create_view_fn = createView,
                 .update_view_fn = updateView,
                 .set_view_frame_fn = setViewFrame,
@@ -813,6 +819,8 @@ pub const MacPlatform = struct {
                 .format_local_time_fn = formatLocalTime,
                 .open_external_url_fn = openExternalUrl,
                 .reveal_path_fn = revealPath,
+                .send_key_chord_fn = keyboard_input.sendKeyChord,
+                .keyboard_input_access_fn = keyboard_input.access,
                 .add_recent_document_fn = addRecentDocument,
                 .clear_recent_documents_fn = clearRecentDocuments,
                 .check_for_updates_fn = checkForUpdates,
@@ -825,6 +833,7 @@ pub const MacPlatform = struct {
                 .configure_security_policy_fn = configureSecurityPolicy,
                 .configure_menus_fn = configureMenus,
                 .configure_shortcuts_fn = configureShortcuts,
+                .configure_global_shortcuts_fn = configureGlobalShortcuts,
                 .emit_window_event_fn = emitWindowEvent,
                 .start_timer_fn = startTimer,
                 .cancel_timer_fn = cancelTimer,
@@ -918,6 +927,8 @@ pub const MacPlatform = struct {
             // reports honestly unsupported rather than half-implementing
             // a second player.
             .video_playback => self.web_engine == .system,
+            .global_shortcuts => global_shortcuts.available(),
+            .keyboard_input => true,
         };
     }
 
@@ -1609,6 +1620,11 @@ fn windowChrome(context: ?*anyopaque, window_id: platform_mod.WindowId) platform
             @floatCast(buttons_height),
         ),
     };
+}
+
+fn setWindowColorScheme(context: ?*anyopaque, window_id: platform_mod.WindowId, scheme: platform_mod.WindowColorScheme) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    if (native_sdk_appkit_set_window_color_scheme(self.host, window_id, @intFromEnum(scheme)) == 0) return error.WindowNotFound;
 }
 
 fn createView(context: ?*anyopaque, options: platform_mod.ViewOptions) anyerror!void {
@@ -2463,6 +2479,11 @@ fn configureMenus(context: ?*anyopaque, menus: []const platform_mod.Menu) anyerr
     );
 }
 
+fn configureGlobalShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut, sink: platform_mod.GlobalShortcutSink, statuses: []platform_mod.GlobalShortcutStatus) anyerror!void {
+    const self: *MacPlatform = @ptrCast(@alignCast(context.?));
+    return self.global_shortcuts.configure(shortcuts, sink, statuses);
+}
+
 fn configureShortcuts(context: ?*anyopaque, shortcuts: []const platform_mod.Shortcut) anyerror!void {
     const self: *MacPlatform = @ptrCast(@alignCast(context.?));
     if (shortcuts.len > platform_mod.max_shortcuts) return error.InvalidShortcut;
@@ -2917,6 +2938,7 @@ fn flattenFilters(filters: []const platform_mod.FileFilter, buffer: []u8) []cons
 
 test "mac platform module exports type" {
     _ = MacPlatform;
+    _ = global_shortcuts;
 }
 
 test "mac AppKit packet text anchors use the resolved font ascent" {
@@ -3078,7 +3100,7 @@ test "both mac hosts apply launch dock presence before configuring the app" {
         if (std.mem.indexOf(u8, init_tail, "ensureCefInitialized();")) |cef_init_at| {
             try std.testing.expect(policy_at < cef_init_at);
         }
-        try std.testing.expect(std.mem.indexOf(u8, host_source, "int has_web_content, int dock_visible") != null);
+        try std.testing.expect(std.mem.indexOf(u8, host_source, "int has_web_content, int webview_inspection, int dock_visible") != null);
         try std.testing.expect(std.mem.indexOf(u8, host_source, "dockVisible:(dock_visible != 0)") != null);
     }
 }

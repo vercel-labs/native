@@ -39,6 +39,7 @@ export const sdkModuleDir = path.join(path.dirname(fileURLToPath(import.meta.url
 /// This module is INTRINSIC: the transpiler lowers references to it onto
 /// the rt kernel and never emits its code.
 export const sdkCoreModulePath = path.join(sdkModuleDir, "core.ts");
+export const sdkBytesModulePath = path.join(sdkModuleDir, "bytes.ts");
 
 /// The SDK LIBRARY modules an app core may import by published name. Unlike
 /// sdk/core.ts these are ordinary subset TypeScript, transpiled into the
@@ -50,6 +51,7 @@ export const sdkCoreModulePath = path.join(sdkModuleDir, "core.ts");
 export const sdkLibraryModules: ReadonlyMap<string, string> = new Map([
   ["@native-sdk/core/text", path.join(sdkModuleDir, "text.ts")],
   ["@native-sdk/core/events", path.join(sdkModuleDir, "events.ts")],
+  ["@native-sdk/core/theme", path.join(sdkModuleDir, "theme.ts")],
 ]);
 
 /// The ambient byte-text method surface (declaration merging into
@@ -92,6 +94,7 @@ export function subsetCompilerOptions(
     // (tmp dirs, workspaces) resolve the same modules.
     paths: {
       "@native-sdk/core": [coreModulePath.replace(/\.ts$/, "")],
+      "@native-sdk/core/bytes": [sdkBytesModulePath.replace(/\.ts$/, "")],
       ...(generatedServicesPath
         ? { "@native-sdk/services": [generatedServicesPath.replace(/\.ts$/, "")] }
         : {}),
@@ -171,6 +174,14 @@ export class TypedAst {
   /// Resolved type of an expression position.
   typeOf(node: Node): Type {
     return this.checker.getTypeAtLocation(node);
+  }
+
+  /// The property's type on this particular record/union constituent,
+  /// including instantiated type arguments and control-flow narrowing.
+  propertyTypeOf(type: Type, name: string): Type | undefined {
+    const property = type.getProperty(name);
+    const at = property?.valueDeclaration ?? property?.declarations?.[0];
+    return property && at ? this.checker.getTypeOfSymbolAtLocation(property, at) : undefined;
   }
 
   /// The VALUE side of a shorthand property (`{ x }` reads the local/param
@@ -467,9 +478,15 @@ export class TypedAst {
     // `T | null` contexts: the property lives on the non-null constituent.
     contextual = this.checker.getNonNullableType(contextual);
     // Union contexts (e.g. `Model | [Model, Cmd<Msg>]` return positions):
-    // the property lives on whichever constituent carries it.
+    // A literal kind selects its own arm. Picking the first same-named
+    // property would connect unrelated payload slots (e.g. an index and a
+    // fractional gain), even though only one arm receives this value.
     if (contextual.isUnion()) {
+      const actual = this.checker.getTypeAtLocation(objLit);
+      const actualTag = this.propertyTypeOf(actual, "kind");
       for (const member of contextual.types) {
+        const tag = this.propertyTypeOf(member, "kind");
+        if (actualTag?.isStringLiteral() && tag?.isStringLiteral() && actualTag.value !== tag.value) continue;
         const sym = member.getProperty(prop.name.text);
         if (sym?.declarations?.[0]) return sym.declarations[0];
       }

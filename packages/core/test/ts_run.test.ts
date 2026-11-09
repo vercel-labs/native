@@ -1,7 +1,6 @@
 // The layout-neutral runner (build/ts_run.mjs) under both node capability
-// tiers. Node 24 is the common floor because scriptc 0.0.35's published
-// bootstrap uses Node 24's compile cache; module.registerHooks then strips
-// the runner strips EVERY .ts target with the transpiler's own toolchain
+// tiers. Node 24 supplies module.registerHooks, through which the runner
+// strips EVERY .ts target with the transpiler's own toolchain
 // — node's native stripping is never relied on (it refuses node_modules
 // by design). On a hooks-less Node 24 build ANY .ts target must fail fast
 // with the one-line branch-aware teaching instead of node's raw

@@ -1,0 +1,45 @@
+<column padding="24" gap="16">
+  <column gap="4">
+    <text size="heading">Palette Studio</text>
+    <text foreground="text_muted">Choose a palette, appearance, and accent.</text>
+  </column>
+  <panel variant="outline" padding="16">
+    <column gap="12">
+    <text>Palette</text>
+    <row gap="8">
+      <button size="sm" on-press="house">House</button>
+      <button size="sm" on-press="geist">Geist</button>
+      <button size="sm" on-press="inherit_pack">Inherit palette</button>
+    </row>
+    <text>Palette: {pack} / inherited: {inheritPack}</text>
+    </column>
+  </panel>
+  <panel variant="outline" padding="16">
+    <column gap="12">
+    <text>Appearance</text>
+    <row gap="8">
+      <button size="sm" on-press="light">Light</button>
+      <button size="sm" on-press="dark">Dark</button>
+      <button size="sm" on-press="system">System</button>
+    </row>
+    <text>Appearance: {scheme}</text>
+    </column>
+  </panel>
+  <panel variant="outline" padding="16">
+    <column gap="12">
+    <text>Accent</text>
+    <row gap="8">
+      <button size="sm" on-press="pink">Pink</button>
+      <button size="sm" on-press="teal">Teal</button>
+      <button size="sm" on-press="inherit_accent">Inherit accent</button>
+    </row>
+    <text>Accent: {accent}</text>
+    </column>
+  </panel>
+  <row gap="8" cross="center">
+    <button variant="primary" on-press="increment">Add sample</button>
+    <text grow="1">Samples: {count}</text>
+    <button on-press="stamp">Stamp</button>
+  </row>
+  <text foreground="text_muted">Recorded time: {stampedMs}</text>
+</column>

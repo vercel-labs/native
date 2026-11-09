@@ -2,12 +2,100 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyTextInputEvent,
+  textWordSelectionAtOffset,
+  textLineSelectionAtOffset,
+  sanitizedSingleLineTextInputEvent,
+  codeIndentationInsertion,
+  parseCodeLineNumberSpec,
+  textClipboardRange,
   type TextEditState,
   type TextInputEvent,
 } from "../sdk/text.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+test("clipboard ranges use source UTF-8 bytes and ignore selection direction", () => {
+  const text = encoder.encode("aé🙂\r\nz"), before = text.slice();
+  assert.equal(textClipboardRange(text, null), null);
+  assert.equal(textClipboardRange(text, { anchor: 2, focus: 1 }), null);
+  assert.deepEqual(textClipboardRange(text, { anchor: 6, focus: 2 }), { start: 1, end: 3 });
+  assert.deepEqual(textClipboardRange(text, { anchor: 999, focus: 3 }), { start: 3, end: text.length });
+  assert.deepEqual(textClipboardRange(text, { anchor: 7, focus: 9 }), { start: 7, end: 9 });
+  assert.equal(textClipboardRange(text, { anchor: 999, focus: 998 }), null);
+  assert.equal(textClipboardRange(new Uint8Array(), { anchor: 0, focus: 4 }), null);
+  assert.deepEqual(text, before);
+});
+
+test("code diff line specs retain author order, deduplicate ranges and preserve bytes", () => {
+  for (const [spec, expected] of [
+    ["", []], [" \r\n\t", []], ["2-4, 7, 3", [2, 3, 4, 7]],
+    ["128, 1-3, 2, 127-128", [128, 1, 2, 3, 127]],
+    [" +01, 1__2, +1_2_8 ", [1, 12, 128]], ["1-128", Array.from({ length: 128 }, (_, i) => i + 1)],
+  ] as [string, number[]][]) {
+    const input = encoder.encode(spec), before = input.slice();
+    assert.deepEqual(parseCodeLineNumberSpec(input), expected); assert.deepEqual(input, before);
+  }
+  for (const spec of ["0", "4-2", "1-129", "1,,2", "2-", "2-3-4", "nope", ",1", "1,", "+", "_1", "1_", "1.0", "0x1", "1\n-2", "1-\n2", "١", "1\0", "18446744073709551616"]) {
+    assert.equal(parseCodeLineNumberSpec(encoder.encode(spec)), null, spec);
+  }
+  assert.equal(parseCodeLineNumberSpec(new Uint8Array([0xff, 49])), null);
+  assert.deepEqual(parseCodeLineNumberSpec(encoder.encode("0".repeat(65535) + "1")), [1]);
+});
+
+test("code Tab follows file indentation and caret-local ties without changing source", () => {
+  const cases: [string, number, string][] = [
+    ["", 0, "  "], ["plain\n  \n\t\n", 0, "  "],
+    ["    café\r\n", 0, "    "], ["   x\n", 0, "   "],
+    ["\t日本\n\tx\n  y", 0, "\t"],
+    ["    a\n        b\n    c", 0, "    "],
+    ["  a\n    b\n      c", 0, "  "],
+    ["     a\n       b\n         c", 0, "  "],
+    ["\tx\n  y", 1, "\t"], ["\tx\n  y", 4, "  "],
+    ["\tx\n  y", 999, "  "], ["\tx\n  y", 3, "  "],
+  ];
+  for (const [source, caret, expected] of cases) {
+    const text = encoder.encode(source), before = text.slice();
+    assert.equal(decoder.decode(codeIndentationInsertion(text, caret)), expected);
+    assert.deepEqual(text, before);
+  }
+});
+
+test("single-line new input strips breaks, preserves empty previews and adjusts only rewritten cursors", () => {
+  const insert = (text: string): TextInputEvent => ({ kind: "insert_text", text: encoder.encode(text) });
+  const clean = insert("café 🙂");
+  assert.equal(sanitizedSingleLineTextInputEvent(clean), clean);
+  assert.equal(sanitizedSingleLineTextInputEvent(insert("\r\n\n")), null);
+  assert.deepEqual(sanitizedSingleLineTextInputEvent(insert("")), insert(""));
+  assert.deepEqual(sanitizedSingleLineTextInputEvent(insert("a\r\né\n🙂")), insert("aé🙂"));
+  for (const [cursor, expected] of [[null, null], [0, 0], [2, 1], [3, 1], [999, 3]] as const) {
+    assert.deepEqual(sanitizedSingleLineTextInputEvent({ kind: "set_composition", text: encoder.encode("a\r\né"), cursor }),
+      { kind: "set_composition", text: encoder.encode("aé"), cursor: expected });
+  }
+  assert.deepEqual(sanitizedSingleLineTextInputEvent({ kind: "set_composition", text: encoder.encode("\r\n"), cursor: null }),
+    { kind: "set_composition", text: new Uint8Array(0), cursor: null });
+  const preview: TextInputEvent = { kind: "set_composition", text: encoder.encode("é"), cursor: 999 };
+  assert.equal(sanitizedSingleLineTextInputEvent(preview), preview);
+  const deletion: TextInputEvent = { kind: "delete_backward" };
+  assert.equal(sanitizedSingleLineTextInputEvent(deletion), deletion);
+  const oversized = { kind: "insert_text", text: new Uint8Array(512 * 1024 + 1).fill(10) } as const;
+  assert.equal(sanitizedSingleLineTextInputEvent(oversized), oversized);
+});
+
+test("pointer selection shares UTF-8 word classes and excludes hard line terminators", () => {
+  const words = encoder.encode("café  snake_case!!! 日本");
+  for (const at of [0, 3, 4]) assert.deepEqual(textWordSelectionAtOffset(words, at), { anchor: 0, focus: 5 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 6), { anchor: 5, focus: 7 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 15), { anchor: 7, focus: 17 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 18), { anchor: 17, focus: 20 });
+  assert.deepEqual(textWordSelectionAtOffset(words, 999), { anchor: 21, focus: 27 });
+  const lines = encoder.encode("one\r\ncafé\n\nlast\r");
+  assert.deepEqual(textLineSelectionAtOffset(lines, 1), { anchor: 0, focus: 3 });
+  assert.deepEqual(textLineSelectionAtOffset(lines, 8), { anchor: 5, focus: 10 });
+  assert.deepEqual(textLineSelectionAtOffset(lines, 11), { anchor: 11, focus: 11 });
+  assert.deepEqual(textLineSelectionAtOffset(lines, 999), { anchor: 12, focus: 17 });
+  assert.deepEqual(textWordSelectionAtOffset(new Uint8Array(), 0), { anchor: 0, focus: 0 });
+});
 
 function state(text: string, anchor: number, focus = anchor): TextEditState {
   return {

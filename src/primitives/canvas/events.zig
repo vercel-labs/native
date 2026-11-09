@@ -46,6 +46,8 @@ pub const WidgetPointerEvent = struct {
     phase: WidgetPointerPhase,
     point: geometry.PointF,
     delta: geometry.OffsetF = .{},
+    /// Mechanical wheel input scrolls by its delta without kinetic velocity.
+    scroll_is_detented: bool = false,
     captured_id: ?ObjectId = null,
     /// How many rapid same-spot primary clicks this pointer event is
     /// part of: 1 = plain click, 2 = double (text inputs select the
@@ -154,6 +156,7 @@ pub const WidgetKeyboardEvent = struct {
 /// `on_input` dispatch so retained text and the model hear the same edit.
 pub fn widgetKeyboardNewlineTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
     if (widget.kind != .textarea) return null;
+    if (widget.interaction_policy != null) return compiledTextKeyboardEdit(widget, event, 0);
     if (event.phase != .key_down or event.text.len != 0) return null;
     if (event.modifiers.control or event.modifiers.alt or event.modifiers.super) return null;
     if (!std.ascii.eqlIgnoreCase(event.key, "enter") and !std.ascii.eqlIgnoreCase(event.key, "return")) return null;
@@ -177,6 +180,22 @@ pub fn widgetCodeTabTextEditEvent(widget: Widget, event: WidgetKeyboardEvent) ?T
 const CodeIndentKind = enum { none, spaces, tabs };
 
 fn codeIndentationInsertion(widget: Widget) []const u8 {
+    if (widget.interaction_policy) |callback| {
+        std.debug.assert(widget.text.len <= canvas.max_widget_text_bytes_per_view);
+        const request = text_policy_scratch.get().request[0 .. 8 + widget.text.len];
+        @memset(request[0..8], 0);
+        request[0] = 11;
+        const selection = widget.text_selection orelse text_model.TextSelection.collapsed(widget.text.len);
+        std.mem.writeInt(u32, request[4..8], @intCast(@min(selection.focus, widget.text.len)), .little);
+        @memcpy(request[8..], widget.text);
+        var output: [1]u8 = undefined;
+        if (callback(request, &output) != 1) @panic("invalid compiled code indentation result");
+        return switch (output[0]) {
+            0 => "\t",
+            2...8 => "        "[0..output[0]],
+            else => @panic("invalid compiled code indentation width"),
+        };
+    }
     var tab_lines: usize = 0;
     var space_lines: usize = 0;
     var space_width_scores: [9]usize = @splat(0);
@@ -361,6 +380,76 @@ fn stripLineBreakBytes(text: []const u8, buffer: []u8) []const u8 {
     return buffer[0..len];
 }
 
+pub const TextInputPreparation = struct {
+    text: []const u8,
+    cursor: ?usize,
+    truncated: bool,
+};
+
+/// New input preparation uses the text policy's operation 6. Borrowed
+/// results refer only to the source prefix; rewritten results are copied
+/// to native scratch before another compiled callback resets its arena.
+pub fn widgetCompiledTextInput(widget: Widget, text: []const u8, mode: u8, cursor: ?usize, available: usize) ?TextInputPreparation {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (text.len > text_model.max_widget_text_bytes_per_view or available > text_model.max_widget_text_bytes_per_view or mode > 2)
+        @panic("compiled text input request exceeds budget");
+    const scratch = text_policy_scratch.get();
+    const request = scratch.request[0 .. 16 + text.len];
+    @memset(request[0..16], 0);
+    request[0] = 6;
+    request[1] = mode;
+    request[2] = @intFromBool(widgetKindSingleLineTextEntry(widget.kind));
+    request[3] = @intFromBool(cursor != null);
+    std.mem.writeInt(u32, request[4..8], @intCast(@min(cursor orelse 0, text.len)), .little);
+    std.mem.writeInt(u32, request[8..12], @intCast(available), .little);
+    @memcpy(request[16..], text);
+    const len = policy(request, &scratch.result);
+    if (len < 12 or len > 12 + text.len) @panic("invalid compiled text input result length");
+    const flags = std.mem.readInt(u32, scratch.result[0..4], .little);
+    const result_cursor = std.mem.readInt(u32, scratch.result[4..8], .little);
+    const text_len = std.mem.readInt(u32, scratch.result[8..12], .little);
+    if (flags > 15 or text_len > text.len or result_cursor > text_len or
+        (flags & 4 != 0 and mode != 1) or (flags & 8 != 0 and mode != 2))
+        @panic("invalid compiled text input result");
+    if (flags == 0) {
+        if (len != 12 or text_len != 0 or result_cursor != 0) @panic("invalid suppressed text input result");
+        return null;
+    }
+    if (flags & 1 == 0 or (flags & 4 == 0 and result_cursor != 0)) @panic("invalid compiled text input flags");
+    const borrowed = flags & 2 != 0;
+    if (len != 12 + (if (borrowed) @as(usize, 0) else text_len) or (mode == 2 and text_len > available))
+        @panic("invalid compiled text input byte budget");
+    if (!borrowed) @memcpy(sanitized_text_edit_scratch.get().bytes[0..text_len], scratch.result[12..len]);
+    return .{
+        .text = if (borrowed) text[0..text_len] else sanitized_text_edit_scratch.get().bytes[0..text_len],
+        // A clean preview is borrowed unchanged, including an authored
+        // cursor beyond its length. Only rewritten previews clamp/shift it.
+        .cursor = if (borrowed and mode == 1) cursor else if (flags & 4 != 0) result_cursor else null,
+        .truncated = flags & 8 != 0,
+    };
+}
+
+/// Resolve new input against its actual widget so compiled views use the
+/// same sanitizer for direct edits, keyboard/IME and Tree fallbacks.
+pub fn sanitizedTextInputEventForWidget(widget: Widget, event: TextInputEvent) ?TextInputEvent {
+    if (!widgetKindSingleLineTextEntry(widget.kind) or widget.interaction_policy == null)
+        return sanitizedSingleLineTextInputEvent(widget.kind, event);
+    const text = switch (event) {
+        .insert_text => |text| text,
+        .set_composition => |composition| composition.text,
+        else => return event,
+    };
+    // Preserve the existing over-budget pass-through/refuse-whole rule.
+    if (text.len > max_sanitized_text_edit_bytes) return event;
+    const composition = event == .set_composition;
+    const result = widgetCompiledTextInput(widget, text, if (composition) 1 else 0, if (composition) event.set_composition.cursor else null, 0) orelse return null;
+    return if (composition)
+        .{ .set_composition = .{ .text = result.text, .cursor = result.cursor } }
+    else
+        .{ .insert_text = result.text };
+}
+
 /// The clipboard intent of a key event: cmd+C/X/V on macOS, ctrl+C/X/V
 /// elsewhere (`hasCommandModifier` covers both). Shift/alt variants are
 /// deliberately excluded so shift+ctrl+V-style paste-special chords stay
@@ -378,6 +467,99 @@ pub fn widgetKeyboardClipboardAction(event: WidgetKeyboardEvent) ?WidgetClipboar
     if (std.ascii.eqlIgnoreCase(event.key, "x")) return .cut;
     if (std.ascii.eqlIgnoreCase(event.key, "v")) return .paste;
     return null;
+}
+
+/// Compiled editors derive the chord; static text and terminal callers keep
+/// their native recognition path and platform-specific clipboard handling.
+pub fn widgetKeyboardClipboardActionForWidget(widget: Widget, event: WidgetKeyboardEvent) ?WidgetClipboardAction {
+    const action = compiledEditorShortcut(widget, event, 0) orelse return widgetKeyboardClipboardAction(event);
+    return switch (action) {
+        0 => null,
+        1 => .copy,
+        2 => .cut,
+        3 => .paste,
+        else => @panic("invalid compiled clipboard shortcut"),
+    };
+}
+
+pub const WidgetTextHistoryAction = enum { undo, redo };
+
+pub const WidgetTextBoundaryIntent = union(enum) {
+    fallback,
+    no_edit,
+    edit: TextInputEvent,
+};
+
+/// Escape cancels preedit before clearing search/combo values. Plain Up/Down
+/// reaches a single-line boundary, except on a closed combo where opening
+/// wins. An expanded trigger with no mounted focusable option keeps the move.
+/// Textarea painted-line navigation and native focus routing remain separate.
+pub fn widgetKeyboardTextBoundaryIntent(widget: Widget, event: WidgetKeyboardEvent) WidgetTextBoundaryIntent {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return .fallback;
+    if (widget.interaction_policy) |policy| {
+        const kind: u8 = switch (widget.kind) {
+            .textarea => 0,
+            .search_field => 2,
+            .combobox => 3,
+            else => 1,
+        };
+        const key: u8 = if (std.ascii.eqlIgnoreCase(event.key, "escape") or std.ascii.eqlIgnoreCase(event.key, "esc")) 1 else if (std.ascii.eqlIgnoreCase(event.key, "arrowup")) 2 else if (std.ascii.eqlIgnoreCase(event.key, "arrowdown")) 3 else 0;
+        const m = event.modifiers;
+        const request = [8]u8{ 14, kind, @intCast(@intFromEnum(event.phase)), @as(u8, @intFromBool(m.shift)) |
+            (@as(u8, @intFromBool(m.control)) << 1) | (@as(u8, @intFromBool(m.alt)) << 2) | (@as(u8, @intFromBool(m.super)) << 3), key, @intFromBool(event.text.len != 0), @intFromBool(widget.text_composition != null), @intFromBool(widget.state.expanded orelse false) };
+        var output: [2]u8 = undefined;
+        if (policy(&request, &output) != output.len or output[0] > 5 or output[1] > 1) @panic("invalid compiled editor boundary result");
+        return switch (output[0]) {
+            0 => .fallback,
+            1 => .no_edit,
+            2 => .{ .edit = .cancel_composition },
+            3 => .{ .edit = .clear },
+            4, 5 => .{ .edit = .{ .move_caret = .{ .direction = if (output[0] == 4) .start else .end, .extend = output[1] == 1 } } },
+            else => unreachable,
+        };
+    }
+    if (event.phase != .key_down or event.modifiers.hasNavigationModifier()) return .fallback;
+    if (!event.modifiers.shift and (std.ascii.eqlIgnoreCase(event.key, "escape") or std.ascii.eqlIgnoreCase(event.key, "esc"))) {
+        if (widget.text_composition != null) return .{ .edit = .cancel_composition };
+        if (widget.kind == .search_field or widget.kind == .combobox) return .{ .edit = .clear };
+        return .no_edit;
+    }
+    if (widgetKindSingleLineTextEntry(widget.kind) and event.text.len == 0 and !(widget.kind == .combobox and !(widget.state.expanded orelse false))) {
+        if (std.ascii.eqlIgnoreCase(event.key, "arrowup")) return .{ .edit = .{ .move_caret = .{ .direction = .start, .extend = event.modifiers.shift } } };
+        if (std.ascii.eqlIgnoreCase(event.key, "arrowdown")) return .{ .edit = .{ .move_caret = .{ .direction = .end, .extend = event.modifiers.shift } } };
+    }
+    return .fallback;
+}
+
+/// Recognize the chord only; native callers retain eligibility, composition
+/// refusal, serial lookup and storage for the selected history direction.
+pub fn widgetKeyboardTextHistoryAction(widget: Widget, event: WidgetKeyboardEvent) ?WidgetTextHistoryAction {
+    if (compiledEditorShortcut(widget, event, 1)) |action| return switch (action) {
+        0 => null,
+        1 => .undo,
+        2 => .redo,
+        else => @panic("invalid compiled history shortcut"),
+    };
+    if (event.phase != .key_down or !event.modifiers.super or event.modifiers.alt or !std.ascii.eqlIgnoreCase(event.key, "z")) return null;
+    return if (event.modifiers.shift) .redo else .undo;
+}
+
+fn compiledEditorShortcut(widget: Widget, event: WidgetKeyboardEvent, mode: u8) ?u8 {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const keys = [_][]const u8{ "c", "x", "v", "z" };
+    var key: u8 = 0;
+    for (keys, 1..) |name, index| if (std.ascii.eqlIgnoreCase(event.key, name)) {
+        key = @intCast(index);
+        break;
+    };
+    const m = event.modifiers;
+    const request = [5]u8{ 13, mode, @intCast(@intFromEnum(event.phase)), @as(u8, @intFromBool(m.shift)) |
+        (@as(u8, @intFromBool(m.control)) << 1) | (@as(u8, @intFromBool(m.alt)) << 2) | (@as(u8, @intFromBool(m.super)) << 3), key };
+    var output: [1]u8 = undefined;
+    if (policy(&request, &output) != output.len or output[0] > (if (mode == 0) @as(u8, 3) else @as(u8, 2)))
+        @panic("invalid compiled editor shortcut result");
+    return output[0];
 }
 
 pub const WidgetControlIntentKind = enum {
@@ -606,9 +788,500 @@ fn widgetKeyboardLineDeleteTextEditEventForPlatform(comptime os_tag: @TypeOf(bui
 /// Command+Backspace target is always offset 0; a textarea keeps the hard-line
 /// boundary carried by `.delete_to_line_start`.
 pub fn widgetKeyboardTextEditEventForWidget(widget: Widget, event: WidgetKeyboardEvent) ?TextInputEvent {
+    if (event.edit) |edit| {
+        if (edit == .delete_to_line_start and widgetKindSingleLineTextEntry(widget.kind)) return .delete_to_start;
+        return edit;
+    }
+    if ((widget.kind == .textarea or widgetKindSingleLineTextEntry(widget.kind)) and widget.interaction_policy != null)
+        return compiledTextKeyboardEdit(widget, event, 1);
     const edit = event.textEditEvent() orelse return null;
     if (edit == .delete_to_line_start and widgetKindSingleLineTextEntry(widget.kind)) return .delete_to_start;
     return edit;
+}
+
+/// Native normalizes host keys and supplies platform facts. Compiled policy
+/// returns only intent; insert bytes stay borrowed from this dispatch.
+fn compiledTextKeyboardResult(widget: Widget, event: WidgetKeyboardEvent, operation: u8) [2]u8 {
+    const keys = [_][]const u8{ "", "enter", "return", "backspace", "delete", "arrowleft", "arrowright", "home", "end", "a" };
+    var key: u8 = 0;
+    for (keys[1..], 1..) |name, index| {
+        if (std.ascii.eqlIgnoreCase(event.key, name)) {
+            key = @intCast(index);
+            break;
+        }
+    }
+    const modifiers = event.modifiers;
+    const request = [8]u8{ operation, @intFromBool(widget.kind == .textarea), @intCast(@intFromEnum(event.phase)), @as(u8, @intFromBool(modifiers.shift)) | (@as(u8, @intFromBool(modifiers.control)) << 1) |
+        (@as(u8, @intFromBool(modifiers.alt)) << 2) | (@as(u8, @intFromBool(modifiers.super)) << 3), @intFromBool(builtin.os.tag == .macos), @intFromBool(widget.submit_on_enter), key, @intFromBool(event.text.len != 0) };
+    var output: [2]u8 = undefined;
+    if (widget.interaction_policy.?(&request, &output) != 2 or output[0] > 16 or output[1] > 1)
+        @panic("invalid compiled text policy result");
+    return output;
+}
+
+fn compiledTextKeyboardEdit(widget: Widget, event: WidgetKeyboardEvent, operation: u8) ?TextInputEvent {
+    const result = compiledTextKeyboardResult(widget, event, operation);
+    const extend = result[1] == 1;
+    return switch (result[0]) {
+        0 => null,
+        1 => .{ .insert_text = event.text },
+        2 => .{ .insert_text = "\n" },
+        3 => .delete_backward,
+        4 => .delete_forward,
+        5 => .{ .move_caret = .{ .direction = .previous, .extend = extend } },
+        6 => .{ .move_caret = .{ .direction = .next, .extend = extend } },
+        7 => .{ .move_caret = .{ .direction = .start, .extend = extend } },
+        8 => .{ .move_caret = .{ .direction = .end, .extend = extend } },
+        9 => .{ .move_caret = .{ .direction = .previous_word, .extend = extend } },
+        10 => .{ .move_caret = .{ .direction = .next_word, .extend = extend } },
+        11 => .delete_word_backward,
+        12 => .delete_word_forward,
+        13 => .delete_to_line_start,
+        14 => .{ .set_selection = .{ .anchor = 0, .focus = std.math.maxInt(usize) } },
+        16 => .delete_to_start,
+        else => @panic("invalid compiled text edit intent"),
+    };
+}
+
+pub const TextPointerPolicyResult = struct {
+    selection: text_model.TextSelection,
+    anchor: TextRange,
+};
+
+const text_policy_scratch = canvas.lazy_tls.LazyTls(struct {
+    request: [40 + 2 * text_model.max_widget_text_bytes_per_view]u8,
+    result: [24 + text_model.max_widget_text_bytes_per_view]u8,
+});
+
+pub const TextClipboardPolicyResult = struct {
+    selection: ?TextRange,
+    select_all: bool,
+};
+
+/// Source-only clipboard range and default edit-menu availability. Native
+/// callers retain eligibility, clipboard ownership and write-before-cut.
+pub fn widgetTextClipboardState(widget: Widget) TextClipboardPolicyResult {
+    if ((widget.kind == .textarea or widgetKindSingleLineTextEntry(widget.kind)) and widget.interaction_policy != null) {
+        if (widget.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled clipboard request exceeds text budget");
+        const request = text_policy_scratch.get().request[0 .. 24 + widget.text.len];
+        @memset(request[0..24], 0);
+        request[0] = 12;
+        std.mem.writeInt(u32, request[4..8], @intCast(widget.text.len), .little);
+        if (widget.text_selection) |selection| {
+            request[1] = 1;
+            std.mem.writeInt(u64, request[8..16], @intCast(selection.anchor), .little);
+            std.mem.writeInt(u64, request[16..24], @intCast(selection.focus), .little);
+        }
+        @memcpy(request[24..], widget.text);
+        var output: [12]u8 = undefined;
+        if (widget.interaction_policy.?(request, &output) != output.len) @panic("invalid compiled clipboard result");
+        const flags = std.mem.readInt(u32, output[0..4], .little);
+        const start = std.mem.readInt(u32, output[4..8], .little);
+        const end = std.mem.readInt(u32, output[8..12], .little);
+        if (flags > 3 or (flags & 1 != 0 and (widget.text_selection == null or start >= end or end > widget.text.len)) or
+            (flags & 1 == 0 and (start != 0 or end != 0)) or (flags & 2 != 0 and widget.text.len == 0))
+            @panic("invalid compiled clipboard range");
+        return .{ .selection = if (flags & 1 != 0) .{ .start = start, .end = end } else null, .select_all = flags & 2 != 0 };
+    }
+    const range = canvas.widgetTextSelectionRange(widget);
+    return .{ .selection = if (range) |selected| if (selected.isCollapsed(widget.text.len)) null else selected else null, .select_all = widget.text.len > 0 };
+}
+
+/// Native resolves the pointer into a byte offset. Compiled policy selects
+/// the run and orients its union with the gesture anchor; copy before reset.
+pub fn widgetCompiledTextPointerSelection(widget: Widget, offset: usize, click_count: u8, mode: u8, anchor: TextRange) ?TextPointerPolicyResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (widget.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled text pointer request exceeds text budget");
+    const request = text_policy_scratch.get().request[0 .. 16 + widget.text.len];
+    request[0] = 3;
+    request[1] = @intFromBool(widget.kind == .textarea);
+    request[2] = @min(click_count, 3);
+    request[3] = mode;
+    std.mem.writeInt(u32, request[4..8], @intCast(@min(offset, widget.text.len)), .little);
+    std.mem.writeInt(u32, request[8..12], @intCast(@min(anchor.start, widget.text.len)), .little);
+    std.mem.writeInt(u32, request[12..16], @intCast(@min(anchor.end, widget.text.len)), .little);
+    @memcpy(request[16..], widget.text);
+    var output: [16]u8 = undefined;
+    if (policy(request, &output) != output.len) @panic("invalid compiled text pointer result");
+    const result = TextPointerPolicyResult{
+        .selection = .{ .anchor = std.mem.readInt(u32, output[0..4], .little), .focus = std.mem.readInt(u32, output[4..8], .little) },
+        .anchor = .{ .start = std.mem.readInt(u32, output[8..12], .little), .end = std.mem.readInt(u32, output[12..16], .little) },
+    };
+    if (result.selection.anchor > widget.text.len or result.selection.focus > widget.text.len or
+        result.anchor.start > result.anchor.end or result.anchor.end > widget.text.len)
+        @panic("invalid compiled text pointer range");
+    return result;
+}
+
+/// Compile the same SDK reducer used by app models. Copy edited bytes before
+/// arena reset; caret-only results retain the native source without copying.
+/// Painted affinity remains native metadata, including CRLF canonicalization.
+pub fn widgetCompiledTextEdit(widget: Widget, state: text_model.TextEditState, edit: TextInputEvent, output: []u8) error{TextEditBufferTooSmall}!?text_model.TextEditState {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const capacity = @min(output.len, text_model.max_widget_text_bytes_per_view);
+    const inserted: []const u8 = switch (edit) {
+        .insert_text => |text| text,
+        .set_composition => |composition| composition.text,
+        else => "",
+    };
+    if (inserted.len > capacity) return error.TextEditBufferTooSmall;
+    if (state.text.len > text_model.max_widget_text_bytes_per_view) @panic("compiled text reducer source exceeds text budget");
+    const scratch = text_policy_scratch.get();
+    const request = scratch.request[0 .. 40 + state.text.len + inserted.len];
+    @memset(request[0..40], 0);
+    request[0] = 4;
+    request[1] = switch (edit) {
+        .insert_text => 0,
+        .delete_backward => 1,
+        .delete_forward => 2,
+        .delete_word_backward => 3,
+        .delete_word_forward => 4,
+        .delete_to_start => 5,
+        .delete_to_line_start => 6,
+        .clear => 7,
+        .move_caret => 8,
+        .set_selection => 9,
+        .set_composition => 10,
+        .commit_composition => 11,
+        .cancel_composition => 12,
+    };
+    if (edit == .move_caret) {
+        request[2] = switch (edit.move_caret.direction) {
+            .previous => 0,
+            .next => 1,
+            .previous_word => 2,
+            .next_word => 3,
+            .start => 4,
+            .end => 5,
+        };
+        request[3] = @intFromBool(edit.move_caret.extend);
+    }
+    request[4] = @intFromBool(state.composition != null);
+    request[5] = @intFromBool(edit == .set_composition and edit.set_composition.cursor != null);
+    std.mem.writeInt(u32, request[8..12], @intCast(state.text.len), .little);
+    std.mem.writeInt(u32, request[12..16], @intCast(@min(state.selection.anchor, state.text.len)), .little);
+    std.mem.writeInt(u32, request[16..20], @intCast(@min(state.selection.focus, state.text.len)), .little);
+    if (state.composition) |composition| {
+        std.mem.writeInt(u32, request[20..24], @intCast(@min(composition.start, state.text.len)), .little);
+        std.mem.writeInt(u32, request[24..28], @intCast(@min(composition.end, state.text.len)), .little);
+    }
+    if (edit == .set_selection) {
+        std.mem.writeInt(u32, request[28..32], @intCast(@min(edit.set_selection.anchor, state.text.len)), .little);
+        std.mem.writeInt(u32, request[32..36], @intCast(@min(edit.set_selection.focus, state.text.len)), .little);
+    } else if (edit == .set_composition) {
+        std.mem.writeInt(u32, request[28..32], @intCast(@min(edit.set_composition.cursor orelse 0, inserted.len)), .little);
+    }
+    std.mem.writeInt(u32, request[36..40], @intCast(capacity), .little);
+    @memcpy(request[40..][0..state.text.len], state.text);
+    @memcpy(request[40 + state.text.len ..], inserted);
+    const len = policy(request, &scratch.result);
+    if (len == 4 and std.mem.readInt(u32, scratch.result[0..4], .little) == 0) return error.TextEditBufferTooSmall;
+    if (len < 24 or len > scratch.result.len) @panic("invalid compiled text reducer result length");
+    const flags = std.mem.readInt(u32, scratch.result[0..4], .little);
+    if (flags != 1 and flags != 3) @panic("invalid compiled text reducer result flags");
+    const retained = flags == 3;
+    if ((retained and len != 24) or (!retained and len - 24 > capacity)) @panic("invalid compiled text reducer byte budget");
+    const text = if (retained) state.text else output[0 .. len - 24];
+    if (!retained) @memcpy(output[0 .. len - 24], scratch.result[24..len]);
+    const composition_present = std.mem.readInt(u32, scratch.result[12..16], .little);
+    if (composition_present > 1) @panic("invalid compiled text reducer composition flag");
+    const result = text_model.TextEditState{
+        .text = text,
+        .selection = .{ .anchor = std.mem.readInt(u32, scratch.result[4..8], .little), .focus = std.mem.readInt(u32, scratch.result[8..12], .little), .affinity = switch (edit) {
+            .set_selection => |selection| canvas.snapTextCaretSelection(state.text, selection).affinity,
+            .commit_composition => canvas.snapTextCaretSelection(state.text, state.selection).affinity,
+            .cancel_composition => if (state.composition == null) canvas.snapTextCaretSelection(state.text, state.selection).affinity else .upstream,
+            else => .upstream,
+        } },
+        .composition = if (composition_present == 1) .{ .start = std.mem.readInt(u32, scratch.result[16..20], .little), .end = std.mem.readInt(u32, scratch.result[20..24], .little) } else null,
+    };
+    if (result.selection.anchor > text.len or result.selection.focus > text.len) @panic("invalid compiled text reducer selection");
+    if (result.composition) |composition| {
+        if (composition.start > composition.end or composition.end > text.len) @panic("invalid compiled text reducer composition");
+    }
+    return result;
+}
+
+pub const TextReconcilePolicyState = struct {
+    source_unchanged: bool,
+    source_matches_runtime: bool,
+    previous_source_selection: ?text_model.TextSelection,
+    retained_selection: ?text_model.TextSelection,
+};
+
+pub const TextReconcilePolicyResult = struct {
+    retain_text: bool,
+    retain_state: bool,
+    retain_selection_composition: bool,
+    retain_affinity: bool,
+};
+
+/// Native supplies source fingerprints and retained identity/state. The
+/// compiled policy decides which editor state survives the source rebuild.
+pub fn widgetCompiledTextReconcile(widget: Widget, state: TextReconcilePolicyState) ?TextReconcilePolicyResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [40]u8 = @splat(0);
+    request[0] = 5;
+    request[1] = @intFromBool(state.source_unchanged);
+    request[2] = @intFromBool(state.source_matches_runtime);
+    request[4] = @as(u8, @intFromBool(widget.text_selection != null)) |
+        (@as(u8, @intFromBool(widget.text_composition != null)) << 1);
+    if (widget.text_selection) |selection| {
+        request[4] |= @as(u8, @intFromBool(selection.affinity == .downstream)) << 2;
+        std.mem.writeInt(u64, request[8..16], @intCast(selection.anchor), .little);
+        std.mem.writeInt(u64, request[16..24], @intCast(selection.focus), .little);
+    }
+    if (state.retained_selection) |selection| {
+        request[5] = 1 | (@as(u8, @intFromBool(selection.affinity == .downstream)) << 1);
+        std.mem.writeInt(u64, request[24..32], @intCast(selection.anchor), .little);
+        std.mem.writeInt(u64, request[32..40], @intCast(selection.focus), .little);
+    }
+    if (state.previous_source_selection) |selection| {
+        request[6] = 1 | (@as(u8, @intFromBool(selection.affinity == .downstream)) << 1);
+    }
+    var output: [1]u8 = undefined;
+    if (policy(&request, &output) != output.len or output[0] > 15) @panic("invalid compiled text reconcile result");
+    const flags = output[0];
+    if (flags != 0 and flags & 2 == 0) @panic("invalid compiled text reconcile retention");
+    return .{
+        .retain_text = flags & 1 != 0,
+        .retain_state = flags & 2 != 0,
+        .retain_selection_composition = flags & 4 != 0,
+        .retain_affinity = flags & 8 != 0,
+    };
+}
+
+pub const TextHistoryDelta = struct {
+    prefix_len: usize,
+    before_end: usize,
+    after_end: usize,
+};
+
+pub const TextHistoryRecordResult = union(enum) { none, delta: TextHistoryDelta };
+
+/// Compile the replacement ranges while both states still borrow native
+/// storage. The fixed result is copied before history allocation/compaction.
+pub fn widgetCompiledTextHistoryDelta(widget: Widget, before: text_model.TextEditState, after: text_model.TextEditState, provisional: bool) ?TextHistoryRecordResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const budget = text_model.max_widget_text_bytes_per_view;
+    if (before.text.len > budget or after.text.len > budget) @panic("compiled text history delta exceeds byte budget");
+    const request = text_policy_scratch.get().request[0 .. 24 + before.text.len + after.text.len];
+    @memset(request[0..24], 0);
+    request[0] = 8;
+    request[1] = @intFromBool(provisional);
+    request[2] = @intFromBool(after.composition != null);
+    std.mem.writeInt(u32, request[4..8], @intCast(before.text.len), .little);
+    std.mem.writeInt(u32, request[8..12], @intCast(after.text.len), .little);
+    const removed = text_model.snapTextCaretSelection(before.text, before.selection).range(before.text.len);
+    std.mem.writeInt(u32, request[12..16], @intCast(removed.start), .little);
+    std.mem.writeInt(u32, request[16..20], @intCast(removed.end), .little);
+    std.mem.writeInt(u32, request[20..24], @intCast(if (after.composition) |composition| composition.end else 0), .little);
+    @memcpy(request[24..][0..before.text.len], before.text);
+    @memcpy(request[24 + before.text.len ..], after.text);
+    var output: [16]u8 = undefined;
+    if (policy(request, &output) != output.len) @panic("invalid compiled text history delta result");
+    const record = std.mem.readInt(u32, output[0..4], .little);
+    if (record == 0) {
+        if (!std.mem.allEqual(u8, output[4..], 0)) @panic("invalid empty compiled text history delta");
+        return .none;
+    }
+    const delta = TextHistoryDelta{
+        .prefix_len = std.mem.readInt(u32, output[4..8], .little),
+        .before_end = std.mem.readInt(u32, output[8..12], .little),
+        .after_end = std.mem.readInt(u32, output[12..16], .little),
+    };
+    if (record != 1 or delta.prefix_len > delta.before_end or delta.prefix_len > delta.after_end or
+        delta.before_end > before.text.len or delta.after_end > after.text.len)
+        @panic("invalid compiled text history delta ranges");
+    return .{ .delta = delta };
+}
+
+pub const TextCompositionHistoryState = struct {
+    prefix_len: usize,
+    removed_len: usize,
+    before_text_len: usize,
+    after_text_len: usize,
+    capacity: usize,
+    active: bool,
+    before_matches: bool,
+};
+
+pub const TextCompositionHistoryResult = struct {
+    action: enum(u32) { discard, retain, remove, commit },
+    after_end: usize = 0,
+    inserted_len: usize = 0,
+};
+
+/// Plan a provisional entry update without borrowing text or history bytes.
+/// Copy the fixed result before another policy call resets the compiler arena.
+pub fn widgetCompiledTextCompositionHistory(widget: Widget, state: TextCompositionHistoryState) ?TextCompositionHistoryResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const budget = text_model.max_widget_text_bytes_per_view;
+    if (state.before_text_len > budget or state.after_text_len > budget or state.capacity > budget or
+        state.prefix_len > std.math.maxInt(u32) or state.removed_len > std.math.maxInt(u32))
+        @panic("compiled text composition history exceeds byte budget");
+    var request: [24]u8 = @splat(0);
+    request[0] = 9;
+    request[1] = @intFromBool(state.active);
+    request[2] = @intFromBool(state.before_matches);
+    const args = [_]usize{ state.prefix_len, state.removed_len, state.before_text_len, state.after_text_len, state.capacity };
+    for (args, 0..) |value, index| std.mem.writeInt(u32, request[4 + index * 4 ..][0..4], @intCast(value), .little);
+    var output: [12]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled text composition history result");
+    const action = std.mem.readInt(u32, output[0..4], .little);
+    const end = std.mem.readInt(u32, output[4..8], .little);
+    const inserted = std.mem.readInt(u32, output[8..12], .little);
+    if (action > 3 or (action == 0 and (end != 0 or inserted != 0)))
+        @panic("invalid compiled text composition history action");
+    if (action != 0 and (end < state.prefix_len or end > state.after_text_len or
+        inserted != end - state.prefix_len or state.removed_len > state.capacity or inserted > state.capacity - state.removed_len))
+        @panic("invalid compiled text composition history range");
+    return .{ .action = @enumFromInt(action), .after_end = end, .inserted_len = inserted };
+}
+
+pub const max_text_history_timeline_entries: usize = 128;
+
+pub const TextHistoryTimelineEntry = struct {
+    target_matches: bool = false,
+    kind_matches: bool = false,
+    applied: bool = true,
+    provisional: bool = false,
+    before_matches: bool = false,
+    after_matches: bool = false,
+};
+
+pub const TextHistoryTimelineResult = struct {
+    matches_state: bool,
+    can_undo: bool,
+    can_redo: bool,
+    undo_index: ?usize,
+    redo_index: ?usize,
+};
+
+/// Select ordered history boundaries using native identity/hash witnesses.
+/// The result contains copied indices; entry storage and serials stay native.
+pub fn widgetCompiledTextHistoryTimeline(widget: Widget, entries: []const TextHistoryTimelineEntry) ?TextHistoryTimelineResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    if (entries.len > max_text_history_timeline_entries) @panic("compiled text history timeline exceeds entry budget");
+    var request: [8 + max_text_history_timeline_entries]u8 = @splat(0);
+    request[0] = 10;
+    std.mem.writeInt(u32, request[4..8], @intCast(entries.len), .little);
+    for (entries, 0..) |entry, index| request[8 + index] =
+        @as(u8, @intFromBool(entry.target_matches)) |
+        (@as(u8, @intFromBool(entry.kind_matches)) << 1) |
+        (@as(u8, @intFromBool(entry.applied)) << 2) |
+        (@as(u8, @intFromBool(entry.provisional)) << 3) |
+        (@as(u8, @intFromBool(entry.before_matches)) << 4) |
+        (@as(u8, @intFromBool(entry.after_matches)) << 5);
+    var output: [12]u8 = undefined;
+    if (policy(request[0 .. 8 + entries.len], &output) != output.len) @panic("invalid compiled text history timeline result");
+    const flags = std.mem.readInt(u32, output[0..4], .little);
+    const undo = std.mem.readInt(u32, output[4..8], .little);
+    const redo = std.mem.readInt(u32, output[8..12], .little);
+    if (flags > 7 or undo > entries.len or redo > entries.len or
+        (flags & 2 != 0 and undo == 0) or (flags & 4 != 0 and redo == 0))
+        @panic("invalid compiled text history timeline indices");
+    const result = TextHistoryTimelineResult{
+        .matches_state = flags & 1 != 0,
+        .can_undo = flags & 2 != 0,
+        .can_redo = flags & 4 != 0,
+        .undo_index = if (undo == 0) null else undo - 1,
+        .redo_index = if (redo == 0) null else redo - 1,
+    };
+    if (result.undo_index) |index| {
+        const entry = entries[index];
+        if (!entry.target_matches or !entry.kind_matches or !entry.applied or entry.provisional or
+            (result.can_undo and !entry.after_matches)) @panic("invalid compiled text history Undo boundary");
+    }
+    if (result.redo_index) |index| {
+        const entry = entries[index];
+        if (!entry.target_matches or !entry.kind_matches or entry.applied or entry.provisional or
+            (result.can_redo and !entry.before_matches)) @panic("invalid compiled text history Redo boundary");
+    }
+    return result;
+}
+
+pub const TextHistoryReplayState = struct {
+    mode: enum(u8) { start, next, commit },
+    redo: bool,
+    before_matches: bool,
+    after_matches: bool,
+    selection: text_model.TextSelection,
+    before_selection: text_model.TextSelection,
+    after_selection: text_model.TextSelection,
+    prefix: usize,
+    removed: []const u8,
+    inserted: []const u8,
+};
+
+pub const TextHistoryReplayResult = union(enum) {
+    none,
+    clear,
+    complete,
+    edit: TextInputEvent,
+};
+
+/// The compiled planner returns one replay step. Insert payloads borrow the
+/// native history pool; selection data is copied before any arena reset.
+pub fn widgetCompiledTextHistoryReplay(widget: Widget, state: TextHistoryReplayState) ?TextHistoryReplayResult {
+    if (widget.kind != .textarea and !widgetKindSingleLineTextEntry(widget.kind)) return null;
+    const policy = widget.interaction_policy orelse return null;
+    const budget = text_model.max_widget_text_bytes_per_view;
+    if (state.removed.len > budget or state.inserted.len > budget - state.removed.len or
+        state.prefix > budget - @max(state.removed.len, state.inserted.len))
+        @panic("compiled text history exceeds byte budget");
+    const request = text_policy_scratch.get().request[0 .. 68 + state.removed.len + state.inserted.len];
+    @memset(request[0..68], 0);
+    request[0] = 7;
+    request[1] = @intFromEnum(state.mode);
+    request[2] = @intFromBool(state.redo);
+    request[3] = @as(u8, @intFromBool(state.before_matches)) | (@as(u8, @intFromBool(state.after_matches)) << 1);
+    const selections = [_]text_model.TextSelection{ state.selection, state.before_selection, state.after_selection };
+    for (selections, 0..) |selection, index| {
+        request[4] |= @as(u8, @intFromBool(selection.affinity == .downstream)) << @intCast(index);
+        const start = 8 + index * 16;
+        std.mem.writeInt(u64, request[start..][0..8], @intCast(selection.anchor), .little);
+        std.mem.writeInt(u64, request[start + 8 ..][0..8], @intCast(selection.focus), .little);
+    }
+    std.mem.writeInt(u32, request[56..60], @intCast(state.prefix), .little);
+    std.mem.writeInt(u32, request[60..64], @intCast(state.removed.len), .little);
+    std.mem.writeInt(u32, request[64..68], @intCast(state.inserted.len), .little);
+    @memcpy(request[68..][0..state.removed.len], state.removed);
+    @memcpy(request[68 + state.removed.len ..], state.inserted);
+    var output: [24]u8 = undefined;
+    if (policy(request, &output) != output.len or output[0] > 6 or output[1] > 1 or
+        !std.mem.allEqual(u8, output[2..8], 0)) @panic("invalid compiled text history result");
+    if (output[0] != 6 and !std.mem.allEqual(u8, output[1..], 0)) @panic("invalid compiled text history arguments");
+    return switch (output[0]) {
+        0 => .none,
+        1 => .clear,
+        2 => .complete,
+        3 => .{ .edit = .{ .insert_text = if (state.redo) state.inserted else state.removed } },
+        4 => .{ .edit = .delete_backward },
+        5 => .{ .edit = .delete_forward },
+        6 => .{ .edit = .{ .set_selection = .{
+            .anchor = @intCast(std.mem.readInt(u64, output[8..16], .little)),
+            .focus = @intCast(std.mem.readInt(u64, output[16..24], .little)),
+            .affinity = if (output[1] == 1) .downstream else .upstream,
+        } } },
+        else => unreachable,
+    };
+}
+
+pub fn widgetKeyboardTextSubmit(widget: Widget, event: WidgetKeyboardEvent) bool {
+    if (!isWidgetTextEntry(widget)) return false;
+    if (widget.state.disabled or event.phase != .key_down) return false;
+    if (widget.interaction_policy != null) return compiledTextKeyboardResult(widget, event, 2)[0] == 15;
+    if (!std.ascii.eqlIgnoreCase(event.key, "enter")) return false;
+    if (widget.kind != .textarea) return !event.modifiers.hasNavigationModifier();
+    return (widget.submit_on_enter and !event.modifiers.hasNavigationModifier() and !event.modifiers.shift) or
+        (event.modifiers.hasCommandModifier() and !event.modifiers.alt and !event.modifiers.shift);
 }
 
 fn widgetKeyboardSelectAllTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEvent {
@@ -620,6 +1293,22 @@ fn widgetKeyboardSelectAllTextEditEvent(event: WidgetKeyboardEvent) ?TextInputEv
 pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     if (widget.state.disabled) return null;
+    if (widget.interaction_policy) |policy| {
+        const result = compiledKeyboardControlResult(widget, keyboard, policy);
+        if (result[0] != 4) return switch (result[0]) {
+            0 => null,
+            1, 2, 3 => .{
+                .kind = switch (result[0]) {
+                    1 => .press,
+                    2 => .toggle,
+                    else => .select,
+                },
+                .actions = .{ .press = result[1] & 1 != 0, .toggle = result[1] & 2 != 0, .select = result[1] & 4 != 0 },
+            },
+            else => unreachable,
+        };
+        return compiledStepControlIntent(widget, 0, keyboard);
+    }
     // Tree rows are ROLE-driven (any pressable row becomes one by
     // carrying `role = .treeitem`), so their keymap resolves before the
     // kind switch.
@@ -688,7 +1377,135 @@ pub fn widgetKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEvent
             null,
         .grid => if (widget.layout.virtualized) widgetScrollKeyboardIntent(widget, keyboard) else null,
         .scroll_view, .list, .data_grid, .table => widgetScrollKeyboardIntent(widget, keyboard),
-        else => null,
+        // Composed controls can bind a press on an ordinary container
+        // (timeline items use a focusable stack). Its declared semantic
+        // action must answer the same activation keys as a button.
+        else => if (widget.semantics.focusable and widget.semantics.actions.press and isWidgetActivationKey(keyboard.key))
+            .{ .kind = .press, .actions = .{ .press = true } }
+        else
+            null,
+    };
+}
+
+/// Stable kind/key projections for shared operation 15. The compiled policy
+/// chooses activation and tree/radio precedence; native retains eligibility
+/// and geometry measurement. Numeric/scroll intents use operation 18 below.
+/// Copy both result bytes before another compiler call resets its arena.
+fn compiledKeyboardControlResult(widget: Widget, keyboard: WidgetKeyboardEvent, policy: *const fn ([]const u8, []u8) usize) [2]u8 {
+    const kind = compiledControlKind(widget.kind);
+    const keys = [_][]const u8{ "enter", "space", "arrowup", "arrowdown", "arrowleft", "arrowright", "home", "end" };
+    var key: u8 = 0;
+    for (keys, 1..) |name, code| {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, name)) {
+            key = @intCast(code);
+            break;
+        }
+    }
+    const request = [_]u8{
+        15,
+        kind,
+        key,
+        @as(u8, if (widget.semantics.role == .treeitem) 1 else 0) |
+            @as(u8, if (keyboard.focus_moved) 2 else 0) |
+            @as(u8, if (keyboard.radio_group_selection) 4 else 0) |
+            @as(u8, if (widget.command.len > 0) 8 else 0) |
+            @as(u8, if (widget.semantics.focusable) 16 else 0) |
+            @as(u8, if (widget.semantics.actions.press) 32 else 0) |
+            @as(u8, if (widget.layout.virtualized) 64 else 0),
+        if (widget.state.expanded) |expanded| (if (expanded) @as(u8, 2) else 1) else 0,
+    };
+    var output: [2]u8 = undefined;
+    if (policy(&request, &output) != output.len or output[0] > 4 or
+        output[1] != switch (output[0]) {
+            1 => @as(u8, 1),
+            2 => 2,
+            3 => if (widget.command.len > 0) @as(u8, 5) else 4,
+            else => 0,
+        })
+        @panic("invalid compiled keyboard control result");
+    return output;
+}
+
+/// Stable kind projection shared by keyboard and semantic control policies.
+fn compiledControlKind(kind: WidgetKind) u8 {
+    return switch (kind) {
+        .button => 1,
+        .icon_button => 2,
+        .select => 3,
+        .combobox => 4,
+        .accordion => 5,
+        .checkbox => 6,
+        .switch_control => 7,
+        .toggle => 8,
+        .toggle_button => 9,
+        .radio => 10,
+        .list_item => 11,
+        .menu_item => 12,
+        .data_cell => 13,
+        .segmented_control => 14,
+        .slider => 15,
+        .split_divider => 16,
+        .grid => 17,
+        .scroll_view => 18,
+        .list => 19,
+        .data_grid => 20,
+        .table => 21,
+        else => 0,
+    };
+}
+
+/// Shared operation 18 owns key-to-operation mapping and complete numeric /
+/// scroll intent assembly. Native supplies canonical keys, measured viewport
+/// and overflow witnesses; results contain only copied native-owned values.
+fn compiledStepControlIntent(widget: Widget, mode: u8, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
+    const keys = [_][]const u8{ "enter", "space", "arrowup", "arrowdown", "arrowleft", "arrowright", "home", "end", "pageup", "pagedown" };
+    var key: u8 = 0;
+    for (keys, 1..) |name, code| {
+        if (std.ascii.eqlIgnoreCase(keyboard.key, name)) {
+            key = @intCast(code);
+            break;
+        }
+    }
+    const kind = compiledControlKind(widget.kind);
+    // Numeric steps and boundary jumps do not depend on geometry. Keep the
+    // same measurement preconditions as the native reference helpers.
+    const measure_scroll = (mode == 3 or (kind >= 17 and kind <= 21)) and
+        !((mode == 0 or mode == 3) and (key == 7 or key == 8));
+    const viewport = if (measure_scroll) widget.frame.inset(widget.layout.padding).normalized() else geometry.RectF{};
+    const sideways_overflow = measure_scroll and (mode == 1 or mode == 2) and widgetChildrenScrollHorizontalOnly(widget, viewport);
+    var request: [17]u8 = undefined;
+    request[0..5].* = .{
+        18, kind, mode, key,
+        @as(u8, if (keyboard.modifiers.shift) 1 else 0) | @as(u8, if (widget.layout.virtualized) 2 else 0) |
+            @as(u8, if (widget.scroll_axes == .horizontal) 4 else if (widget.scroll_axes == .both) 8 else 0) |
+            @as(u8, if (sideways_overflow) 16 else 0),
+    };
+    const value: f32 = if (widget.kind == .slider or widget.kind == .split_divider) widget.value else 0;
+    for ([_]f32{ value, viewport.width, viewport.height }, 0..) |number, index|
+        std.mem.writeInt(u32, request[5 + index * 4 ..][0..4], @bitCast(number), .little);
+    var output: [16]u8 = undefined;
+    if (widget.interaction_policy.?(&request, &output) != output.len or output[0] > 4 or
+        output[1] > 2 or !std.mem.allEqual(u8, output[2..4], 0))
+        @panic("invalid compiled step control result");
+    const next: f32 = @bitCast(std.mem.readInt(u32, output[4..8], .little));
+    const dx: f32 = @bitCast(std.mem.readInt(u32, output[8..12], .little));
+    const dy: f32 = @bitCast(std.mem.readInt(u32, output[12..16], .little));
+    if (!std.math.isFinite(next) or !std.math.isFinite(dx) or !std.math.isFinite(dy) or
+        (output[0] != 1 and next != 0) or (output[0] != 2 and (dx != 0 or dy != 0)) or
+        (output[0] == 0 and output[1] != 0) or (output[0] == 1 and (next < 0 or next > 1)) or
+        (output[0] == 3 and output[1] != 2) or (output[0] == 4 and output[1] != 1))
+        @panic("invalid compiled step control arguments");
+    if (output[0] == 0) return null;
+    return .{
+        .kind = switch (output[0]) {
+            1 => .set_value,
+            2 => .scroll_by,
+            3 => .scroll_to_start,
+            else => .scroll_to_end,
+        },
+        .actions = .{ .increment = output[1] & 1 != 0, .decrement = output[1] & 2 != 0 },
+        .value = if (output[0] == 1) next else null,
+        .delta = geometry.OffsetF.init(dx, dy),
     };
 }
 
@@ -698,6 +1515,46 @@ pub fn widgetSemanticControlIntent(widget: Widget, action: WidgetSemanticAction)
 
 pub fn widgetSemanticControlIntentWithActions(widget: Widget, action: WidgetSemanticAction, actions: WidgetActions) ?WidgetControlIntent {
     if (widget.state.disabled or widget.semantics.hidden) return null;
+    if (widget.interaction_policy) |policy| {
+        const request = [_]u8{
+            16,
+            compiledControlKind(widget.kind),
+            switch (action) {
+                .press => 0,
+                .toggle => 1,
+                .select => 2,
+                .increment => 3,
+                .decrement => 4,
+            },
+            @as(u8, if (actions.press) 1 else 0) | @as(u8, if (actions.toggle) 2 else 0) |
+                @as(u8, if (actions.select) 4 else 0) | @as(u8, if (actions.increment) 8 else 0) |
+                @as(u8, if (actions.decrement) 16 else 0),
+            if (widget.semantics.role == .treeitem) 1 else 0,
+        };
+        var output: [2]u8 = undefined;
+        if (policy(&request, &output) != output.len or output[0] > 4 or
+            output[1] != switch (output[0]) {
+                1 => @as(u8, 1),
+                2 => 2,
+                3 => if (actions.press) @as(u8, 5) else 4,
+                else => 0,
+            } or
+            (output[0] == 4 and action != .increment and action != .decrement))
+            @panic("invalid compiled semantic control result");
+        return switch (output[0]) {
+            0 => null,
+            1, 2, 3 => .{
+                .kind = switch (output[0]) {
+                    1 => .press,
+                    2 => .toggle,
+                    else => .select,
+                },
+                .actions = .{ .press = output[1] & 1 != 0, .toggle = output[1] & 2 != 0, .select = output[1] & 4 != 0 },
+            },
+            4 => widgetSemanticStepControlIntent(widget, if (action == .increment) .increment else .decrement, actions),
+            else => unreachable,
+        };
+    }
     return switch (action) {
         .press => if (actions.press)
             widgetSemanticPressControlIntent(widget, actions)
@@ -825,6 +1682,24 @@ pub fn widgetSliderKeyboardValue(current: f32, keyboard: WidgetKeyboardEvent) ?f
     return null;
 }
 
+/// The compiled slider policy exchanges canonical f32 values. The callback
+/// copies its result before resetting the scriptc arena; no tree bytes escape.
+pub fn widgetCompiledSliderValue(widget: Widget, operation: u8, previous_source: ?f32, retained: f32, pressed: bool) ?f32 {
+    if (widget.kind != .slider) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [14]u8 = undefined;
+    request[0] = operation;
+    request[1] = @as(u8, if (previous_source != null) 1 else 0) | @as(u8, if (pressed) 2 else 0);
+    std.mem.writeInt(u32, request[2..6], @bitCast(widget.value), .little);
+    std.mem.writeInt(u32, request[6..10], @bitCast(previous_source orelse @as(f32, 0)), .little);
+    std.mem.writeInt(u32, request[10..14], @bitCast(retained), .little);
+    var output: [4]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled slider policy result");
+    const value: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
+    if (!std.math.isFinite(value) or (operation < 2 and (value < 0 or value > 1))) @panic("invalid compiled slider policy value");
+    return value;
+}
+
 /// Fraction steps for the split divider: the slider's step sizes, on the
 /// horizontal axis only (the vertical arrows stay free for tree/list
 /// focus travel around the divider).
@@ -836,6 +1711,52 @@ pub fn widgetSplitDividerKeyboardValue(current: f32, keyboard: WidgetKeyboardEve
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return 0;
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return 1;
     return null;
+}
+
+/// Width policy uses native f32 geometry and copies the result before the
+/// compiler arena resets. Operation 0 applies drag, 1 reconciles retained width.
+pub fn widgetCompiledResizableWidth(widget: Widget, operation: u8, current: f32, delta: f32) ?f32 {
+    if (widget.kind != .resizable) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [13]u8 = undefined;
+    request[0] = operation;
+    for ([_]f32{ widget.frame.height, current, delta }, 0..) |value, index|
+        std.mem.writeInt(u32, request[1 + index * 4 ..][0..4], @bitCast(value), .little);
+    var output: [4]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled resizable policy result");
+    const width: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
+    if (std.math.isNan(width) or width < 48) @panic("invalid compiled resizable policy width");
+    return width;
+}
+
+pub const SplitPolicyRequest = struct {
+    operation: u8,
+    value: f32,
+    available: f32 = 0,
+    first_min: f32 = 0,
+    second_min: f32 = 0,
+    previous_source: ?f32 = null,
+    retained: f32 = 0,
+    declared_tween: bool = false,
+    armed_tween: bool = false,
+};
+
+/// Canonical f32 policy exchange; the generated callback copies its result
+/// before resetting the scriptc arena. The retained widget owns no ABI bytes.
+pub fn widgetCompiledSplitValue(widget: Widget, input: SplitPolicyRequest) ?f32 {
+    if (widget.kind != .split and widget.kind != .split_divider) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [26]u8 = undefined;
+    request[0] = input.operation;
+    request[1] = @as(u8, if (input.previous_source != null) 1 else 0) |
+        @as(u8, if (input.declared_tween) 2 else 0) | @as(u8, if (input.armed_tween) 4 else 0);
+    const values = [_]f32{ input.value, input.available, input.first_min, input.second_min, input.previous_source orelse 0, input.retained };
+    for (values, 0..) |value, index| std.mem.writeInt(u32, request[2 + index * 4 ..][0..4], @bitCast(value), .little);
+    var output: [4]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled split policy result");
+    const value: f32 = @bitCast(std.mem.readInt(u32, &output, .little));
+    if (!std.math.isFinite(value) or (input.operation < 2 and (value < 0 or value > 1))) @panic("invalid compiled split policy value");
+    return value;
 }
 
 /// The ARIA tree-row keymap, resolved on the routed keyboard target:
@@ -906,9 +1827,45 @@ fn widgetRadioKeyboardControlIntent(widget: Widget, keyboard: WidgetKeyboardEven
     };
 }
 
+pub const ScrollPolicyRequest = struct {
+    operation: u8,
+    current: f32 = 0,
+    viewport: f32 = 0,
+    content: f32 = 0,
+    delta: f32 = 0,
+    previous_source: ?f32 = null,
+    retained: ?f32 = null,
+    granted: bool = true,
+    horizontal_keymap: bool = false,
+    dual_keymap: bool = false,
+};
+
+/// The callback copies two f32 results before the scriptc arena resets.
+/// Scalar offset operations use dx; keyboard operations return both axes.
+pub fn widgetCompiledScrollResult(widget: Widget, value: ScrollPolicyRequest) ?geometry.OffsetF {
+    if (widget.kind != .scroll_view or !widget.runtime_flags.compiled_scroll_policy) return null;
+    const policy = widget.interaction_policy orelse return null;
+    var request: [26]u8 = undefined;
+    request[0] = 128 + value.operation;
+    request[1] = @as(u8, if (value.granted) 1 else 0) |
+        @as(u8, if (value.previous_source != null) 2 else 0) |
+        @as(u8, if (value.retained != null) 4 else 0) |
+        @as(u8, if (value.horizontal_keymap) 8 else 0) |
+        @as(u8, if (value.dual_keymap) 16 else 0);
+    inline for (.{ value.current, value.viewport, value.content, value.delta, value.previous_source orelse @as(f32, 0), value.retained orelse @as(f32, 0) }, 0..) |number, index| {
+        std.mem.writeInt(u32, request[2 + index * 4 ..][0..4], @bitCast(number), .little);
+    }
+    var output: [8]u8 = undefined;
+    if (policy(&request, &output) != output.len) @panic("invalid compiled scroll policy result");
+    const result = geometry.OffsetF.init(@bitCast(std.mem.readInt(u32, output[0..4], .little)), @bitCast(std.mem.readInt(u32, output[4..8], .little)));
+    if (!std.math.isFinite(result.dx) or !std.math.isFinite(result.dy)) @panic("invalid compiled scroll policy value");
+    return result;
+}
+
 pub fn widgetScrollKeyboardIntent(widget: Widget, keyboard: WidgetKeyboardEvent) ?WidgetControlIntent {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
     if (widget.state.disabled) return null;
+    if (widget.interaction_policy != null) return compiledStepControlIntent(widget, 3, keyboard);
     if (std.ascii.eqlIgnoreCase(keyboard.key, "home")) return .{ .kind = .scroll_to_start, .actions = .{ .decrement = true } };
     if (std.ascii.eqlIgnoreCase(keyboard.key, "end")) return .{ .kind = .scroll_to_end, .actions = .{ .increment = true } };
     const delta = widgetScrollKeyboardDelta(widget, keyboard) orelse return null;
@@ -941,6 +1898,10 @@ fn widgetScrollKeymapHorizontalOnly(widget: Widget) bool {
 ///   horizontal axis — the two-axis convention native scroll views use.
 pub fn widgetScrollKeyboardDelta(widget: Widget, keyboard: WidgetKeyboardEvent) ?geometry.OffsetF {
     if (keyboard.phase != .key_down or keyboard.modifiers.hasNavigationModifier()) return null;
+    if (widget.interaction_policy != null) {
+        const intent = compiledStepControlIntent(widget, 3, keyboard) orelse return null;
+        return if (intent.kind == .scroll_by) intent.delta else null;
+    }
     const viewport = widget.frame.inset(widget.layout.padding).normalized();
     if (widgetScrollKeymapHorizontalOnly(widget)) {
         const line_step = @max(24, viewport.width * 0.35);
@@ -986,6 +1947,7 @@ fn widgetSemanticStepControlIntent(widget: Widget, direction: WidgetSemanticStep
     const increment = direction == .increment;
     if (increment and !actions.increment) return null;
     if (!increment and !actions.decrement) return null;
+    if (widget.interaction_policy != null) return compiledStepControlIntent(widget, if (increment) 1 else 2, .{ .phase = .key_down });
 
     const intent_actions = WidgetActions{
         .increment = increment,
@@ -1047,6 +2009,7 @@ fn widgetChildrenScrollHorizontalOnly(widget: Widget, viewport: geometry.RectF) 
 
 pub fn semanticActions(widget: Widget) WidgetActions {
     if (widget.state.disabled) return .{};
+    if (widget.interaction_policy != null) return compiledSemanticActions(widget).actions;
     var actions = defaultSemanticActions(widget);
     actions.focus = actions.focus or widget.semantics.actions.focus;
     actions.press = actions.press or widget.semantics.actions.press;
@@ -1067,6 +2030,7 @@ pub fn semanticActions(widget: Widget) WidgetActions {
 
 pub fn defaultSemanticActions(widget: Widget) WidgetActions {
     if (widget.state.disabled) return .{};
+    if (widget.interaction_policy != null) return compiledSemanticActions(widget).defaults;
 
     var actions = WidgetActions{
         .focus = widget.semantics.focusable or defaultFocusable(widget),
@@ -1114,12 +2078,74 @@ pub fn defaultSemanticActions(widget: Widget) WidgetActions {
 }
 
 pub fn defaultFocusable(widget: Widget) bool {
+    if (widget.state.disabled) return false;
+    if (widget.interaction_policy != null) return compiledSemanticActions(widget).focusable;
     // Tree rows are role-driven: `role = .treeitem` on any row makes it
     // part of the tree's roving keyboard focus set.
     if (widget.semantics.role == .treeitem) return !widget.state.disabled;
     return switch (widget.kind) {
         .scroll_view, .accordion, .button, .toggle_button, .icon_button, .select, .input, .text_field, .search_field, .combobox, .textarea, .menu_item, .list_item, .data_cell, .segmented_control, .checkbox, .radio, .switch_control, .toggle, .slider, .split_divider, .terminal => !widget.state.disabled,
         else => false,
+    };
+}
+
+/// Both facts share one portable response. Copy them together before any
+/// further policy call can invalidate the compiler's borrowed result.
+pub fn semanticActionsAndFocusable(widget: Widget) struct { actions: WidgetActions, focusable: bool } {
+    if (widget.state.disabled) return .{ .actions = .{}, .focusable = false };
+    if (widget.interaction_policy != null) {
+        const result = compiledSemanticActions(widget);
+        return .{ .actions = result.actions, .focusable = result.focusable };
+    }
+    return .{ .actions = semanticActions(widget), .focusable = defaultFocusable(widget) };
+}
+
+// Explicit wire bits, independent of WidgetActions' native bool layout.
+const semantic_action_fields = [_][]const u8{
+    "focus",         "press",  "toggle", "increment",  "decrement", "set_text",
+    "set_selection", "select", "drag",   "drop_files", "dismiss",
+};
+comptime {
+    if (@typeInfo(WidgetActions).@"struct".fields.len != semantic_action_fields.len)
+        @compileError("update the compiled semantic action protocol for new actions");
+}
+
+pub fn semanticActionBits(actions: WidgetActions) u16 {
+    var bits: u16 = 0;
+    inline for (semantic_action_fields, 0..) |field, bit| {
+        if (@field(actions, field)) bits |= @as(u16, 1) << bit;
+    }
+    return bits;
+}
+
+pub fn semanticActionsFromBits(bits: u16) WidgetActions {
+    var actions = WidgetActions{};
+    inline for (semantic_action_fields, 0..) |field, bit| {
+        @field(actions, field) = bits & (@as(u16, 1) << bit) != 0;
+    }
+    return actions;
+}
+
+fn compiledSemanticActions(widget: Widget) struct { actions: WidgetActions, defaults: WidgetActions, focusable: bool } {
+    const kind = widget_model.widgetKindCode(widget.kind);
+    const authored = semanticActionBits(widget.semantics.actions);
+    const request = [_]u8{
+        17,                  @truncate(kind),          @truncate(kind >> 8),
+        @as(u8, if (widget.state.disabled) 1 else 0) | @as(u8, if (widget.state.read_only) 2 else 0) |
+            @as(u8, if (widget.semantics.role == .treeitem) 4 else 0) | @as(u8, if (widget.semantics.focusable) 8 else 0) |
+            @as(u8, if (widget.command.len > 0) 16 else 0),
+        @truncate(authored), @truncate(authored >> 8),
+    };
+    // Each callback copies out of scriptc's arena before another policy/view
+    // call can reset it. These decoded records contain native-owned values.
+    var output: [5]u8 = undefined;
+    if (widget.interaction_policy.?(&request, &output) != output.len or
+        output[1] > 7 or output[3] > 7 or output[4] > 1)
+        @panic("invalid compiled semantic actions result");
+    return .{
+        .actions = semanticActionsFromBits(std.mem.readInt(u16, output[0..2], .little)),
+        .defaults = semanticActionsFromBits(std.mem.readInt(u16, output[2..4], .little)),
+        .focusable = output[4] == 1,
     };
 }
 

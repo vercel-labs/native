@@ -41,7 +41,7 @@
 // Cmd.db uses a real process-local SQLite database, and typed app services
 // execute directly through their generated contract.
 // Every other effect (files, buffered/streaming fetch, clipboard,
-// notifications, spawn, audio, raw host commands)
+// notifications, spawn, audio/video (including playback snapshots), raw host commands)
 // is printed as `cmd ...` and NOT performed — feed its result back yourself
 // as an ordinary Msg line. That is the point: results are plain messages,
 // and the loop stays deterministic.
@@ -161,6 +161,7 @@ if (capabilities.size > 0 || permissions.size > 0 || windowViewsEnabled || (pers
     permissions: [...permissions],
     persistRoutes: persistOk !== null && persistNone !== null && persistErr !== null ? { ok: persistOk, none: persistNone, err: persistErr } : undefined,
     servicesContract: true,
+    contractEntry: "src/core.ts",
     servicePackages,
     sdkCorePath: sdkCore ?? undefined,
     windowViews: windowViewsEnabled ? windowViews : undefined,
@@ -274,6 +275,15 @@ const serviceContract = checked?.servicesContract ? JSON.parse(checked.servicesC
 const serviceOperations = new Map(serviceContract?.operations.map((operation) => [operation.name, operation]) ?? []);
 
 const mod = await import(pathToFileURL(path.resolve(entry)).href);
+let commandBytes: boolean | null = null;
+function commandMessage(name: string): unknown {
+  if (commandBytes === null) {
+    const contract = checked?.contract ?? checkFile(entry!, { sdkCorePath: sdkCore ?? undefined, contractEntry: "src/core.ts" }).contract;
+    if (!contract) throw new Error("cannot determine commandMsg input from the checked core contract");
+    commandBytes = JSON.parse(contract).channels.command_bytes === true;
+  }
+  return mod.commandMsg(commandBytes ? new TextEncoder().encode(name) : name);
+}
 if (typeof mod.initialModel !== "function" || typeof mod.update !== "function") {
   console.error(`${entry} is not an app core: it must export initialModel() and update(model, msg)`);
   process.exit(1);
@@ -321,6 +331,7 @@ let now = 0;
 const timers = new Map<string, { everyMs: number; msgKind: string; nextAt: number }>();
 /// Armed one-shots (Cmd.delay), by key.
 const delays = new Map<string, { msgKind: string; at: number }>();
+const resultTimers = new Map<string | symbol, { key: string; msgKind: string; at: number; interval: number; repeating: boolean }>();
 const serviceChannels = new Map<number, string>();
 /// Process-local Tier-1 store. `structuredClone` preserves Uint8Array and
 /// nested model data without making the app own a serialization format.
@@ -1678,20 +1689,52 @@ function performCmd(cmd: Cmdish): void {
       say(`cmd now -> ${cmd.msgKind} @ ${now}`);
       dispatch(timestampMsg(cmd.msgKind as string, now));
       return;
+    case "wall_time":
+      say(`cmd wall_time -> ${cmd.msgKind} @ ${now}`);
+      dispatch(bytesMsg(cmd.msgKind as string, encoder.encode(String(Math.trunc(now)))));
+      return;
+    case "timer_result_exact":
+    case "timer_result": {
+      const exact = cmd.op === "timer_result_exact";
+      const decimal = exact ? new TextDecoder().decode(cmd.afterMs as Uint8Array) : "";
+      const interval = exact ? (/^(0|[1-9][0-9]{0,19})$/.test(decimal) && BigInt(decimal) <= 18446744073709n ? Number(decimal) : 0) : cmd.afterMs as number;
+      const key = cmd.key as string, kind = cmd.msgKind as string;
+      const slot = key.length === 0 ? Symbol() : key;
+      const blocked = key.length > 0 && (pendingStoreByKey.has(key) || pendingDbByKey.has(key) || liveDbByKey.has(key) || serviceTasksByKey.has(key));
+      if (blocked || !(interval >= 1 && interval <= (exact ? 18446744073709 : 31536000000)) || (!resultTimers.has(slot) && !(key.length > 0 && delays.has(key)) && resultTimers.size + delays.size >= 16)) {
+        dispatch({ kind, key: encoder.encode(key), timestampNs: encoder.encode("0"), outcome: "rejected" });
+        return;
+      }
+      if (key.length > 0) delays.delete(key);
+      const rounded = Math.round(interval);
+      resultTimers.set(slot, { key, msgKind: kind, at: now + rounded, interval: rounded, repeating: cmd.mode === "repeating" });
+      say(`cmd timer_result arm ${key} +${rounded}ms -> ${kind}`);
+      return;
+    }
     case "delay": {
       const key = cmd.key as string;
-      const rearmed = delays.has(key);
+      const rearmed = delays.has(key) || resultTimers.has(key);
+      resultTimers.delete(key);
       delays.set(key, { msgKind: cmd.msgKind as string, at: now + (cmd.afterMs as number) });
       say(`cmd delay ${rearmed ? "re-arm" : "arm"} ${key} +${cmd.afterMs}ms -> ${cmd.msgKind}`);
       return;
     }
-    case "cancel": {
-      const key = cmd.key as string;
+    case "cancel":
+    case "cancel_key": {
+      // Named operations use byte identity in the native host. Decode only
+      // canonical UTF-8; malformed octets cannot name a virtual string key.
+      const raw = cmd.key;
+      const key = raw instanceof Uint8Array ? decoder.decode(raw) : raw as string;
+      const encoded = raw instanceof Uint8Array ? encoder.encode(key) : null;
+      if (encoded !== null && raw instanceof Uint8Array && (encoded.length !== raw.length || !encoded.every((byte, index) => byte === raw[index]))) {
+        say("cmd cancel_key (no matching virtual operation)");
+        return;
+      }
       if (cancelPendingStore(key)) {
         say(`cmd cancel ${key} (store result dropped)`);
       } else if (cancelPendingDb(key)) {
         say(`cmd cancel ${key} (database query result dropped)`);
-      } else if (delays.delete(key)) {
+      } else if (resultTimers.delete(key) || delays.delete(key)) {
         say(`cmd cancel ${key} (delay dropped)`);
       } else if (cancelService(key)) {
         say(`cmd cancel ${key} (service cancellation requested)`);
@@ -1718,6 +1761,20 @@ function performCmd(cmd: Cmdish): void {
       }
       serviceChannels.set(channelKey, eventKind);
       say(`cmd channel_open key=${channelKey} event=${eventKind}`);
+      return;
+    }
+    case "channel_open_source": {
+      if (journalWriter || journalReplayPath) throw new Error("external producer recordings require the native runtime; use native automate replay");
+      const requested = cmd.key as number, event = cmd.eventKind as string, started = cmd.startedKind as string;
+      const source = cmd.source as string, payload = cmd.payload as Uint8Array;
+      const sourceBytes = encoder.encode(source);
+      if (sourceBytes.length === 0 || sourceBytes.length > 255 || payload.length > 4096) throw new Error("invalid channel source arguments");
+      const key = Number.isSafeInteger(requested) && requested >= 1 ? requested : 0;
+      const accepted = key !== 0 && !serviceChannels.has(key);
+      if (accepted) serviceChannels.set(key, event);
+      say(`cmd channel_open_source key=${key} source=${source} state=${accepted ? "failed" : "skipped"}`);
+      dispatch({ kind: started, key, state: accepted ? "failed" : "skipped", bytes: accepted ? encoder.encode("UnsupportedChannelSource") : new Uint8Array(0) });
+      if (!accepted) dispatch(channelMsg(event, key, "rejected"));
       return;
     }
     case "channel_close": {
@@ -1801,6 +1858,13 @@ function performCmd(cmd: Cmdish): void {
     case "db_query":
     case "db_exec":
       performDbCmd(cmd);
+      return;
+    case "read_file_result":
+    case "write_file_result":
+    case "read_file_result_key":
+    case "write_file_result_key":
+      say(`cmd ${cmd.op} (rejected by the virtual host; native filesystem IO is required)`);
+      dispatch({ kind: cmd.resultKind, key: cmd.key instanceof Uint8Array ? cmd.key.slice() : encoder.encode(cmd.key as string), operation: cmd.op === "read_file_result" || cmd.op === "read_file_result_key" ? "read" : "write", event: "terminal", outcome: "rejected", bytes: new Uint8Array(0), totalBytes: encoder.encode("0"), mtimeMs: encoder.encode("0"), exists: false, droppedBefore: 0 });
       return;
     case "read_file":
     case "write_file":
@@ -1966,6 +2030,16 @@ function advance(ms: number): void {
         };
       }
     }
+    for (const [key, timer] of resultTimers) {
+      if (timer.at <= deadline && timer.at < dueAt) {
+        dueAt = timer.at;
+        fire = () => {
+          if (timer.repeating) timer.at += timer.interval; else resultTimers.delete(key);
+          say(`fire ${timer.key} -> ${timer.msgKind} @ ${now}`);
+          dispatch({ kind: timer.msgKind, key: encoder.encode(timer.key), timestampNs: encoder.encode(String(BigInt(Math.trunc(now)) * 1000000n + BigInt(Math.trunc((now - Math.trunc(now)) * 1000000)))), outcome: "fired" });
+        };
+      }
+    }
     if (!fire) break;
     now = dueAt;
     fire();
@@ -2037,7 +2111,7 @@ function handleLine(raw: string): void {
   const record = parsed as Record<string, unknown>;
   if (typeof record.command === "string") {
     if (typeof mod.commandMsg !== "function") throw new Error("journalable dev-host commands require the core to export commandMsg(name)");
-    const msg = mod.commandMsg(record.command);
+    const msg = commandMessage(record.command);
     if (msg === null || msg === undefined) throw new Error(`commandMsg refused ${record.command}`);
     dispatch(msg);
     if (journalWriter) journalWriter.menuCommand(record.command);
@@ -2050,6 +2124,7 @@ function handleLine(raw: string): void {
   if (record.restart === true) {
     timers.clear();
     delays.clear();
+    resultTimers.clear();
     for (const live of liveDbByKey.values()) releaseDbOperation(live.operation, true);
     liveDbByKey.clear();
     dirtyLiveDbKeys.clear();
@@ -2109,7 +2184,7 @@ function replaySession(): void {
     for (const effect of pending.splice(0)) replayServiceEffect(effect);
     if (record.tag === 14) {
       if (typeof mod.commandMsg !== "function") throw new Error("this recorded menu command requires the core to export commandMsg(name)");
-      const msg = mod.commandMsg(record.name);
+      const msg = commandMessage(record.name);
       if (msg === null || msg === undefined) throw new Error(`commandMsg refused recorded command ${record.name}`);
       dispatch(msg);
     }

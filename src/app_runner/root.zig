@@ -77,6 +77,8 @@ pub const RunOptions = struct {
     /// Migration/testing switch. Shipping defaults to the final enforced
     /// posture; set false for the preceding warn-only behavior.
     file_access_enforce: bool = true,
+    /// Explicit compatibility capability for an app's former data identity.
+    legacy_data_directory: bool = false,
     relational_migrations: []const native_sdk.relational_store.Migration = &built_relational_migrations.migrations,
 
     fn appInfo(self: RunOptions, buffers: *StateBuffers) native_sdk.AppInfo {
@@ -90,6 +92,10 @@ pub const RunOptions = struct {
             .version = manifestStringField("version"),
             .description = manifestStringField("description"),
             .has_web_content = manifestHasWebContent(),
+            .webview_inspection = if (@hasDecl(build_options, "webview_inspection"))
+                build_options.webview_inspection orelse (@import("builtin").mode == .Debug)
+            else
+                @import("builtin").mode == .Debug,
             .declares_tray = manifestDeclaresTrayCapability(),
             .dock_visible = manifestDockVisible(),
             .window_title = self.window_title,
@@ -696,7 +702,8 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     var resolved_options = options;
     resolved_options.credentials_enabled = manifestDeclaresCredentials();
     var file_root_buffers: [6][1024]u8 = undefined;
-    var file_roots: [6][]const u8 = undefined;
+    var file_roots: [7][]const u8 = undefined;
+    var legacy_data_buffer: [1024]u8 = undefined;
     const resolved_file_dirs = native_sdk.app_dirs.resolve(
         .{ .name = options.bundle_id },
         native_sdk.app_dirs.currentPlatform(),
@@ -705,8 +712,17 @@ pub fn runWithOptions(app: native_sdk.App, options: RunOptions, init: std.proces
     ) catch null;
     var file_root_count: usize = 0;
     if (resolved_file_dirs) |dirs| {
-        file_roots = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
-        file_root_count = file_roots.len;
+        file_roots[0..6].* = .{ dirs.config, dirs.cache, dirs.data, dirs.state, dirs.logs, dirs.temp };
+        file_root_count = 6;
+    }
+    if (options.legacy_data_directory) {
+        if (native_sdk.app_dirs.resolveOne(
+            .{ .name = options.app_name }, native_sdk.app_dirs.currentPlatform(),
+            native_sdk.debug.envFromMap(init.environ_map), .data, &legacy_data_buffer,
+        )) |directory| {
+            file_roots[file_root_count] = directory;
+            file_root_count += 1;
+        } else |_| {}
     }
     // Fail closed if app-dir resolution is unavailable: a filesystem grant
     // still opens arbitrary paths, while an ungranted app gets no accidental
@@ -773,7 +789,7 @@ fn runNull(app: native_sdk.App, options: RunOptions, init: std.process.Init) !vo
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
     // dereference it after this frame unwinds (see
@@ -846,7 +862,7 @@ fn runMacos(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
     // dereference it after this frame unwinds (see
@@ -918,7 +934,7 @@ fn runLinux(app: native_sdk.App, options: RunOptions, init: std.process.Init) !v
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
     // dereference it after this frame unwinds (see
@@ -988,7 +1004,7 @@ fn runWindows(app: native_sdk.App, options: RunOptions, init: std.process.Init) 
     var buffers: StateBuffers = undefined;
     var app_info = options.appInfo(&buffers);
     const store = prepareStateStore(init.io, init.environ_map, &app_info, &buffers);
-    const session_recorder = setupSessionRecorder(init, app_info);
+    const session_recorder = setupSessionRecorder(init, app_info, app.recording_policy, app.blob_policy);
     // Heap wrapper, latch-gated free: worker threads hold this address
     // as the channel wake context and an abandoned wake call may
     // dereference it after this frame unwinds (see
@@ -1079,12 +1095,12 @@ const SessionRecordContext = struct {
 /// journal's directory — large effect payloads (an image load's source
 /// bytes) live there content-addressed, referenced from journal
 /// records by hash + length (see session_blobs.zig).
-fn sessionBlobStore(io: std.Io, journal_path: []const u8) ?*native_sdk.runtime.SessionBlobDirStore {
+fn sessionBlobStore(io: std.Io, journal_path: []const u8, policy: ?*const fn ([]const u8, []u8) usize) ?*native_sdk.runtime.SessionBlobDirStore {
     var dir_buffer: [1024]u8 = undefined;
     const parent = std.fs.path.dirname(journal_path) orelse ".";
     const blob_dir = std.fmt.bufPrint(&dir_buffer, "{s}/blobs", .{parent}) catch return null;
     const store = std.heap.page_allocator.create(native_sdk.runtime.SessionBlobDirStore) catch return null;
-    store.* = native_sdk.runtime.SessionBlobDirStore.init(io, blob_dir) catch {
+    store.* = native_sdk.runtime.SessionBlobDirStore.initWithPolicy(io, blob_dir, policy) catch {
         std.heap.page_allocator.destroy(store);
         return null;
     };
@@ -1095,7 +1111,7 @@ fn sessionBlobStore(io: std.Io, journal_path: []const u8) ?*native_sdk.runtime.S
 /// recorder that streams the session into it from the very first
 /// dispatched event (init determinism needs init-time effect results).
 /// Failures disable recording loudly and never block the app.
-fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo) ?*native_sdk.runtime.SessionRecorder {
+fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo, policy: ?*const fn ([]const u8, []u8) usize, blob_policy: ?*const fn ([]const u8, []u8) usize) ?*native_sdk.runtime.SessionRecorder {
     const path = init.environ_map.get("NATIVE_SDK_SESSION_RECORD") orelse return null;
     const file = std.Io.Dir.cwd().createFile(init.io, path, .{ .truncate = true }) catch |err| {
         std.debug.print("session recording disabled: cannot create {s}: {s}\n", .{ path, @errorName(err) });
@@ -1105,7 +1121,8 @@ fn setupSessionRecorder(init: std.process.Init, app_info: native_sdk.AppInfo) ?*
     context.* = .{ .io = init.io, .file = file };
     const recorder = std.heap.page_allocator.create(native_sdk.runtime.SessionRecorder) catch return null;
     recorder.* = native_sdk.runtime.SessionRecorder.init(context.sink());
-    if (sessionBlobStore(init.io, path)) |store| recorder.blob_sink = store.sink();
+    recorder.recording_policy = policy;
+    if (sessionBlobStore(init.io, path, blob_policy)) |store| recorder.blob_sink = store.sink();
     recorder.begin(native_sdk.runtime.sessionHeaderNow(
         native_sdk.runtime.sessionPlatformName(),
         app_info.app_name,
@@ -1206,7 +1223,7 @@ fn runSessionReplay(app: native_sdk.App, options: RunOptions, init: std.process.
         !std.mem.eql(u8, value, "0")
     else
         true;
-    const blob_store = sessionBlobStore(init.io, journal_path);
+    const blob_store = sessionBlobStore(init.io, journal_path, app.blob_policy);
     const report = native_sdk.runtime.replaySession(runtime, app, journal_bytes, .{
         .verify = verify,
         .blobs = if (blob_store) |store| store.source() else null,
@@ -1394,4 +1411,14 @@ fn prepareStateStore(io: std.Io, env_map: *std.process.Environ.Map, app_info: *n
         _ = window_placement.applySavedWindow(&app_info.main_window, store.loadWindow(app_info.main_window.label, &buffers.read) catch null);
     }
     return store;
+}
+
+test "runner inspection capability follows the app build mode and explicit override" {
+    var buffers: StateBuffers = .{};
+    const info = (RunOptions{ .app_name = "inspection-test", .bundle_id = "dev.native_sdk.inspection_test" }).appInfo(&buffers);
+    if (comptime @hasDecl(build_options, "webview_inspection_expected")) {
+        try std.testing.expectEqual(build_options.webview_inspection_expected, info.webview_inspection);
+    }
+    // Direct embedding stays default-deny, including inside Debug builds.
+    try std.testing.expect(!(native_sdk.AppInfo{}).webview_inspection);
 }

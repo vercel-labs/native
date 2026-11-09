@@ -1,5 +1,5 @@
 //! Decoder over the app-core Cmd/Sub wire format (rt.zig, cmd_format_version
-//! 7), shared by the ts-track behavioral harnesses. The graders copy this
+//! 9), shared by the ts-track behavioral harnesses. The graders copy this
 //! file next to each case's harness so assertions read decoded ops — "a
 //! fetch with key `feed` targeting this URL", "the delay re-armed" — instead
 //! of hand-built byte strings, which keeps harnesses lenient about the parts
@@ -56,6 +56,13 @@ pub const Op = union(enum) {
     image_load: struct { id: f64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
     image_cancel: struct { id: f64 },
     image_unregister: struct { id: f64 },
+    image_load_words: struct { id: u64, event_tag: u8, path: []const u8, url: []const u8, cache_path: []const u8, expected_bytes: f64 },
+    image_cancel_words: struct { id: u64 },
+    image_unregister_words: struct { id: u64 },
+    read_file_result: struct { key: []const u8, result_tag: u8, path: []const u8, replace: bool },
+    write_file_result: struct { key: []const u8, result_tag: u8, path: []const u8, bytes: []const u8, replace: bool },
+    wall_time: struct { msg_tag: u8 },
+    timer_result: struct { key: []const u8, repeating: bool, after_ms: f64, msg_tag: u8 },
     channel_open: struct { key: f64, event_tag: u8, max_pending: u8 },
     channel_close: struct { key: f64 },
     pty_spawn: PtySpawn,
@@ -603,6 +610,44 @@ pub const CmdIter = struct {
                 const head = routedHead(b, &off);
                 break :blk .{ .delete_file = .{ .key = head.key, .ok_tag = head.ok, .err_tag = head.err, .path = longBytes(b, &off) } };
             },
+            0x37, 0x38, 0x3e, 0x3f => blk: {
+                const key = shortBytes(b, &off);
+                const tag = b[off];
+                off += 1;
+                const path = longBytes(b, &off);
+                const replace = op == 0x37 or op == 0x38;
+                if (op == 0x38 or op == 0x3f) break :blk .{ .write_file_result = .{ .key = key, .result_tag = tag, .path = path, .bytes = longBytes(b, &off), .replace = replace } };
+                break :blk .{ .read_file_result = .{ .key = key, .result_tag = tag, .path = path, .replace = replace } };
+            },
+            0x39 => blk: {
+                const tag = b[off];
+                off += 1;
+                break :blk .{ .wall_time = .{ .msg_tag = tag } };
+            },
+            0x3a => blk: {
+                const key = shortBytes(b, &off);
+                const repeating = b[off] != 0;
+                off += 1;
+                const after: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                const tag = b[off];
+                off += 1;
+                break :blk .{ .timer_result = .{ .key = key, .repeating = repeating, .after_ms = after, .msg_tag = tag } };
+            },
+            0x3b, 0x3c, 0x3d => blk: {
+                const id = std.mem.readInt(u64, b[off..][0..8], .little);
+                off += 8;
+                if (op == 0x3c) break :blk .{ .image_cancel_words = .{ .id = id } };
+                if (op == 0x3d) break :blk .{ .image_unregister_words = .{ .id = id } };
+                const tag = b[off];
+                off += 1;
+                const path = longBytes(b, &off);
+                const url = longBytes(b, &off);
+                const cache = longBytes(b, &off);
+                const expected: f64 = @bitCast(std.mem.readInt(u64, b[off..][0..8], .little));
+                off += 8;
+                break :blk .{ .image_load_words = .{ .id = id, .event_tag = tag, .path = path, .url = url, .cache_path = cache, .expected_bytes = expected } };
+            },
             else => std.debug.panic("cmdview: unknown op byte 0x{X:0>2} at offset {d}", .{ op, self.off }),
         };
         self.off = off;
@@ -820,6 +865,74 @@ test "the image records decode, alone and inside a batch" {
     try std.testing.expectEqual(@as(f64, 7), cancelled.image_cancel.id);
     const evicted = iter.next() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(f64, 15), evicted.image_unregister.id);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "exact image records preserve all 63 bits and advance across a mixed batch" {
+    const a = std.testing.allocator;
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(a);
+    const id: u64 = 0x7fff_ffff_ffff_ffff;
+    try wire.append(a, 0x3b);
+    var encoded: [8]u8 = undefined;
+    std.mem.writeInt(u64, &encoded, id, .little);
+    try wire.appendSlice(a, &encoded);
+    try wire.append(a, 17);
+    try wire.appendSlice(a, &.{ 3, 0, 0, 0, 'p', 0, 255 });
+    try wire.appendSlice(a, &.{ 1, 0, 0, 0, 'u', 0, 0, 0, 0 });
+    try wire.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 2048))));
+    for ([_]u8{ 0x3c, 0x3d }) |op| {
+        try wire.append(a, op);
+        try wire.appendSlice(a, &encoded);
+    }
+    try wire.appendSlice(a, &.{ 0x02, 9 });
+    var iter = CmdIter.init(wire.items);
+    const load = (iter.next() orelse return error.TestUnexpectedResult).image_load_words;
+    try std.testing.expectEqual(id, load.id);
+    try std.testing.expectEqual(@as(u8, 17), load.event_tag);
+    try std.testing.expectEqualStrings("p\x00\xff", load.path);
+    try std.testing.expectEqualStrings("u", load.url);
+    try std.testing.expectEqualStrings("", load.cache_path);
+    try std.testing.expectEqual(@as(f64, 2048), load.expected_bytes);
+    try std.testing.expectEqual(id, (iter.next() orelse return error.TestUnexpectedResult).image_cancel_words.id);
+    try std.testing.expectEqual(id, (iter.next() orelse return error.TestUnexpectedResult).image_unregister_words.id);
+    try std.testing.expectEqual(@as(u8, 9), (iter.next() orelse return error.TestUnexpectedResult).now.msg_tag);
+    try std.testing.expectEqual(@as(?Op, null), iter.next());
+}
+
+test "complete file clock and timer records retain replacement policy and binary payloads" {
+    const a = std.testing.allocator;
+    var wire: std.ArrayList(u8) = .empty;
+    defer wire.deinit(a);
+    for ([_]u8{ 0x37, 0x38, 0x3e, 0x3f }) |op| {
+        try wire.append(a, op);
+        try wire.appendSlice(a, &.{ 1, 'k', 6, 3, 0, 0, 0, 'p', 0, 255 });
+        if (op == 0x38 or op == 0x3f) try wire.appendSlice(a, &.{ 3, 0, 0, 0, 'b', 0, 255 });
+    }
+    try wire.appendSlice(a, &.{ 0x39, 7, 0x3a, 1, 't', 1 });
+    try wire.appendSlice(a, &@as([8]u8, @bitCast(@as(f64, 123.5))));
+    try wire.appendSlice(a, &.{ 8, 0x01 });
+    var iter = CmdIter.init(wire.items);
+    for ([_]bool{ true, false }) |replace| {
+        const read = (iter.next() orelse return error.TestUnexpectedResult).read_file_result;
+        const write = (iter.next() orelse return error.TestUnexpectedResult).write_file_result;
+        try std.testing.expectEqual(replace, read.replace);
+        try std.testing.expectEqual(replace, write.replace);
+        try std.testing.expectEqualStrings("k", read.key);
+        try std.testing.expectEqualStrings(read.key, write.key);
+        try std.testing.expectEqual(@as(u8, 6), read.result_tag);
+        try std.testing.expectEqual(read.result_tag, write.result_tag);
+        try std.testing.expectEqualStrings("p\x00\xff", read.path);
+        try std.testing.expectEqualStrings(read.path, write.path);
+        try std.testing.expectEqualStrings("b\x00\xff", write.bytes);
+    }
+    try std.testing.expectEqual(@as(u8, 7), (iter.next() orelse return error.TestUnexpectedResult).wall_time.msg_tag);
+    const timer = (iter.next() orelse return error.TestUnexpectedResult).timer_result;
+    try std.testing.expectEqualStrings("t", timer.key);
+    try std.testing.expect(timer.repeating);
+    try std.testing.expectEqual(@as(f64, 123.5), timer.after_ms);
+    try std.testing.expectEqual(@as(u8, 8), timer.msg_tag);
+    try std.testing.expectEqual(.persist, std.meta.activeTag(iter.next() orelse return error.TestUnexpectedResult));
     try std.testing.expectEqual(@as(?Op, null), iter.next());
 }
 

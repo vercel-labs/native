@@ -10,9 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  zig:
-    name: Zig Core
+  zig-shards:
+    name: Zig Core (${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v4
       - uses: vercel-labs/setup-zig@v1
@@ -30,9 +34,22 @@ jobs:
       # across commits by machine lifecycle.
       - run: npm ci --prefix packages/core
       - name: Service surface tooling and claims
+        if: matrix.shard == 1
         run: node --test packages/core/test/surface_tools.test.ts
-      - run: zig build test
-      - run: zig build validate
+      - run: zig build test-core-shard-${{ matrix.shard }} --summary all
+      - if: matrix.shard == 1
+        run: zig build validate
+
+  zig:
+    name: Zig Core
+    if: ${{ always() }}
+    needs: zig-shards
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm every root test shard passed
+        env:
+          CORE_SHARDS_RESULT: ${{ needs.zig-shards.result }}
+        run: test "$CORE_SHARDS_RESULT" = success
 
   core-compiler-fences:
     name: Core Compiler Fences
@@ -57,7 +74,8 @@ jobs:
 
   macos-webview:
     name: macOS WebView
-    runs-on: macos-14
+    # ScriptC 0.2.0's native codegen helper requires macOS 15 or newer.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: vercel-labs/setup-zig@v1
@@ -72,6 +90,9 @@ jobs:
       # The mobile aggregate runs on Linux for Android. Exercise the other
       # store-capable cross-target here against the real iPhone simulator SDK.
       - run: zig build test-example-mobile-canvas-lib-ios-store
+      # The default TypeScript scaffold must link a signed UIKit dev bundle
+      # with any required sanitizer runtime. No simulator device is required.
+      - run: bash .github/scripts/macos-ios-dev-link-smoke.sh
       - run: zig build test-webview-system-link
       - run: zig build test-webview-smoke
       # The zero-config TypeScript runner must load app manifest menus before
@@ -102,7 +123,7 @@ jobs:
           zig build signed-package -Dplatform=macos
           test "$(plutil -extract LSMinimumSystemVersion raw zig-out/package/swift-toolchain-proof.app/Contents/Info.plist)" = "12.0"
           codesign --verify --deep --strict zig-out/package/swift-toolchain-proof.app
-      # Shared macos-14 runners are far noisier than a dev box (the second
+      # Shared hosted macOS runners are far noisier than a dev box (the second
       # CI run measured a 576 ms automation-ready against the 500 ms local
       # ceiling), so widen the smoke budgets here instead of weakening the
       # local defaults. NATIVE_SDK_SMOKE_BUDGET_MS raises the first-frame latency
@@ -117,9 +138,13 @@ jobs:
 
   macos-gpu-perf:
     name: macOS GPU Perf
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -128,7 +153,7 @@ jobs:
       # latency, then a reset-scoped retained-animation cadence sample.
       # Its own job so a shared-runner slowdown is visible in isolation and
       # never blocks the correctness smokes.
-      # Shared macos-14 runners are far noisier than a dev box (first CI run
+      # Shared macOS runners are far noisier than a dev box (first CI run
       # measured a 581 ms cold-start outlier against the 300 ms default), so
       # widen the budgets here instead of weakening the local defaults: this
       # job exists to catch step-function regressions, not runner noise.
@@ -149,6 +174,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -217,11 +246,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: vercel-labs/setup-zig@v1
+        with:
+          version: 0.16.0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
       - run: npm --prefix packages/native-sdk run version:check
       - run: npm --prefix packages/native-sdk run scripts:check
+      # Pack the CLI and use it as a Zig path dependency in a fresh project:
+      # its build.zig must compile and configure from the packed files alone.
+      - run: npm --prefix packages/native-sdk run package:check
 
   native-example-shards:
     name: Native Examples (${{ matrix.name }})
@@ -260,6 +295,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -292,6 +331,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -304,8 +347,8 @@ jobs:
       # x11-utils provides xwininfo, which the smoke script uses to find
       # the context-menu popover's override-redirect X window (and to
       # dump the X window list in failure diagnostics).
-      - name: Install GTK, Xvfb, xdotool, and x11-utils
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xdotool x11-utils
+      - name: Install GTK, Xvfb, xauth, xdotool, and x11-utils
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev xvfb xauth xdotool x11-utils
       # The stub is the expected, configured state of every native-only
       # Linux app, so compiling the GTK host with the stub define must be
       # diagnostic-FREE, not merely successful: zig renders every clang
@@ -404,6 +447,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix packages/core
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
@@ -443,6 +490,11 @@ jobs:
       - uses: vercel-labs/setup-zig@v1
         with:
           version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install core compiler
+        run: npm ci --prefix packages/core --include=dev
       - name: Install Wine and Xvfb
         run: sudo apt-get update && sudo apt-get install -y wine xvfb
       # Cross-compiles examples/effects-probe for x86_64-windows-gnu and

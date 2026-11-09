@@ -1,0 +1,46 @@
+<virtual-window id="timeline" as="timeline" item-count="{loaded}"
+  extent-estimate="postExtentEstimate" overscan="4" viewport-fallback="760">
+  <column background="background">
+    <row height="{header_height}" padding="12" gap="10" cross="center"
+      window-drag="true" background="surface" label="Feed header">
+      <stack width="{chrome_leading}" />
+      <spacer grow="1" />
+      <text size="sm" foreground="text_muted">{loaded} of 100000 posts</text>
+    </row>
+    <separator />
+    <virtual-list window="timeline" each="timelineRows" as="post" grow="1"
+      label="Timeline" on-reach-end="load_more">
+      <list-item key="{post.index}" padding="12" selected="{post.selected}"
+        on-press="select_post:{post.index}" role="listitem" focusable="true" label="{post.label}">
+        <row grow="1" gap="10">
+          <avatar width="36" height="36">{post.initials}</avatar>
+          <column grow="1" gap="3">
+            <row gap="6" cross="center">
+              <text><span weight="bold">{post.author}</span></text>
+              <text size="sm" foreground="text_muted">{post.handle}</text>
+              <spacer grow="1" />
+              <text size="sm" foreground="text_muted">{post.time}</text>
+            </row>
+            <text wrap="true">{post.body}</text>
+            <row gap="14" cross="center">
+              <toggle-button size="sm" variant="{post.like_variant}" icon="arrow-up"
+                selected="{post.liked}" on-toggle="toggle_like:{post.index}" label="{post.like_label}">{post.likes}</toggle-button>
+              <toggle-button size="sm" variant="{post.boost_variant}" icon="repeat"
+                selected="{post.boosted}" on-toggle="toggle_boost:{post.index}" label="{post.boost_label}">{post.boosts}</toggle-button>
+              <row gap="4" cross="center">
+                <icon width="13" height="13" foreground="text_muted" name="send" />
+                <text size="sm" foreground="text_muted">{post.replies}</text>
+              </row>
+            </row>
+          </column>
+        </row>
+      </list-item>
+    </virtual-list>
+    <if test="{atCorpusEnd}">
+      <status-bar>posts {timeline.first_visible_index}–{timeline.last_visible_index} · {loaded} loaded · end of corpus</status-bar>
+    </if>
+    <else>
+      <status-bar>posts {timeline.first_visible_index}–{timeline.last_visible_index} · {loaded} loaded · scroll for more</status-bar>
+    </else>
+  </column>
+</virtual-window>

@@ -5,12 +5,12 @@
 // stock editor TypeScript resolves `@native-sdk/core` — builds never read
 // it. That contract only holds while this manifest keeps its shape:
 //
-//   - the artifact is package.json + sdk/ + compile-surface/ and nothing
+//   - the artifact is package.json + sdk/ + compile-surface/ + testing/ and nothing
 //     else (`files`), so the CLI's pre-publish copy and the published
 //     tarball stay identical (compile-surface/ is the external-compile
 //     stage's static restatement of the SDK module; sdk/*.d.ts are the
 //     generated declaration twins external tooling resolves);
-//   - the exports map resolves ".", "./text", and "./events" to the shipped
+//   - the exports map resolves ".", "./text", "./events", and "./testing" to the shipped
 //     TS sources,
 //     with a `types` condition, so tsc's bundler resolution types both;
 //   - exactly one runtime dependency — the external core compiler,
@@ -45,44 +45,46 @@ test("provenance metadata names the real repository", () => {
   assert.equal(manifest.homepage, "https://native-sdk.dev");
 });
 
-test("the artifact is exactly package.json + sdk/ + compile-surface/", () => {
-  assert.deepEqual(manifest.files, ["sdk", "compile-surface"]);
+test("the artifact contains the core, compile surface, and native testing API", () => {
+  assert.deepEqual(manifest.files, ["sdk", "compile-surface", "testing", "scripts"]);
   // A bin entry would drag its target file into the tarball behind the
   // `files` allowlist and break the copy-equals-publish contract.
   assert.equal(manifest.bin, undefined);
   // The external-compile stage's one static SDK surface.
   assert.ok(fs.existsSync(path.join(pkg, "compile-surface", "core.ts")));
   // The generated declaration twins ship beside the sources.
-  for (const name of ["core.d.ts", "text.d.ts", "events.d.ts"]) {
+  for (const name of ["core.d.ts", "bytes.d.ts", "text.d.ts", "events.d.ts", "theme.d.ts"]) {
     assert.ok(fs.existsSync(path.join(pkg, "sdk", name)), `sdk/${name} does not exist`);
   }
 });
 
-test("exports resolve ., ./text, and ./events to shipped sources, types included", () => {
+test("exports resolve core and testing modules to shipped sources, types included", () => {
   const entries = Object.entries(manifest.exports);
-  assert.deepEqual(entries.map(([key]) => key), [".", "./text", "./events"]);
+  assert.deepEqual(entries.map(([key]) => key), [".", "./bytes", "./text", "./events", "./theme", "./testing"]);
   for (const [, target] of entries) {
     assert.equal(typeof target.types, "string");
     assert.equal(target.types, target.default);
     // Every export target must ship (live inside a `files` directory).
-    assert.ok(target.types.startsWith("./sdk/"), `${target.types} is outside sdk/`);
+    assert.ok(manifest.files.some((dir: string) => target.types.startsWith(`./${dir}/`)), `${target.types} is outside the shipped directories`);
     assert.ok(fs.existsSync(path.join(pkg, target.types)), `${target.types} does not exist`);
   }
   assert.equal(manifest.exports["."].types, "./sdk/core.ts");
   assert.equal(manifest.exports["./text"].types, "./sdk/text.ts");
   assert.equal(manifest.exports["./events"].types, "./sdk/events.ts");
+  assert.equal(manifest.exports["./testing"].types, "./testing/index.ts");
   assert.equal(manifest.types, "./sdk/core.ts");
 });
 
-test("the one runtime dependency is the exact-pinned external core compiler", () => {
-  // One dependency, exact-pinned: every TypeScript-core build resolves
-  // the compiler from this package's own node_modules, and an exact pin
-  // is what makes the profile's release-pinned fence table trustworthy
-  // (this manifest is the one place the pin lives). No bin joins it —
-  // installing the package must never put a toolchain on a consumer's
-  // PATH.
-  const pin = manifest.dependencies?.scriptc;
+test("core and CLI select the same checksum-pinned release toolchain", () => {
+  const pin = manifest.nativeToolchain.scriptc;
   assert.match(pin, /^\d+\.\d+\.\d+$/);
-  assert.deepEqual(manifest.dependencies, { scriptc: pin });
-  assert.equal(cliManifest.dependencies?.scriptc, pin, "the published CLI and @native-sdk/core must ship one compiler release");
+  assert.equal(cliManifest.nativeToolchain.scriptc, pin);
+  assert.equal(manifest.dependencies.scriptc, undefined);
+  assert.equal(cliManifest.dependencies.scriptc, undefined);
+  const release = JSON.parse(fs.readFileSync(path.join(pkg, "scripts", "scriptc-toolchain.json"), "utf8"));
+  assert.equal(release.version, pin);
+  assert.equal(release.packages.compiler.version, pin);
+  assert.equal(Object.keys(release.releases).length, 7);
+  assert.equal(manifest.scripts.postinstall, "node scripts/install_scriptc.mjs");
+  assert.equal(cliManifest.scripts.postinstall, "node packages/core/scripts/install_scriptc.mjs");
 });

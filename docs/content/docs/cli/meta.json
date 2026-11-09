@@ -1,0 +1,8 @@
+{
+  "title": "CLI",
+  "defaultOpen": true,
+  "pages": [
+    "index",
+    "dev"
+  ]
+}

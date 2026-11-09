@@ -1,0 +1,10 @@
+<template name="badge" args="caption">
+  <row gap="2"><text>{caption}</text><slot/></row>
+</template>
+<column gap="8">
+  <text>Count {count}</text>
+  <input label="Title" text="{title}" on-input="rename" autofocus="true"/>
+  <button on-press="increment">Add</button>
+  <use template="badge" caption="Café"><text>tag</text></use>
+  <for each="items" as="item" key="id"><text>{item.label}</text></for>
+</column>

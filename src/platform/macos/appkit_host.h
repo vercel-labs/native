@@ -401,9 +401,11 @@ int native_sdk_update_verify_archive(const char *path, size_t path_len, uint64_t
 // About panel, which also shows version and about_description when
 // non-empty. has_web_content declares whether the app hosts a webview;
 // web-only default menu items (Reload, Toggle Web Inspector, Undo/Redo)
-// exist only when it is set. dock_visible selects Regular (nonzero) or
+// exist only when it is set. webview_inspection explicitly permits developer
+// extras, the inspector menu, and Safari inspection for every system WebView;
+// set it before creation. dock_visible selects Regular (nonzero) or
 // Accessory (zero) before application configuration and window creation.
-native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
+native_sdk_appkit_host_t *native_sdk_appkit_create(const char *app_name, size_t app_name_len, const char *display_name, size_t display_name_len, const char *version, size_t version_len, const char *about_description, size_t about_description_len, int has_web_content, int webview_inspection, int dock_visible, const char *window_title, size_t window_title_len, const char *bundle_id, size_t bundle_id_len, const char *icon_path, size_t icon_path_len, const char *window_label, size_t window_label_len, double x, double y, double width, double height, int restore_frame, int initial_placement, int restore_policy, int resizable, int titlebar_style, int show_policy, uint32_t window_flags);
 void native_sdk_appkit_destroy(native_sdk_appkit_host_t *host);
 // Adopt pre-rendered straight-alpha RGBA8 pixels as the Dock icon (and
 // the About panel copy). The pixels are copied before return, so the
@@ -450,6 +452,9 @@ int native_sdk_appkit_create_window(native_sdk_appkit_host_t *host, uint64_t win
 // AppKit's default minimum. Returns 0 when the window id is unknown.
 int native_sdk_appkit_set_window_content_min_size(native_sdk_appkit_host_t *host, uint64_t window_id, double min_width, double min_height);
 int native_sdk_appkit_focus_window(native_sdk_appkit_host_t *host, uint64_t window_id);
+// 0 follows the system, 1 forces Aqua, 2 forces Dark Aqua. Window-scoped;
+// NSApp.effectiveAppearance remains the source of system appearance events.
+int native_sdk_appkit_set_window_color_scheme(native_sdk_appkit_host_t *host, uint64_t window_id, int color_scheme);
 int native_sdk_appkit_close_window(native_sdk_appkit_host_t *host, uint64_t window_id);
 // The real OS minimize verb (NSWindow miniaturize:), for app-drawn
 // window controls on chromeless windows. Returns 0 when the window id

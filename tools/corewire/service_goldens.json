@@ -1,0 +1,650 @@
+{
+  "optimization-default": {
+    "hashes": {
+      "host": "6892ff2c7e562185e3c10bdb5057948aed1801298dc209cf6ec6e26deda703db",
+      "registry": "56739cd17e32b60b13892fd95fe8f0e5252e5eb4ef887993cfb960c901412f54",
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "inproc": "04248870c530f763e295a19e08f88cd117f618b8c60f30c94ffcd0f71e027434",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "optimization-dev": {
+    "hashes": {
+      "host": "6892ff2c7e562185e3c10bdb5057948aed1801298dc209cf6ec6e26deda703db",
+      "registry": "56739cd17e32b60b13892fd95fe8f0e5252e5eb4ef887993cfb960c901412f54",
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "inproc": "04248870c530f763e295a19e08f88cd117f618b8c60f30c94ffcd0f71e027434",
+      "profile": "5be59d4c0b63943e4bdbf4f72ee67399074db20823c08fc099ffe77254f27adc"
+    }
+  },
+  "optimization-release": {
+    "hashes": {
+      "host": "6892ff2c7e562185e3c10bdb5057948aed1801298dc209cf6ec6e26deda703db",
+      "registry": "56739cd17e32b60b13892fd95fe8f0e5252e5eb4ef887993cfb960c901412f54",
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "inproc": "04248870c530f763e295a19e08f88cd117f618b8c60f30c94ffcd0f71e027434",
+      "profile": "055c25d5760a8b80466eeb3b09c06a9ae74d60ac5c8996251881ff13c5b6b2cc"
+    }
+  },
+  "shape-0-false-false": {
+    "hashes": {
+      "host": "f858e64b3b0aeec8af802b5b4c801a6299d71d12bb91ac8c83e0821775d29a4d",
+      "registry": "b32e7f45169a28d358d96d44df4a5093c776f45ec4ba51368c64aca7832c932e",
+      "client": "a70b69b56eff1a35e2868026bd15a6cc547786388facfa17716c3ba1ce35e104",
+      "inproc": "48362d0882c97e951b800026fedf133bb5868346b8894ff3e60f85c853137732",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-0-false-true": {
+    "hashes": {
+      "host": "e29c6e9e85c6c8b089b6e37a39ca2b77dd07941744a1dcee459de9450cedf7fd",
+      "registry": "707060dfd8ecebce392d0b92a14c528945b72d0fd793314ec266c58b6456992f",
+      "client": "b114a69aade6104cefa2e2e7a0ea7aefdc9afa599eab235410f6d04824b337b9",
+      "inproc": "4ce534b866b59b1943b96bdadac968d18e8b013779efd625aa887d70bb9223e9",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-0-true-false": {
+    "hashes": {
+      "host": "c54847314ac0704187fba4f2835994084878b6b6f8435a2d7d4542a05d2954c1",
+      "registry": "2c03f178dd8c541bf14e5f8730d55a0c9ff27bc73e458b0887c08bcc6b5f0896",
+      "client": "a70b69b56eff1a35e2868026bd15a6cc547786388facfa17716c3ba1ce35e104",
+      "inproc": "d7612925a54e30240c0c7ed280090fe8c9e99b09d58b04ae7d3a4dc2765e5d93",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-0-true-true": {
+    "hashes": {
+      "host": "681c447573b70b50896844d7c600826c6848b69d62895b96a858a59ea16a261c",
+      "registry": "60d293b56671724eaa524fe455a5a8b28cd6d0b5557642ca119cd4ccc515747e",
+      "client": "0cc2c0741005ecf057d18cf645219937c1d7d0a3aeb35500690d5b48ebdc1a68",
+      "inproc": "8f5be7a0e00fd76de63686f1ee1a370b1dfab9304832c055d6d6d0015ef70959",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-1-false-false": {
+    "hashes": {
+      "host": "a0b077571bcf2cb7cb2a6694f0b977dd522ad0caa9fbeec67ae783352ba870ac",
+      "registry": "615ecbf35d2b3ca05f7b23894b0fce30f0b35e37a4ef2b0ca2ae3d529f38fbf8",
+      "client": "d1a4b4e097c3b16f62c50aa2f59246b965dcbf228632df29d85ad40128d59c81",
+      "inproc": "f6bde7850960daf82071ff6a208f3da2853af1a19bff59e640d031f2d6be2362",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-1-false-true": {
+    "hashes": {
+      "host": "da2584bf844f2115ed6f31367853c61653142f620aa43ced7e818ef7fc43e133",
+      "registry": "2b908b0a5dc46eb4cc0f6938187ef953e31baec0fedb551d9a409f5364341572",
+      "client": "549e7da3a5ec0d0069b8628284a094bcd15aa53e01bb354492b517d64da6a89a",
+      "inproc": "31dab80233a69bd9acf061aa727d552ebdf2c1ceb24bd3d63691cab6a6e42fb9",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-1-true-false": {
+    "hashes": {
+      "host": "2b97ca8da8182925b06496e8354d8abdb7cb1e43961ea5a62358a0486300329c",
+      "registry": "622a4acae162bbb7d14561216dde9862b8e0b52d3d91ca6b21d48ee27ef367be",
+      "client": "d1a4b4e097c3b16f62c50aa2f59246b965dcbf228632df29d85ad40128d59c81",
+      "inproc": "132166c0dbfcb50ce966246e1be08e285c2fa7dd777c9c1482f412249fdf11f2",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-1-true-true": {
+    "hashes": {
+      "host": "93ea994f51c76e9b7e4efc9d88c16466890fe236f9f461da309e99678a51a902",
+      "registry": "27f8ce767435dd108b46d96cbbfec013a400410c917f2bc53ad4b21ec36e5534",
+      "client": "b2249dfb9873ff52d2a236bb09d63d7122fb30e02c1c62a0ee7e78342267524a",
+      "inproc": "5d8c04c2a2b7f069dd2e5ab2242dc8eb5e4b2d15678924f6a2a8a8d7ffe51da4",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-2-false-false": {
+    "hashes": {
+      "host": "348a5d81f85f21f34ca033db8682fbe14357dce8cb3ef45ec957aeab2433db6a",
+      "registry": "2e75ec3ee1c3da6aa99fcd413a92ad70308f355cb33e7f61c034519d6fbd1e76",
+      "client": "3ce3f192755aa21697f77fcf8cfba236fa5cc4f8acf0e44c8db4ebc556949f55",
+      "inproc": "745f3458eafbc16d1e05823e48c455133c99dcb41e086a5e2457b2a9baab7520",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-2-false-true": {
+    "hashes": {
+      "host": "4ac2b96cb7e32dc4f6969d1992325e15b815557446675757c2faee3f7ac654ae",
+      "registry": "52f726d73ff0c2f9e81db5602e6eb8a1a00226b5c4b65ce78343a1993d6b6b32",
+      "client": "72024b77b4a264f6d0e3e6a54e2f0f6039f115b0a5c1ed87f9e167af17456dbb",
+      "inproc": "9d9662fad72e15e79721f84fe1bc05610bbc5caf5ed7f2f477cafcea04396e11",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-2-true-false": {
+    "hashes": {
+      "host": "41e54f0dcdac7438847c7be561d5ef55b7786d92da16ed040de737918cc7aa3f",
+      "registry": "5d03f21cfe5e35c8236fd187d295d7abedbfee74daf2e56554e90e0676984df5",
+      "client": "3ce3f192755aa21697f77fcf8cfba236fa5cc4f8acf0e44c8db4ebc556949f55",
+      "inproc": "d0649c9a405188511789bc1062086fe984abbc8e4f46bd4e83b6ffa4428e96fd",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-2-true-true": {
+    "hashes": {
+      "host": "192c98d296bcd5d4c91cba894276841ddaed9f2110c91fc826580142dc2312ce",
+      "registry": "d2170bb42e5f67603d2f7680b09c3aefbcb6a2e8b830cf97455e7370c28f3fa7",
+      "client": "9870470bc700faa6f9a140373177a4a7897e3cc1357906e645e8075962cd3926",
+      "inproc": "dc65ee1df0a988ff39ebac67174bc2b8359bfa6142a7becf31f74b98f22e31e8",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-3-false-false": {
+    "hashes": {
+      "host": "cd583a531130cbe856590cf169388a58eef1725efa305bc4930eaf91a73c9685",
+      "registry": "9dbcb11a7a47a99838a1b921f382b1e5f13e23b832b3ab83f2af7bcc4b42b664",
+      "client": "cf076a06039f24228003a19321972cdb911992d68caa57fd48dd5df4def5511a",
+      "inproc": "7dafb8fb622fa66b63e14d89a0bf62dbffad1ca0c0e8b03808ae4e111ed911b3",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-3-false-true": {
+    "hashes": {
+      "host": "956fc213bd05f8a68dc71ad395dc3ead3dc016ab9ca8c0290af1ea14e5ef4164",
+      "registry": "1fbea0a0678564ad2ae13e8082cd844a0eae0766b5cafad3eb0cbcf010486349",
+      "client": "48c51c462a484063d7d8489ebbc07bfed237610f3d99a2be4db2d413f9ef5b06",
+      "inproc": "cbcb3f7a54f6b10a13415c74a5ef14d7f761958055b4d88418768470c2811a2b",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-3-true-false": {
+    "hashes": {
+      "host": "74244e4078cd8cf62dcb66e4672c402556bc4f253a1320e39295c09ea9f21041",
+      "registry": "83ee08546a120b5fe93a25ebc4e3b7476148548b267cdbae0e273e9cb6be87c5",
+      "client": "cf076a06039f24228003a19321972cdb911992d68caa57fd48dd5df4def5511a",
+      "inproc": "7689994a7f04763d8b57f6ad6f9644326917e80130ce83b7e6ba4ff33f227be6",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-3-true-true": {
+    "hashes": {
+      "host": "c033043b75f277e5c649d1f8361d38422f539ca01a7b064a39b7b2771e9dbd2a",
+      "registry": "be8782b24421542656254dc5f24df0f89aad16b8d6296ff811f1e47b2654c3ef",
+      "client": "05e2226248566f18472cd8315cf4e16d9ede3eebefc33b0cab8221bf17b32caf",
+      "inproc": "cb19a533ffa0341410ce54616260300fbc53c78449843eea5191d9dfbd494474",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-4-false-false": {
+    "hashes": {
+      "host": "bf91eb8e223fbe5e5069804e1811d469138573a848b7b3cdfe6fe5936e7c70ac",
+      "registry": "ab5538c8fd3d5a341d3e5fd06df8cbfe42714a27c38850c07546877dcd07f84f",
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "inproc": "e5fd0c1155c0db8af2bb631c87fb70c5e6b795b8cef0e68f323391bbb624cec4",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-4-false-true": {
+    "hashes": {
+      "host": "8c61e9b075fffec0dc2f48bb29c5433ba327260521c875096b2f9f1145d5c998",
+      "registry": "e3f31f677b11d212760fbabd4497f8ad3839b89bf62664e4b70e5a557cfbcd4d",
+      "client": "ec04fe236d698f533c4f04d46c884380c37430f1bd47ea6b13bb2566402d5375",
+      "inproc": "95bab5473b4327e1325b5f8f034c19371a7303971f9cacd626a0adfff1c0d147",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-4-true-false": {
+    "hashes": {
+      "host": "4258fdb77dbf65301e9a689ad2f2df318030551a0ef1e6083500177ab3fe8a9e",
+      "registry": "87b655ce22cfcd3452ff4dee1d439e295513dd759a564a6f44459b68802f6a2d",
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "inproc": "60176d10bb9459cb91af8443e45db0ac464b2fc6ae59b5026ba7edef7395e6d1",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-4-true-true": {
+    "hashes": {
+      "host": "18fb0ac26f404b22d7594346ae08fd2609c52be3f085e6996f3408d292dab546",
+      "registry": "3d3e18a2bb3b01324c5b3fefe5e9a2a3ff8655c6521c53ce86dff5901acaa01c",
+      "client": "40d5550d561ca5796220034acaca32d410b7f8ef6fd21cdb4009b425b64e67c8",
+      "inproc": "d2b29ccc95b908d360e76d73ff22e93e8b0eac3f332a11fe94b92a77a403d6d2",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-5-false-false": {
+    "hashes": {
+      "host": "98a19cc22cdfca06ecb3ce85f231bc1c1c45c69258c1197f14a62a2e6ff642ed",
+      "registry": "e8c75cfcc98712244ff5cf738fa7c8f1a1340b7e9d3d6035c78c41462b74f57f",
+      "client": "3a3140262fc167047806268b77eaf6c8ae878d1ef9bacb683ed6d130778c71f0",
+      "inproc": "b7c3ba8ab2ed00a56691e1c76b5a9f81c765934e77a3b05f8dd2fa823ed4c2e7",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-5-false-true": {
+    "hashes": {
+      "host": "d6f1acd9f69e95e19e0645c58324b16839be3444ef95f1a589f4c3aa523082ba",
+      "registry": "e53ebbf2ce2c316e398cecb12cda66a21e296ef0cb8f2c638cceac80c765fe0e",
+      "client": "e59d0edef2cd3634edbedd03dc285526aaedc134b5fb85fb79699b3a98561ed5",
+      "inproc": "a222a9454db7919a3f169f13e6145b32cd9808d9df2f376c07ca59eebbc09974",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-5-true-false": {
+    "hashes": {
+      "host": "ea8cc03c097882f56032c8df2867e9e0b8268ca3f4d64f0dc9e1fe7a2c24d89d",
+      "registry": "13afcf8c721783b51406563994fb42e1fe55ee3fe5037d8f767a64192690ff86",
+      "client": "3a3140262fc167047806268b77eaf6c8ae878d1ef9bacb683ed6d130778c71f0",
+      "inproc": "25996bf6223eefb26a323eccd789ca710214e725311471cca42c39cb95925045",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-5-true-true": {
+    "hashes": {
+      "host": "2f8ab93a2ab1fa5c2fe8000449bb98a43e2822c260272d8168f59b145ff89bd0",
+      "registry": "23fe7f56b0e12ded910f7605311da8078b0ad2cd6ac703c7d53b083cbf007e70",
+      "client": "913c52999d6670823c0a81afee0fdf82a341c6e5290124ab0a4ee507ae252cec",
+      "inproc": "e19a42491c5d9739d5e8ecf5271e77a7d40f41fe82fc252430a85fcab343da5f",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-6-false-false": {
+    "hashes": {
+      "host": "50654fe10b9ece622e6d9140b3f25d31688790a0dfe6010fd1e86d42deb94d89",
+      "registry": "4e932c7ac12dc249e6a8e5752c16a330c89a669d97c2f7b8160c050a6244a3a2",
+      "client": "8ae6816cba60c28440fc1253851ac0fa0843558447639f83a0ec4b8968e2445e",
+      "inproc": "1b648f2b4ef0633854fbed913f8814ab677b911f686c7dcfd4423d14950b76e9",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-6-false-true": {
+    "hashes": {
+      "host": "683b6c9b1b987d170e7557cc4ea5fcccdfe552bc541a562146b090629f925728",
+      "registry": "58e1e1802868f5d4d02b30fec20e97ca966457e8717da10f94a909573cd76ed2",
+      "client": "a17819b1b4c73f6393ce67f0d4af083f32371c5d2aeab2240ac8b2ce9bc6c70b",
+      "inproc": "866a5da2457343a248f41d938527f480bcd17173611ef37ff6fb004c2f9008b6",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-6-true-false": {
+    "hashes": {
+      "host": "9ef7b0a104abecd5dfbe1115b8d96bbfb9a2e5e7ccbe7d0b7eb508100da38116",
+      "registry": "fa3480af54d65d6a6bdd941efe023bbb27827f86773ec1efbd1bf3d026242f00",
+      "client": "8ae6816cba60c28440fc1253851ac0fa0843558447639f83a0ec4b8968e2445e",
+      "inproc": "8cbc3b6fa11250b45cbe8de624d1f9db0b1780c82ca197015f8ffd6fa640cc59",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-6-true-true": {
+    "hashes": {
+      "host": "8ef48f6091a3f4cd762f50f4a567ed14c8d57240cca9767ed81a808096c76ae5",
+      "registry": "4176b15986ee2c130b2ae8cdf8d465c5ae77a1f95f78f7faa5c0c3e320e44917",
+      "client": "ccc634f1cce96b2141dca36f249af3708b713d7792e3223a44208ac8379a516c",
+      "inproc": "266cb5ee7775ae7b741dcb6485fc9049e19c35626587698939846a594f0b79ef",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-7-false-false": {
+    "hashes": {
+      "host": "62958a7027a9a6d56405c9f81ffdb00f93fcaf0d3080f2ac4af9486cfcd7f44e",
+      "registry": "d8a63f9f1f28a686ee12615aa08c300b605c1d02e29e7357da913372ec2aff39",
+      "client": "f3908562dfb7bbc082467c3b5516d1b2652fc1575d0a6aa0aa7b83d56a23502b",
+      "inproc": "3a14f1f36b3e31654e0f4f7ba540081664bd32a10acedc2987ae146b3c9bb954",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-7-false-true": {
+    "hashes": {
+      "host": "da70c7f99fc88648cf1f1d09148f06ee79aa0568156c237603a7c37cb4bd481a",
+      "registry": "d8c8a0fe13ad217f95367d16e0ca0ce0360b391e3f6dae14b4b5bba158b65b5e",
+      "client": "e244b3c7c2cabaeb2ab640f126998a1d3f01085f2f1fbae6926ae17f5f042ae1",
+      "inproc": "34717b5aa87d168eeb07bba97bfd96709a61f16ca58b68859b37823af816e689",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-7-true-false": {
+    "hashes": {
+      "host": "4ceef75c58ea961ef8ca97a017a933e5d5b5672e2ad739c1714c3bfb4f49094a",
+      "registry": "b5f8fbd67b5e535a365ed5a78f51e6274802e6839c9221056401496f36799a56",
+      "client": "f3908562dfb7bbc082467c3b5516d1b2652fc1575d0a6aa0aa7b83d56a23502b",
+      "inproc": "e9614612fc71410a7993d4c327fa051a8437631d35601d653a5240cd9210f96b",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-7-true-true": {
+    "hashes": {
+      "host": "444722ec2c3952765ce83d2f527ec8d99276f4f335cef41a50e9fea0f0222cd9",
+      "registry": "df918a35533375b402e2ce33db310f9318565e94e73235ed739f29d0a4a894cc",
+      "client": "151a58c3c54b78755d71e2f0f4da21266113e732f255722fa6dda16e2e58f437",
+      "inproc": "eb3d20cd375fcf2d8d943e345807a940f90f6c2447bd27ebe81173cf5990f7dc",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-8-false-false": {
+    "hashes": {
+      "host": "95cdb900c0cb66545f833a526b136a02ada317f46b4b5f4fe360ed75f532eeb4",
+      "registry": "5ea895fe302ff42cb2cd2d83adade4bdc491a5356adfcd00d5582e777773629b",
+      "client": "dd16e473a85156c1004f4183b113e018b44f968b147b3b8546f0bdfe6bbf4ddf",
+      "inproc": "e9bbbb2b095d399563aba2624910af76700a9f9f4aca5642a52548e1d828c720",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-8-false-true": {
+    "hashes": {
+      "host": "534da5821a8a931552d36badc9404d001c7aa80b43642f7e6d67e92de282d8b2",
+      "registry": "8b1d6479c6092faf2e9d328547e7ec9e29faf3611065112b5cdf59af0bc028a0",
+      "client": "29a27b17fb71b7390ed51168fca4251bff9f38715dc7b783bdfefa81fe2c9721",
+      "inproc": "6b00e5415190da036b820a3b40969e5430362a577a574ab026af0abbd5019ad3",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-8-true-false": {
+    "hashes": {
+      "host": "a620f0cbf09c67bb36f1962a8571934ec7f4becec41c71c2a8f4cd8c20b0d310",
+      "registry": "b0cfadedd2e662af493c120566eca8c43d571bc3d669942cdd664d9ac1e0ca55",
+      "client": "dd16e473a85156c1004f4183b113e018b44f968b147b3b8546f0bdfe6bbf4ddf",
+      "inproc": "dfed592d203a3a3bc1fad6389f0af2566e7b322729629853fed429ee7602bac1",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-8-true-true": {
+    "hashes": {
+      "host": "840eb00e70fb30a1b8f866bc952fb60acba7fc2f71af796d23c8802c3f3e0c6e",
+      "registry": "5f569a898028b92d6e66d4cc469d80648fe70bc0bf12e17eeea1dd71d9ae6794",
+      "client": "d16419ac2434a061a4fe09326a43f075f0816da9cff3207a8512a92a198c21da",
+      "inproc": "e85cb22bd952c602a7c3f77e8faf18ffd06bad7ea3bcba61f22c2e5c6edee9a0",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-9-false-false": {
+    "hashes": {
+      "host": "9356268e41895edb8b7fe9a7124a6fd41496eed66bed26f8e340d87974143d62",
+      "registry": "6a6d6db1166eaccf0a529b9ea3473bd6f6a2a7776fde4ec020f6bef0e4d0ce60",
+      "client": "dd5fe197caa7daed49fe951ca5ba242e7d5c0c9c96e9ce585f62c4fa743eb794",
+      "inproc": "ce34e50006dd893f082deaafce065ca0b64920a871743a10198122afb5c8a84c",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-9-false-true": {
+    "hashes": {
+      "host": "e0505d501432c809eac236ae56b4f7175c53a165347bd59865059db945c085a0",
+      "registry": "9b112ceb38cd54acb5699590f6b05d93a134e9f7edc4307d3cf435c95c763529",
+      "client": "a69fc8c81c31abad9fc30e2c4da9d8bb8e29da7559ca49971a1cd3b4a22721c3",
+      "inproc": "71f96f6e542c6c685575c19e969d781dfbcda15b0b75caa2b86b568aa3f3a857",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-9-true-false": {
+    "hashes": {
+      "host": "b09bc6345d135ad64da4e2790be5c3ef3826ef8fc33652c27059f7e1502d8085",
+      "registry": "3a070bb14f9ae87930917acf823bb78804ec7902fc2b9e53002bfd1262efdd30",
+      "client": "dd5fe197caa7daed49fe951ca5ba242e7d5c0c9c96e9ce585f62c4fa743eb794",
+      "inproc": "eaf9658877f14fe3548b96dea43588b13b973fa8f271ef6540346b2ebcba28bd",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "shape-9-true-true": {
+    "hashes": {
+      "host": "87dd7af43f28dae5d3cab1249ee741d00e657e2bdd63722ff085dab4920ee15b",
+      "registry": "b878d4a64595aed06403033d6a2890cd11b74b5624555b4bee67730d58e9390d",
+      "client": "fac3808b86a6adc0a083e3645f52e46d8d07bdcbff1663a2517fd88b00a1f9f6",
+      "inproc": "ec27b1b92e84adf8077e68295dcc87b1edde604bbd8f679298e47ab16ced28ae",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "multiple-operations": {
+    "hashes": {
+      "host": "5c62b55f1a19babb0376dda31515aa7ed65b0ecdb4ca10ceaf5548e0d5e3445c",
+      "registry": "ec5e5d6006d8ffe55056b85a33ac68dc013bb0f874de6ed01daef2fc8a6504c9",
+      "client": "adb5c92e6e6fb3824f8b71285c8339bfdafd0083f97a5ae3ab47a283b4050bed",
+      "inproc": "1108bfe7eac5c62847af84cacb0763ea90fa5acb7e966ec6e884353c68626e12",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "empty-types": {
+    "hashes": {
+      "host": "892c9828c9335a625c9bb0a10518787f0088894f32f811d2b15dea28cd63fe02",
+      "registry": "92aa2741a69c57a48b04557461400c383a1eee1a941247ccfef2087e53d19601",
+      "client": "f95ef3e233a7300855bd102f6534a421e35b52b1d91cb36a550ca7dfc5af23e7",
+      "inproc": "96a382194117b5315aa031fab68e0036a70a90dcf145b7148525cfab30ab791f",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "empty-members": {
+    "hashes": {
+      "host": "53ce6bcdb44d46cd4e96d9aa258f8fcc7fe068b25d889bc95862685e9cb83a12",
+      "registry": "f66bb793f9f12509502f717c26f847b4af9b336c0d86d3857f8ea2789cc08c42",
+      "client": "fd5c00a7ba942f46f336e29232a3a5c5f30d66d546b2c4f6ffae77aa4087339a",
+      "inproc": "6fcb9f677739db4e04b1328750d9eabf4ebb1ca9d9fddc844ec98a044ab152b2",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "unicode-module": {
+    "hashes": {
+      "host": "d3527bdfa8c3890bcc903b2d6c93e06fc5cb8edcf9b4dcc3b578c352fa155292",
+      "registry": "ee32821e341198d092bdc824cd06b683263c628ea3e8c59ed5a189f7c42d4e8d",
+      "client": "e813e5ec3b14e66b7a868ed7fbe08a6e7a88a9a5c78b701fd7a2d52880ae5294",
+      "inproc": "f21b9f28538d4f27025d7e001c5ed6eea81a2622b84636e3e4c201163558bde4",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "host-basename": {
+    "hashes": {
+      "host": "32f0752974136d057a74436390544124e28db735850ca71343dfd3ef0375f76a",
+      "registry": "6985263c805c5e209567e257ba0e7a5997f49fb96c8947486e8deb086ca258f8",
+      "client": "861ffab82393db951132379636e133d602c55763013ff4c01c3a005e7d72e738",
+      "inproc": "e62018e04168d6d84d7d9cf230cf7350a1b58d07fbed2cfa44903a3adf17d391",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "exact-packages": {
+    "hashes": {
+      "host": "6892ff2c7e562185e3c10bdb5057948aed1801298dc209cf6ec6e26deda703db",
+      "registry": "56739cd17e32b60b13892fd95fe8f0e5252e5eb4ef887993cfb960c901412f54",
+      "client": "16c6008066d39434ad06a746a8673e070052008e56356f171216583656b353b0",
+      "inproc": "04248870c530f763e295a19e08f88cd117f618b8c60f30c94ffcd0f71e027434",
+      "profile": "daa560759ceb8b20832c921c2df7b85fc2ee598c45376e06d24ded6aafcc5b58"
+    }
+  },
+  "format--1": {
+    "diagnostics": "corewire: services contract format is -1, expected 3\n"
+  },
+  "format-0": {
+    "diagnostics": "corewire: services contract format is 0, expected 3\n"
+  },
+  "format-4": {
+    "diagnostics": "corewire: services contract format is 4, expected 3\n"
+  },
+  "format-9007199254740991": {
+    "diagnostics": "corewire: services contract format is 9007199254740991, expected 3\n"
+  },
+  "protocol_version--1": {
+    "diagnostics": "corewire: service protocol is -1, expected 3\n"
+  },
+  "protocol_version-0": {
+    "diagnostics": "corewire: service protocol is 0, expected 3\n"
+  },
+  "protocol_version-4": {
+    "diagnostics": "corewire: service protocol is 4, expected 3\n"
+  },
+  "protocol_version-9007199254740991": {
+    "diagnostics": "corewire: service protocol is 9007199254740991, expected 3\n"
+  },
+  "authority": {
+    "diagnostics": "corewire: a service contract may not attest deterministic=true — ambient authority is the service class's visible distinction\n"
+  },
+  "version-\"\"": {
+    "diagnostics": "corewire: services contract compiler_version \"\" is not an exact X.Y.Z pin\n"
+  },
+  "version-\"0.2\"": {
+    "diagnostics": "corewire: services contract compiler_version \"0.2\" is not an exact X.Y.Z pin\n"
+  },
+  "version-\"0.2.2-beta\"": {
+    "diagnostics": "corewire: services contract compiler_version \"0.2.2-beta\" is not an exact X.Y.Z pin\n"
+  },
+  "version-\"1.2.3\\n\"": {
+    "diagnostics": "corewire: services contract compiler_version \"1.2.3\n\" is not an exact X.Y.Z pin\n"
+  },
+  "version-\"١.2.3\"": {
+    "diagnostics": "corewire: services contract compiler_version \"١.2.3\" is not an exact X.Y.Z pin\n"
+  },
+  "no-operations": {
+    "diagnostics": "corewire: services contract contains no operations\n"
+  },
+  "name-\"\"": {
+    "diagnostics": "corewire: operations[0].name \"\" is not <module>.<export>\ncorewire: operations[0].name \"\" does not match module basename \"feeds.ts\" and export \"parse\"\n"
+  },
+  "name-\".parse\"": {
+    "diagnostics": "corewire: operations[0].name \".parse\" is not <module>.<export>\ncorewire: operations[0].name \".parse\" does not match module basename \"feeds.ts\" and export \"parse\"\n"
+  },
+  "name-\"feeds.\"": {
+    "diagnostics": "corewire: operations[0].name \"feeds.\" is not <module>.<export>\ncorewire: operations[0].name \"feeds.\" does not match module basename \"feeds.ts\" and export \"parse\"\n"
+  },
+  "name-\"feeds.2parse\"": {
+    "diagnostics": "corewire: operations[0].name \"feeds.2parse\" is not <module>.<export>\ncorewire: operations[0].name \"feeds.2parse\" does not match module basename \"feeds.ts\" and export \"parse\"\n"
+  },
+  "name-\"feeds.parse\\n\"": {
+    "diagnostics": "corewire: operations[0].name \"feeds.parse\n\" is not <module>.<export>\ncorewire: operations[0].name \"feeds.parse\n\" does not match module basename \"feeds.ts\" and export \"parse\"\n"
+  },
+  "client-\"\"": {
+    "diagnostics": "corewire: operations[0].client \"\" is not a TypeScript identifier\n"
+  },
+  "client-\"2bad\"": {
+    "diagnostics": "corewire: operations[0].client \"2bad\" is not a TypeScript identifier\n"
+  },
+  "client-\"has-dash\"": {
+    "diagnostics": "corewire: operations[0].client \"has-dash\" is not a TypeScript identifier\n"
+  },
+  "client-\"parse\\n\"": {
+    "diagnostics": "corewire: operations[0].client \"parse\n\" is not a TypeScript identifier\n"
+  },
+  "client-\"café\"": {
+    "diagnostics": "corewire: operations[0].client \"café\" is not a TypeScript identifier\n"
+  },
+  "export-\"\"": {
+    "diagnostics": "corewire: operations[0].export \"\" is not a TypeScript identifier\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.ts\" and export \"\"\n"
+  },
+  "export-\"2bad\"": {
+    "diagnostics": "corewire: operations[0].export \"2bad\" is not a TypeScript identifier\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.ts\" and export \"2bad\"\n"
+  },
+  "export-\"has-dash\"": {
+    "diagnostics": "corewire: operations[0].export \"has-dash\" is not a TypeScript identifier\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.ts\" and export \"has-dash\"\n"
+  },
+  "export-\"parse\\n\"": {
+    "diagnostics": "corewire: operations[0].export \"parse\n\" is not a TypeScript identifier\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.ts\" and export \"parse\n\"\n"
+  },
+  "export-\"café\"": {
+    "diagnostics": "corewire: operations[0].export \"café\" is not a TypeScript identifier\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.ts\" and export \"café\"\n"
+  },
+  "module-\"feeds.ts\"": {
+    "diagnostics": "corewire: operations[0].module \"feeds.ts\" is not a safe src/services/*.ts path\n"
+  },
+  "module-\"src/services/x..ts\"": {
+    "diagnostics": "corewire: operations[0].module \"src/services/x..ts\" is not a safe src/services/*.ts path\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"x..ts\" and export \"parse\"\n"
+  },
+  "module-\"src/services/feeds.js\"": {
+    "diagnostics": "corewire: operations[0].module \"src/services/feeds.js\" is not a safe src/services/*.ts path\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.js\" and export \"parse\"\n"
+  },
+  "module-\"src/services/feeds.ts\\n\"": {
+    "diagnostics": "corewire: operations[0].module \"src/services/feeds.ts\n\" is not a safe src/services/*.ts path\ncorewire: operations[0].name \"feeds.parse\" does not match module basename \"feeds.ts\n\" and export \"parse\"\n"
+  },
+  "module-\"src/services/different.ts\"": {
+    "diagnostics": "corewire: operations[0].name \"feeds.parse\" does not match module basename \"different.ts\" and export \"parse\"\n"
+  },
+  "hash-\"\"": {
+    "diagnostics": "corewire: operations[0].source_hash is not a lowercase SHA-256 hex digest\n"
+  },
+  "hash-\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"": {
+    "diagnostics": "corewire: operations[0].source_hash is not a lowercase SHA-256 hex digest\n"
+  },
+  "hash-\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"": {
+    "diagnostics": "corewire: operations[0].source_hash is not a lowercase SHA-256 hex digest\n"
+  },
+  "hash-\"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\"": {
+    "diagnostics": "corewire: operations[0].source_hash is not a lowercase SHA-256 hex digest\n"
+  },
+  "hash-\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n\"": {
+    "diagnostics": "corewire: operations[0].source_hash is not a lowercase SHA-256 hex digest\n"
+  },
+  "void-result": {
+    "diagnostics": "corewire: operations[0].result may not be void\n"
+  },
+  "scalar-inner": {
+    "diagnostics": "corewire: operations[0] carries an invalid type reference\n"
+  },
+  "missing-inner": {
+    "diagnostics": "corewire: operations[0] carries an invalid type reference\n"
+  },
+  "missing-elem": {
+    "diagnostics": "corewire: operations[0] carries an invalid type reference\n"
+  },
+  "empty-name": {
+    "diagnostics": "corewire: operations[0] carries an invalid type reference\n"
+  },
+  "deadline--1": {
+    "diagnostics": "corewire: operations[0].deadline_ms is outside 1..86400000\n"
+  },
+  "deadline-0": {
+    "diagnostics": "corewire: operations[0].deadline_ms is outside 1..86400000\n"
+  },
+  "deadline-86400001": {
+    "diagnostics": "corewire: operations[0].deadline_ms is outside 1..86400000\n"
+  },
+  "deadline-9007199254740991": {
+    "diagnostics": "corewire: operations[0].deadline_ms is outside 1..86400000\n"
+  },
+  "stream-cap--1": {
+    "diagnostics": "corewire: operations[0].stream must carry an encodable chunk and a 1..64 in_flight cap\n"
+  },
+  "stream-cap-0": {
+    "diagnostics": "corewire: operations[0].stream must carry an encodable chunk and a 1..64 in_flight cap\n"
+  },
+  "stream-cap-65": {
+    "diagnostics": "corewire: operations[0].stream must carry an encodable chunk and a 1..64 in_flight cap\n"
+  },
+  "void-chunk": {
+    "diagnostics": "corewire: operations[0].stream must carry an encodable chunk and a 1..64 in_flight cap\n"
+  },
+  "invalid-chunk": {
+    "diagnostics": "corewire: operations[0].stream must carry an encodable chunk and a 1..64 in_flight cap\n"
+  },
+  "duplicates": {
+    "diagnostics": "corewire: duplicate service operation name \"feeds.parse\"\ncorewire: duplicate service operation name \"feeds.parse\"\ncorewire: duplicate service operation name \"feeds.parse\"\n"
+  },
+  "package-\"\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "package-\"@scope\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "package-\"@/pkg\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "package-\"@scope/\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "package-\"@scope/pkg/extra\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "package-\"pkg\\n\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "package-\"é\"": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "bad-package-facts": {
+    "diagnostics": "corewire: packages[0] must carry name, exact version, and a lowercase SHA-256 content_hash\n"
+  },
+  "duplicate-packages": {
+    "diagnostics": "corewire: duplicate service package \"pkg\"\ncorewire: duplicate service package \"pkg\"\ncorewire: duplicate service package \"pkg\"\n"
+  },
+  "ordered-errors": {
+    "diagnostics": "corewire: services contract format is 1, expected 3\ncorewire: service protocol is 1, expected 3\ncorewire: a service contract may not attest deterministic=true — ambient authority is the service class's visible distinction\ncorewire: services contract compiler_version \"bad\" is not an exact X.Y.Z pin\ncorewire: operations[0].name \"bad\" is not <module>.<export>\ncorewire: operations[0].client \"bad-name\" is not a TypeScript identifier\ncorewire: operations[0].name \"bad\" does not match module basename \"feeds.ts\" and export \"parse\"\ncorewire: operations[0].result may not be void\ncorewire: operations[0].deadline_ms is outside 1..86400000\n"
+  },
+  "format-9223372036854775807": {
+    "diagnostics": "corewire: services contract format is 9223372036854775807, expected 3\n"
+  },
+  "format--9223372036854775808": {
+    "diagnostics": "corewire: services contract format is -9223372036854775808, expected 3\n"
+  },
+  "protocol_version-9223372036854775807": {
+    "diagnostics": "corewire: service protocol is 9223372036854775807, expected 3\n"
+  },
+  "protocol_version--9223372036854775808": {
+    "diagnostics": "corewire: service protocol is -9223372036854775808, expected 3\n"
+  }
+}

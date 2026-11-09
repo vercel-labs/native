@@ -1,4 +1,5 @@
 const std = @import("std");
+const control_content = @import("control_content_policy.zig");
 const geometry = @import("geometry");
 const drawing_model = @import("drawing.zig");
 const text_model = @import("text.zig");
@@ -7,6 +8,7 @@ const widget_model = @import("widgets.zig");
 const widget_access = @import("widget_access.zig");
 const widget_metrics = @import("widget_metrics.zig");
 const text_measure_cache = @import("text_measure_cache.zig");
+const document_policy = @import("text_document_policy.zig");
 
 const FontId = @import("root.zig").FontId;
 const Builder = @import("commands.zig").Builder;
@@ -22,6 +24,7 @@ const snapTextCaretSelection = text_model.snapTextCaretSelection;
 const snapTextOffset = text_model.snapTextOffset;
 const snapTextRange = text_model.snapTextRange;
 const measureTextWidthForFont = text_model.measureTextWidthForFont;
+const measureTextWidthForFontWithPolicy = text_model.measureTextWidthForFontWithPolicy;
 const nextTextLineEnd = text_model.nextTextLineEnd;
 const isTextBreakByte = text_model.isTextBreakByte;
 const textLineRange = text_model.textLineRange;
@@ -171,8 +174,19 @@ pub fn widgetTextInputSize(widget: Widget, tokens: DesignTokens) f32 {
 }
 
 pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32) TextLayoutOptions {
-    const line_height = widgetTextInputLineHeight(text_size);
-    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset);
+    const line_height = widgetTextInputLineHeight(text_size, tokens);
+    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset, tokens);
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.input_layout, widget.frame, tokens);
+        request.float(52, text_size);
+        request.float(56, inset);
+        request.float(64, trailing_inset);
+        if (widget.runtime_flags.code_editor) request.flags(4);
+        if (widget.text_no_wrap) request.flags(8);
+        request.bytes[8] = if (widget.kind == .textarea) 2 else if (widget.kind == .text_field) 1 else 0;
+        const result = request.run(tokens);
+        return .{ .max_width = result.scalar, .line_height = result.auxiliary, .wrap = result.wrap, .overflow = .clip, .text_run_policy = tokens.text_run_policy, .measure = tokens.text_measure };
+    }
     return .{
         .max_width = @max(1, widget.frame.width - inset - trailing_inset),
         .line_height = line_height,
@@ -182,12 +196,13 @@ pub fn widgetTextInputLayoutOptions(widget: Widget, tokens: DesignTokens, text_s
         // so the honest treatment is the frame clip, not an ellipsis
         // hiding the caret's own neighborhood.
         .overflow = .clip,
+        .text_run_policy = tokens.text_run_policy,
         .measure = tokens.text_measure,
     };
 }
 
-fn widgetTextInputLineHeight(text_size: f32) f32 {
-    return widget_metrics.widgetLineHeight(text_size);
+fn widgetTextInputLineHeight(text_size: f32, tokens: DesignTokens) f32 {
+    return widget_metrics.widgetLineHeightWithTokens(text_size, tokens);
 }
 
 fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
@@ -200,7 +215,7 @@ fn widgetTextInputWrap(widget: Widget, line_height: f32) TextWrap {
 fn widgetTextInputVerticalInset(widget: Widget, tokens: DesignTokens, text_size: f32, options: TextLayoutOptions) f32 {
     if (widget.runtime_flags.code_editor) return 0;
     if (options.wrap != .none) return widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.sm);
-    return @max(0, (widget.frame.height - widgetTextInputLineHeight(text_size)) * 0.5);
+    return @max(0, (widget.frame.height - widgetTextInputLineHeight(text_size, tokens)) * 0.5);
 }
 
 fn widgetTextInputScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
@@ -233,16 +248,31 @@ fn widgetTextInputMaxHorizontalScrollOffset(widget: Widget, tokens: DesignTokens
     // single-line extent it draws.
     const font_id = widgetTextInputFontId(widget, tokens);
     const text_width = if (widget.runtime_flags.code_editor)
-        if (codeContentWidthCacheCurrent(widget, font_id, text_size))
+        if (codeContentWidthCacheCurrent(widget, font_id, text_size, options.text_run_policy))
             widget.code_content_width
         else
-            widestLogicalLineWidth(options.measure, font_id, widget.text, text_size)
+            widestLogicalLineWidth(options.measure, options.text_run_policy, font_id, widget.text, text_size)
     else
-        measureTextWidthForFont(options.measure, font_id, widgetTextInputPresentedText(widget), text_size);
+        measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy, font_id, widgetTextInputPresentedText(widget), text_size);
     return @max(0, text_width + text_input_caret_reserve - viewport.width);
 }
 
 pub fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.PointF {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.input_origin, widget.frame, tokens);
+        request.float(52, text_size);
+        request.float(56, inset);
+        if (widget.runtime_flags.code_editor) {
+            request.flags(4);
+            request.float(64, widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options));
+            request.float(68, widgetTextInputScrollOffset(widget, tokens, text_size, inset, options));
+        } else if (options.wrap != .none) {
+            request.flags(8);
+            request.float(68, widgetTextInputScrollOffset(widget, tokens, text_size, inset, options));
+            request.float(60, widgetTextInputVerticalInset(widget, tokens, text_size, options));
+        } else request.float(64, widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options));
+        return request.run(tokens).point;
+    }
     if (widget.runtime_flags.code_editor) {
         return geometry.PointF.init(
             widget.frame.x + inset - widgetTextInputHorizontalScrollOffset(widget, tokens, text_size, inset, options),
@@ -268,7 +298,14 @@ pub fn widgetTextInputOrigin(widget: Widget, tokens: DesignTokens, text_size: f3
 
 pub fn widgetTextInputClipRect(widget: Widget, tokens: DesignTokens, text_size: f32, inset: f32, options: TextLayoutOptions) geometry.RectF {
     const vertical_inset = widgetTextInputVerticalInset(widget, tokens, text_size, options);
-    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset);
+    const trailing_inset = widgetTextInputTrailingInset(widget, text_size, inset, tokens);
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.input_clip, widget.frame, tokens);
+        request.float(56, inset);
+        request.float(60, vertical_inset);
+        request.float(64, trailing_inset);
+        return request.run(tokens).rects[0];
+    }
     return widget.frame.normalized().deflate(.{
         .top = vertical_inset,
         .right = trailing_inset,
@@ -291,7 +328,7 @@ pub fn textInputContentExtentForWidget(widget: Widget, tokens: DesignTokens) f32
     const text_size = widgetTextInputSize(widget, tokens);
     const text_inset = widgetTextInputInset(widget, tokens);
     const options = widgetTextInputLayoutOptions(widget, tokens, text_size, text_inset);
-    const line_height = widgetTextInputLineHeight(text_size);
+    const line_height = widgetTextInputLineHeight(text_size, tokens);
     return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, widgetTextInputFontId(widget, tokens), text_size, options))) * line_height;
 }
 
@@ -370,8 +407,9 @@ pub fn textInputCaretVisibleScrollOffsetForWidget(widget: Widget, tokens: Design
             @as(usize, @intFromBool(std.mem.lastIndexOfScalar(u8, widget.text[0..caret_offset], '\n') != null))
     else
         0;
-    const caret_x = measureTextWidthForFont(
+    const caret_x = measureTextWidthForFontWithPolicy(
         options.measure,
+        options.text_run_policy,
         widgetTextInputFontId(widget, tokens),
         widgetTextInputPresentedText(widget)[caret_line_start..caret_offset],
         text_size,
@@ -403,18 +441,18 @@ pub fn widgetTextInputClipsText(widget: Widget, tokens: DesignTokens, text_size:
         const placeholder = widgetPlaceholder(widget);
         if (placeholder.len == 0) return false;
         const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
-        return measureTextWidthForFont(options.measure, tokens.typography.font_id, placeholder, text_size) > viewport.width;
+        return measureTextWidthForFontWithPolicy(options.measure, options.text_run_policy, tokens.typography.font_id, placeholder, text_size) > viewport.width;
     }
     return false;
 }
 
 fn widgetTextInputMaxScrollOffset(widget: Widget, tokens: DesignTokens, text_size: f32, text_inset: f32, options: TextLayoutOptions) f32 {
     const viewport = widgetTextInputClipRect(widget, tokens, text_size, text_inset, options);
-    return @max(0, textInputContentExtentForWidgetWithOptions(widget, widgetTextInputFontId(widget, tokens), text_size, options) - viewport.height);
+    return @max(0, textInputContentExtentForWidgetWithOptions(widget, widgetTextInputFontId(widget, tokens), text_size, options, tokens) - viewport.height);
 }
 
-fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) f32 {
-    return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, font_id, text_size, options))) * widgetTextInputLineHeight(text_size);
+fn textInputContentExtentForWidgetWithOptions(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions, tokens: DesignTokens) f32 {
+    return @as(f32, @floatFromInt(widgetTextInputLineCount(widget, font_id, text_size, options))) * widgetTextInputLineHeight(text_size, tokens);
 }
 
 fn widgetTextInputLineCount(widget: Widget, font_id: FontId, text_size: f32, options: TextLayoutOptions) usize {
@@ -476,7 +514,8 @@ fn widgetTextInputFontId(widget: Widget, tokens: DesignTokens) FontId {
     return if (widget.runtime_flags.code_editor) tokens.typography.mono_font_id else tokens.typography.font_id;
 }
 
-fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32) bool {
+fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32, policy: ?document_policy.Policy) bool {
+    if (policy) |owner| return document_policy.cacheDecision(owner, widget, font_id, text_size, false) == 1;
     if (widget.hasCodeDiff()) return false;
     return widget.code_content_width_generation == text_measure_cache.textMeasureGeneration() and
         widget.code_content_width_font_id == font_id and
@@ -489,12 +528,16 @@ fn codeContentWidthCacheCurrent(widget: Widget, font_id: FontId, text_size: f32)
 /// Runtime reconciliation carries this cache across unchanged app rebuilds;
 /// edits invalidate it before caret scrolling recomputes the new document.
 pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens) void {
-    if (widget.kind != .textarea or !widget.runtime_flags.code_editor or !widget.text_no_wrap) return;
-    if (widget.hasCodeDiff()) return;
+    if (tokens.text_run_policy) |owner| {
+        if (document_policy.cacheDecision(owner, widget.*, 0, 0, true) == 0) return;
+    } else {
+        if (widget.kind != .textarea or !widget.runtime_flags.code_editor or !widget.text_no_wrap) return;
+        if (widget.hasCodeDiff()) return;
+    }
     const text_size = widgetTextInputSize(widget.*, tokens);
     const font_id = widgetTextInputFontId(widget.*, tokens);
-    if (codeContentWidthCacheCurrent(widget.*, font_id, text_size)) return;
-    widget.code_content_width = widestLogicalLineWidth(tokens.text_measure, font_id, widget.text, text_size);
+    if (codeContentWidthCacheCurrent(widget.*, font_id, text_size, tokens.text_run_policy)) return;
+    widget.code_content_width = widestLogicalLineWidth(tokens.text_measure, tokens.text_run_policy, font_id, widget.text, text_size);
     widget.code_content_width_generation = text_measure_cache.textMeasureGeneration();
     widget.code_content_width_font_id = font_id;
     widget.code_content_width_size_bits = @bitCast(text_size);
@@ -502,12 +545,14 @@ pub fn cacheTextInputContentWidthForWidget(widget: *Widget, tokens: DesignTokens
 
 fn widestLogicalLineWidth(
     measure: ?*const text_model.TextMeasureProvider,
+    cache_policy: ?*const fn ([]const u8, []u8) usize,
     font_id: FontId,
     text: []const u8,
     text_size: f32,
 ) f32 {
+    if (cache_policy) |owner| return document_policy.widest(owner, measure, font_id, text, text_size);
     if (measure) |provider| {
-        if (widestLogicalLineWidthBatched(provider, font_id, text, text_size)) |width| return width;
+        if (widestLogicalLineWidthBatched(provider, cache_policy, font_id, text, text_size)) |width| return width;
     }
 
     var widest: f32 = 0;
@@ -527,6 +572,7 @@ fn widestLogicalLineWidth(
 /// the common 10,000-line document takes only a handful of batched calls.
 fn widestLogicalLineWidthBatched(
     provider: *const text_model.TextMeasureProvider,
+    cache_policy: ?*const fn ([]const u8, []u8) usize,
     font_id: FontId,
     text: []const u8,
     text_size: f32,
@@ -558,7 +604,7 @@ fn widestLogicalLineWidthBatched(
         }
 
         const chunk = text[chunk_start..chunk_end];
-        const advances = text_measure_cache.textRunAdvances(provider, font_id, text_size, chunk) orelse return null;
+        const advances = text_measure_cache.textRunAdvancesWithPolicy(provider, cache_policy, font_id, text_size, chunk) orelse return null;
         var line_start: usize = 0;
         for (chunk, 0..) |byte, index| {
             if (byte != '\n') continue;
@@ -573,7 +619,16 @@ fn widestLogicalLineWidthBatched(
     return widest;
 }
 
-fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32) f32 {
+fn widgetTextInputTrailingInset(widget: Widget, text_size: f32, inset: f32, tokens: DesignTokens) f32 {
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.trailing_inset, widget.frame, tokens);
+        request.float(52, text_size);
+        request.float(56, inset);
+        if (widget.runtime_flags.code_editor) request.flags(4);
+        if (widget.kind == .combobox) request.flags(8);
+        if (widgetTextInputShowsClearButton(widget)) request.flags(16);
+        return request.run(tokens).scalar;
+    }
     // A code editor's leading inset is its line-number gutter, not symmetric
     // field padding. Its source viewport runs all the way to the trailing
     // edge; mirroring the gutter here invents horizontal overflow for lines
@@ -604,6 +659,7 @@ pub fn textInputClearButtonRect(widget: Widget, tokens: DesignTokens) ?geometry.
     const text_size = widgetTextInputSize(widget, tokens);
     const icon_size = widgetTextInputClearIconSize(text_size);
     const inset = widget_metrics.widgetControlInset(widget, tokens, tokens.spacing.md);
+    if (tokens.control_geometry_policy != null) return control_content.text(.clear_icon, widget.frame, text_size, inset, 0, 0, tokens).rects[0];
     return geometry.RectF.init(
         widget.frame.x + widget.frame.width - inset - icon_size,
         widget.frame.y + @max(0, (widget.frame.height - icon_size) * 0.5),
@@ -618,6 +674,12 @@ pub fn textInputClearButtonRect(widget: Widget, tokens: DesignTokens) ?geometry.
 pub fn textInputClearButtonHitRect(widget: Widget, tokens: DesignTokens) ?geometry.RectF {
     const icon = textInputClearButtonRect(widget, tokens) orelse return null;
     const pad = tokens.spacing.sm;
+    if (tokens.control_geometry_policy != null) {
+        var request = control_content.Request.init(.clear_hit, widget.frame, tokens);
+        request.float(60, icon.x);
+        request.float(64, pad);
+        return request.run(tokens).rects[0];
+    }
     const left = @max(widget.frame.x, icon.x - pad);
     return geometry.RectF.init(
         left,
@@ -715,6 +777,7 @@ fn pixelSnapValueWithScale(value: f32, scale: f32) f32 {
 }
 
 fn pixelSnapTextPoint(tokens: DesignTokens, point: geometry.PointF) geometry.PointF {
+    if (tokens.control_geometry_policy != null) return control_content.point(.text_point, point, tokens);
     if (!tokens.pixel_snap.text) return point;
     const scale = pixelSnapScale(tokens) orelse return point;
     return geometry.PointF.init(

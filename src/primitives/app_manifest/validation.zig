@@ -675,10 +675,12 @@ fn validateExternalUrlPattern(url: []const u8) ValidationError!void {
     if (std.mem.endsWith(u8, url, "*")) {
         const prefix = url[0 .. url.len - 1];
         if (prefix.len == 0) return error.InvalidUrl;
+        if (std.mem.indexOfScalar(u8, prefix, '*') != null) return error.InvalidUrl;
         if (std.mem.indexOfAny(u8, prefix, " \t\r\n\x00") != null) return error.InvalidUrl;
         try validateExternalWildcardPrefix(prefix);
         return;
     }
+    if (std.mem.indexOfScalar(u8, url, '*') != null) return error.InvalidUrl;
     return validateUrl(url);
 }
 
