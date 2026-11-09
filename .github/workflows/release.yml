@@ -83,7 +83,7 @@ jobs:
     name: Create GitHub Release
     needs: check-release
     if: needs.check-release.outputs.needs_github_release == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 10
     permissions:
       contents: write
