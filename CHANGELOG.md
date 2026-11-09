@@ -2,9 +2,40 @@
 
 All notable changes to the Native SDK (formerly zero-native) will be documented in this file.
 
-## 0.11.0
+## 0.11.1
 
 <!-- release:start -->
+
+### New Features
+
+- **Global shortcuts with press and release**: Apps can register shortcuts that fire while any app has focus and receive both the press and the release, so hold-to-talk works (#744).
+- **Synthetic keyboard input**: Apps can send key chords such as `primary+V` to the focused app, behind a new `keyboard_input` permission (#745).
+- **Layout-aware key codes**: Shortcut key names map to macOS and Windows key codes in one place and resolve through the current keyboard layout, so chords keep working on Dvorak and AZERTY (#743).
+
+### Bug Fixes
+
+- **Published package as a Zig dependency**: Projects that depend on `@native-sdk/cli` as a Zig path dependency can evaluate their build graph again; `build.zig` no longer needs test files that the npm package does not ship (#713, #763).
+- **Matching Geist font weights**: Built-in medium and bold text render with matching Geist faces, restoring weight differences in software presentation and screenshots (#688).
+- **macOS window chrome follows the app theme**: Windows, including new and hidden secondary windows, use the app's light or dark scheme, and returning to the system appearance clears the override (#691).
+- **WebView inspection in development only**: Debug builds enable macOS WebView inspection and release builds disable it; `-Dwebview-inspect` overrides either default (#690).
+
+### Improvements
+
+- **Compiled TypeScript views in native dev**: `native dev` runs compiled TypeScript views by default, reloads them from markup edits, and reports provenance and write-back for edits.
+- **Markup runtime in TypeScript**: Markup preparation, expression parsing, element and attribute coordination, static expansion, and retained widget, scroll, virtual window, context-menu, and WebView pane coordination now run in TypeScript compiled by scriptc (#692, #693, #694, #696, #697, #698, #699, #700, #701, #702, #703, #704, #705, #714, #720, #727).
+- **Faster frames**: Exact text and metric decisions from compiled policies are reused across frames.
+- **Editor declarations without the TypeScript compiler**: Editor declarations are generated directly, and TypeScript app markup is checked with the TypeScript view compiler.
+- **Toolchain and release updates**: scriptc 0.3.2, docs on TypeScript 7, and pinned release workflow actions (#706).
+
+### Contributors
+
+- @ctate
+- @lahfir
+- @zogien
+
+<!-- release:end -->
+
+## 0.11.0
 
 ### New Features
 
@@ -51,8 +82,6 @@ All notable changes to the Native SDK (formerly zero-native) will be documented 
 - @groundfast
 - @eduardogarre
 - @fx89757
-
-<!-- release:end -->
 
 ## 0.10.1
 
