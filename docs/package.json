@@ -8,7 +8,8 @@
     "dev": "next dev",
     "build": "fumadocs-mdx && next build",
     "start": "next start",
-    "typecheck": "next typegen && fumadocs-mdx && tsc --noEmit",
+    "typecheck": "next typegen && fumadocs-mdx && tsc-ts --noEmit",
+    "typecheck:tsc": "next typegen && fumadocs-mdx && tsc --noEmit",
     "check": "node scripts/check-app-schema.mjs && pnpm typecheck && pnpm build && node scripts/check-doc-routes.mjs && node scripts/check-code-toggle.mjs && node scripts/check-wasm-preview.mjs",
     "postinstall": "fumadocs-mdx"
   },
@@ -30,6 +31,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
+    "tsc-ts": "0.1.3",
     "typescript": "^7.0.2",
     "@types/mdast": "^4",
     "unist-util-visit": "^5.1.0"

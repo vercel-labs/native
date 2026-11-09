@@ -15,11 +15,49 @@ importers:
       '@types/node':
         specifier: ^24
         version: 24.13.2
+      tsc-ts:
+        specifier: 0.1.3
+        version: 0.1.3
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
 
 packages:
+
+  '@tsc-ts/darwin-arm64@0.1.3':
+    resolution: {integrity: sha512-TgVwPUp5a/HSZBvTghac1w6VUREr1eSdGL8gTBJH1xQ0Lwc9WSpaUXWvKd9CgUYz11y216SqQZ7UlTbTaUD3ug==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@tsc-ts/darwin-x64@0.1.3':
+    resolution: {integrity: sha512-37+N830u4YsFjmgXDM4ahGDPoSbu3nmZLOAode8HU9xaRMN2i6OXWHotjDOHXqJx1VK5p0NMJvGR31hF9YMcTA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@tsc-ts/linux-arm64-gnu@0.1.3':
+    resolution: {integrity: sha512-50kMgZajYRzbp4BMvCcOwN9GAquW+7ZGip3ZEBjSDTdFcC6871FvPCHWS43JBajKX94gsNgiAbaIHTT2aRtUQg==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@tsc-ts/linux-arm64-musl@0.1.3':
+    resolution: {integrity: sha512-Eu/HDi7pWyQmBtA6QHCRf9Dl58dIh2SithYZFMfz7ZeqLUvU2cmYzHft3k6Pf4bnYGD031U7fKuynas15fYmww==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@tsc-ts/linux-x64-gnu@0.1.3':
+    resolution: {integrity: sha512-uGFs1wYP4AIdIuZjjFpmiVBRN+VceDTdsch82SbJODZ1D3Rk8wdrZBRCk5Zx6SYwews/4UpI8cehXSGIKLIjng==}
+    cpu: [x64]
+    os: [linux]
+
+  '@tsc-ts/linux-x64-musl@0.1.3':
+    resolution: {integrity: sha512-IidxhZJjcKLeaxipOqzJFXZBxyVD4s13MqqTJt2jSfH9Q204VLsfMnybt+F0IkWG4R6ex16bm0iEY75s+frK6w==}
+    cpu: [x64]
+    os: [linux]
+
+  '@tsc-ts/win32-x64-msvc@0.1.3':
+    resolution: {integrity: sha512-MSrbC1JUrfp6vPc84TxXYofcwBNKZO0rUZsx9VYlQ/VvEAWYpU7FYO9+9FI/WfiQDh/7KzcHbRLBY+5L4BqhUg==}
+    cpu: [x64]
+    os: [win32]
 
   '@types/node@24.13.2':
     resolution: {integrity: sha512-fRa09kZTgu8o71KFcDjUFuc7F+dEbZYZmkI0mg5YBTRs0yMKjYHsq/c0urDKeDb+D5qVgXOdFcuu+DZPKOITwA==}
@@ -208,6 +246,16 @@ packages:
   text-decoder@1.2.7:
     resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
 
+  tsc-ts@0.1.3:
+    resolution: {integrity: sha512-GjdYgEnyj5B/UtWk8rX+lXUlxspQmmYZL/zhHA5CGSI4iqBMtdKyDsOTI9qs9SHowI5vvdZr09jyxxQJVB2E2w==}
+    engines: {node: '>=20'}
+    hasBin: true
+    peerDependencies:
+      '@scriptc/threads': 0.4.8
+    peerDependenciesMeta:
+      '@scriptc/threads':
+        optional: true
+
   typescript@7.0.2:
     resolution: {integrity: sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==}
     engines: {node: '>=16.20.0'}
@@ -232,6 +280,27 @@ packages:
     resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
 
 snapshots:
+
+  '@tsc-ts/darwin-arm64@0.1.3':
+    optional: true
+
+  '@tsc-ts/darwin-x64@0.1.3':
+    optional: true
+
+  '@tsc-ts/linux-arm64-gnu@0.1.3':
+    optional: true
+
+  '@tsc-ts/linux-arm64-musl@0.1.3':
+    optional: true
+
+  '@tsc-ts/linux-x64-gnu@0.1.3':
+    optional: true
+
+  '@tsc-ts/linux-x64-musl@0.1.3':
+    optional: true
+
+  '@tsc-ts/win32-x64-msvc@0.1.3':
+    optional: true
 
   '@types/node@24.13.2':
     dependencies:
@@ -369,6 +438,16 @@ snapshots:
       b4a: 1.8.1
     transitivePeerDependencies:
       - react-native-b4a
+
+  tsc-ts@0.1.3:
+    optionalDependencies:
+      '@tsc-ts/darwin-arm64': 0.1.3
+      '@tsc-ts/darwin-x64': 0.1.3
+      '@tsc-ts/linux-arm64-gnu': 0.1.3
+      '@tsc-ts/linux-arm64-musl': 0.1.3
+      '@tsc-ts/linux-x64-gnu': 0.1.3
+      '@tsc-ts/linux-x64-musl': 0.1.3
+      '@tsc-ts/win32-x64-msvc': 0.1.3
 
   typescript@7.0.2:
     optionalDependencies:
