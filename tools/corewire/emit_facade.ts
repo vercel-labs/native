@@ -90,7 +90,7 @@ class FacadeEmitter extends CodeWriter {
   run(): void {
     const body = new FacadeEmitter(this.input, this.plan);
     body.privateTypeDeclarations(); body.channelConsts(); body.unboundDecl(); body.helperWrappers(); body.entryPoints();
-    body.tagTable(); body.dispatchSurface(); body.channelEntries(); body.postCycle(); body.helperCall();
+    body.tagTable(); body.dispatchSurface(); body.channelEntries(); body.postCycle(); body.helperCall(); body.modelJson();
     body.generatedTables(); body.codecSection(); body.bootState();
     this.header(); this.imports(body); this.reexports(); this.raw(body.out);
   }
@@ -447,6 +447,23 @@ class FacadeEmitter extends CodeWriter {
     }
     this.raw('  nscfTrap("helper index " + helper + " does not name an exported model helper of this core — the host and this core disagree about the contract");\n}\n');
   }
+  modelJson(): void {
+    const json = new JsonProjection(this), saved = this.out;
+    this.out = ""; json.run(); const writers = this.out; this.out = saved;
+    this.raw(text.modelJsonPrelude); this.print(text.modelJsonEntry, [this.s.model]);
+    const helpers = [
+      { id: "text", code: text.jsonText }, { id: "bool", code: text.jsonBool }, { id: "bytes", code: text.jsonBytes },
+      { id: "i64", code: text.jsonI64 }, { id: "u64", code: text.jsonU64 }, { id: "f64", code: text.jsonF64 },
+    ];
+    for (const helper of helpers) if (json.helpers.includes(helper.id)) this.raw(helper.code);
+    for (const name of json.enums) {
+      const entry = findEnum(this.s, name)!;
+      this.print("\nconst nscfJsonNames{s}: string[] = [", [name]);
+      for (let i = 0; i < entry.members.length; i++) this.print("{s}\"{s}\"", [i === 0 ? "" : ", ", jsonLiteral('"' + jsonEscaped(entry.members[i]) + '"')]);
+      this.raw("];\n");
+    }
+    this.raw(writers);
+  }
   needEnumTable(name: string): void { if (!this.neededEnumTables.includes(name)) { this.neededEnumTables.push(name); this.reference(name); } }
   needEnumIndex(name: string): void { this.needEnumTable(name); if (!this.neededEnumIndexes.includes(name)) this.neededEnumIndexes.push(name); }
   needRecordWriter(name: string): void { if (!this.neededRecordWriters.includes(name)) { this.neededRecordWriters.push(name); this.reference(name); } }
@@ -711,4 +728,128 @@ class RecordDecode {
     }
   }
   constructionText(): string { return "{ " + this.exprs.map(e => tsProp(e.name) + ": " + e.text).join(", ") + " }"; }
+}
+
+// A TypeScript literal body whose code units are the UTF-8 bytes of `text`.
+function jsonLiteral(text: string): string {
+  const hex = "0123456789abcdef";
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 34 || c === 92) out += "\\" + text.charAt(i);
+    else if (c >= 32 && c < 127) out += text.charAt(i);
+    else {
+      const wide = c >= 0xd800 && c <= 0xdbff && i + 1 < text.length;
+      const bytes = new TextEncoder().encode(text.slice(i, wide ? i + 2 : i + 1));
+      if (wide) i++;
+      for (let k = 0; k < bytes.length; k++) out += "\\x" + hex.charAt(Math.floor(bytes[k] / 16)) + hex.charAt(bytes[k] % 16);
+    }
+  }
+  return out;
+}
+// std.json's escaping of a string value or object key.
+function jsonEscaped(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 34) out += '\\"';
+    else if (c === 92) out += "\\\\";
+    else if (c === 8) out += "\\b";
+    else if (c === 12) out += "\\f";
+    else if (c === 10) out += "\\n";
+    else if (c === 13) out += "\\r";
+    else if (c === 9) out += "\\t";
+    else if (c < 32) out += "\\u00" + "0123456789abcdef".charAt(Math.floor(c / 16)) + "0123456789abcdef".charAt(c % 16);
+    else out += text.charAt(i);
+  }
+  return out;
+}
+
+// The model JSON writers: one per reachable record and union, emitted in
+// first-use order inside the model JSON block.
+class JsonProjection {
+  em: FacadeEmitter; helpers: string[] = []; enums: string[] = [];
+  records: string[] = []; unions: string[] = []; temp: number = 0;
+  constructor(em: FacadeEmitter) { this.em = em; }
+  run(): void {
+    this.need("text"); this.record(this.em.s.model);
+    let recordAt = 0, unionAt = 0;
+    while (recordAt < this.records.length || unionAt < this.unions.length) {
+      while (recordAt < this.records.length) this.recordWriter(this.records[recordAt++]);
+      while (unionAt < this.unions.length) this.unionWriter(this.unions[unionAt++]);
+    }
+  }
+  need(id: string): void { if (!this.helpers.includes(id)) this.helpers.push(id); }
+  record(name: string): void { if (!this.records.includes(name)) { this.records.push(name); this.em.reference(name); } }
+  union(name: string): void { if (!this.unions.includes(name)) { this.unions.push(name); this.em.reference(name); } }
+  literal(pad: string, json: string): void { this.em.print('{s}nscfJsonText(sink, "{s}");\n', [pad, jsonLiteral(json)]); }
+  key(name: string): string { return '"' + jsonEscaped(name) + '":'; }
+  fields(r: RecordType, base: string, depth: number): void {
+    const pad = this.em.indentText(depth); let opened = false;
+    for (const f of r.fields) {
+      if (f.type.kind === "void") continue;
+      this.literal(pad, (opened ? "," : "{") + this.key(f.name)); opened = true;
+      this.value(f.type, tsAccess(base, f.name), r.name, f.name, depth);
+    }
+    this.literal(pad, opened ? "}" : "{}");
+  }
+  value(ref: TypeRef, expr: string, container: string, member: string, depth: number): void {
+    const em = this.em, pad = em.indentText(depth);
+    switch (ref.kind) {
+      case "bool": this.need("bool"); em.print("{s}nscfJsonBool(sink, {s});\n", [pad, expr]); break;
+      case "i64": {
+        const unsigned = em.slotClass(container, member) === "u64";
+        this.need(unsigned ? "u64" : "i64"); em.use("trunc_toward_zero"); em.use("trap");
+        em.print("{s}{s}(sink, {s});\n", [pad, unsigned ? "nscfJsonU64" : "nscfJsonI64", expr]); break;
+      }
+      case "f64": this.need("f64"); em.print("{s}nscfJsonF64(sink, {s});\n", [pad, expr]); break;
+      case "bytes":
+        this.need("bytes");
+        if (em.isThemeStateAccent(container, member)) { em.use("utf8_text"); em.print("{s}nscfJsonBytes(sink, nscfUtf8TextBytes({s}));\n", [pad, expr]); }
+        else em.print("{s}nscfJsonBytes(sink, {s});\n", [pad, expr]);
+        break;
+      case "void": break;
+      case "optional": {
+        const temp = "nscfJsonOpt" + this.temp++;
+        em.print('{s}const {s} = {s};\n{s}if ({s} === null || {s} === undefined) nscfJsonText(sink, "null");\n{s}else {{\n', [pad, temp, expr, pad, temp, temp, pad]);
+        this.value(ref.inner!, temp, container, member, depth + 1); em.print("{s}}}\n", [pad]); break;
+      }
+      case "slice": {
+        const index = "nscfJsonIdx" + this.temp++;
+        this.literal(pad, "[");
+        em.print("{s}for (let {s} = 0; {s} < {s}.length; {s}++) {{\n{s}  if ({s} > 0) sink.push(44);\n", [pad, index, index, expr, index, pad, index]);
+        this.value(ref.elem!, expr + "[" + index + "]!", container, member, depth + 1);
+        em.print("{s}}}\n", [pad]); this.literal(pad, "]"); break;
+      }
+      case "node": case "value": this.record(ref.name!); em.print("{s}nscfJsonOf{s}(sink, {s});\n", [pad, ref.name!, expr]); break;
+      case "enum": {
+        const name = ref.name!; em.needEnumIndex(name); if (!this.enums.includes(name)) this.enums.push(name);
+        em.print("{s}nscfJsonText(sink, nscfJsonNames{s}[nscfIndex{s}({s})]!);\n", [pad, name, name, expr]); break;
+      }
+      case "union": this.union(ref.name!); em.print("{s}nscfJsonOf{s}(sink, {s});\n", [pad, ref.name!, expr]); break;
+      default: throw new Error("unknown model JSON type");
+    }
+  }
+  recordWriter(name: string): void {
+    const r = findRecord(this.em.s, name)!; this.temp = 0;
+    this.em.print("\nfunction nscfJsonOf{s}(sink: nscfSink, value: {s}): void {{\n", [name, name]);
+    this.fields(r, "value", 1); this.em.raw("}\n");
+  }
+  unionWriter(name: string): void {
+    const u = findUnion(this.em.s, name)!; this.temp = 0; this.em.use("trap");
+    this.em.print("\nfunction nscfJsonOf{s}(sink: nscfSink, value: {s}): void {{\n", [name, name]);
+    for (const a of u.arms) {
+      this.em.print('  if (value.kind === "{s}") {{\n', [tsString(a.name)]);
+      if (a.payload.kind === "void") this.literal("    ", "{" + this.key(a.name) + "{}}");
+      else {
+        this.literal("    ", "{" + this.key(a.name));
+        const r = this.em.synthesizedRecordOf(a.payload, u.name, a.name);
+        if (r !== null) this.fields(r, "value", 2);
+        else this.value(a.payload, tsAccess("value", this.em.memberOf(a.member)), u.name, a.name, 2);
+        this.literal("    ", "}");
+      }
+      this.em.raw("    return;\n  }\n");
+    }
+    this.em.print('  nscfTrap("{s} carries an arm outside its declared union — the value and the contract disagree");\n}}\n', [tsString(name)]);
+  }
 }

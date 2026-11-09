@@ -75,7 +75,7 @@ test "wired channels join the export map with their wire shapes" {
     var source = try std.mem.replaceOwned(u8, arena, sidecar_mod.minimal_valid_json, "\"key_msg\": false", "\"key_msg\": true");
     source = try std.mem.replaceOwned(u8, arena, source, "\"pinch_msg\": false", "\"pinch_msg\": true");
     source = try std.mem.replaceOwned(u8, arena, source, "\"drop_msg\": false", "\"drop_msg\": true");
-    source = try std.mem.replaceOwned(u8, arena, source, "\"helper_call\"]", "\"helper_call\", \"key_msg\", \"pinch_msg\", \"drop_msg\"]");
+    source = try std.mem.replaceOwned(u8, arena, source, "\"native_model_json\"]", "\"native_model_json\", \"key_msg\", \"pinch_msg\", \"drop_msg\"]");
     const generated = try profileFromJson(arena, source, default_entry);
     // The wire-shaped signatures: bytes as buffers, u8 modifier
     // booleans, the pinch phase a u32 member index. The export names

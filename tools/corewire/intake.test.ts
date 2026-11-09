@@ -23,6 +23,9 @@ const corewire = path.resolve(process.argv[2]);
 // by recovering each complete earlier facade after removing those blocks.
 // Exact subprocess and cancellation records are independently audited:
 // removing only their encoder cases recovers every preceding complete facade.
+// The committed-model JSON export is independently audited: removing its
+// export-list entry, profile line, mirror accessor and attestation line,
+// and the facade's model JSON block recovers every preceding complete pin.
 const goldens = JSON.parse(fs.readFileSync(new URL("intake_goldens.json", import.meta.url), "utf8")) as Record<string, { status: number; diagnostics: string; hashes: Record<string, string> }>;
 for (const item of intakeCases()) test(item.name, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "native-intake-"));

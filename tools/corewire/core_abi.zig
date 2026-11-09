@@ -216,6 +216,13 @@ pub fn Bindings(comptime prefix: []const u8) type {
         /// sidecar skew and TRAPS through the panic sink — it is never a
         /// status the host is asked to check.
         pub const helper_call = Symbol(fn (helper: u32, args: [*]const u8, args_len: usize, out: *[*]const u8, out_len: *usize) callconv(.c) void, "helper_call");
+        /// The committed model as minified JSON, written by the core from
+        /// its own state: fields in declaration order, bytes as decimal
+        /// arrays, enum members as strings, unions as `{"arm": payload}`
+        /// and absent optionals as `null` (the test protocol's model
+        /// shape). Transient like `model_snapshot`: valid until the next
+        /// dispatch entry, frame_reset, init, or collect.
+        pub const native_model_json = Symbol(fn (out: *[*]const u8, out_len: *usize) callconv(.c) void, "native_model_json");
         /// Reference-cycle collection over the model heap, with the
         /// transient-arena reset folded in (a runtime-owned mode
         /// symbol): observable model state unchanged, every previously

@@ -141,7 +141,7 @@
       "frame_reset", "boot_cmd", "dispatch_void", "dispatch_bytes", "dispatch_number",
       "dispatch_number_bytes", "dispatch_bool", "dispatch_enum", "dispatch_record",
       "dispatch_text_input", "dispatch_scroll_state", "subscriptions", "model_snapshot",
-      "persist_snapshot", "restore_model", "migrate_model", "helper_call", "frame_msg", "key_msg", "pinch_msg", "drop_msg"],
+      "persist_snapshot", "restore_model", "migrate_model", "helper_call", "native_model_json", "frame_msg", "key_msg", "pinch_msg", "drop_msg"],
     "snapshot_format": 1
   },
   "integer_slots": [

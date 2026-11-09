@@ -47,8 +47,9 @@ export interface NativeStatusItem {
 }
 export interface NativeSnapshot {
   readonly viewBackend: "zig" | "typescript";
-  /** Committed native model projection. Bytes are number arrays; tagged unions
-   * use the generated mirror's {arm: payload} representation. */
+  /** Committed model as JSON. Fields keep declaration order, bytes are number
+   * arrays, enums are member strings, tagged unions are {arm: payload}, and
+   * absent optionals are null. */
   readonly model: Readonly<Record<string, JsonValue>>;
   readonly fingerprint: string;
   readonly windows: readonly NativeWindow[];
