@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
 import { downloadTimeouts, downloadVerified, extractVerified } from "../scripts/install_scriptc.mjs";
-import { hostRelease, installedRelease, nativeManifestName, nativeTargetName, releaseConfiguration, scriptcVersion, stageContractTypes } from "../scripts/scriptc_toolchain.mjs";
+import { completeLibraryArchive, hostRelease, installedRelease, libraryAdoptionUnit, nativeManifestName, nativeTargetName, releaseConfiguration, runtimePackTargetName, scriptcVersion, stageContractTypes } from "../scripts/scriptc_toolchain.mjs";
 
 test("host selection preserves desktop distributions and explicit libc", () => {
   for (const arch of ["x64", "arm64"]) {
@@ -310,6 +310,131 @@ test("completed installations require the TypeScript 7 checker the compiler shel
     fs.writeFileSync(platformPackage, JSON.stringify({ name: "@tsc-ts/linux-x64-gnu", version: "0.1.2" }));
     put("api/node_modules/@tsc-ts/linux-x64-gnu/lib/tsc-ts");
     assert.throws(() => installedRelease(origin, options), /incorrect tsc-ts checker identity/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the build graph's Zig triples name the packs the release ships", () => {
+  const names: [string, string | null][] = [
+    ["x86_64-linux-gnu", "linux-x64-gnu"],
+    ["x86_64-linux-gnu.2.34", "linux-x64-gnu"],
+    ["aarch64-linux-musl", "linux-arm64-musl"],
+    ["aarch64-macos", "macos-arm64"],
+    ["x86_64-macos", "macos-x64"],
+    ["x86_64-windows-gnu", "windows-x64-msvc"],
+    ["x86_64-windows-msvc", "windows-x64-msvc"],
+    ["aarch64-ios", "ios-arm64"],
+    ["aarch64-ios-simulator", "ios-simulator-arm64"],
+    ["aarch64-linux-android", "android-arm64"],
+    ["wasm32-wasi", "wasm32-wasi"],
+    ["riscv64-linux-gnu", null],
+    ["x86_64-freebsd", null],
+    ["", null],
+  ];
+  for (const [triple, expected] of names) assert.equal(runtimePackTargetName(triple), expected, triple);
+});
+
+// scriptc 0.4.11's library flavors leave scr_decl_adopt.c out of their unit
+// table while the compiler still lowers adopting casts into its symbols, so
+// every archive a compiled core produces must take the pack's own executable
+// object for that unit.
+test("a library archive takes the adoption unit its flavor omits", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-adoption-"));
+  try {
+    const packDirectory = path.join(root, "runtime");
+    const variant = (flavor: string, when: { workers: boolean }, defines: string[]) => ({
+      id: when.workers ? "default-workers" : "default",
+      when,
+      defines,
+      path: `artifacts/${flavor}/runtime/${when.workers ? "default-workers" : "default"}/scr_decl_adopt.o`,
+    });
+    const adopt = (flavor: "release" | "dev") => ({
+      source: "scr_decl_adopt.c",
+      predicate: true,
+      variants: [variant(flavor, { workers: true }, ["SCR_WORKERS"]), variant(flavor, { workers: false }, [])],
+    });
+    const flavors: Record<string, unknown> = {
+      release: { optimization: "-O2", runtime_units: [adopt("release")] },
+      dev: { optimization: "-O0", runtime_units: [adopt("dev")] },
+      "library-release": { optimization: "-O2", runtime_units: [{ source: "scr_shared.c", predicate: true, variants: [] }] },
+      "library-dev": { optimization: "-O0", runtime_units: [{ source: "scr_shared.c", predicate: true, variants: [] }] },
+    };
+    for (const flavor of ["release", "dev"]) {
+      for (const directory of ["default", "default-workers"]) {
+        const file = path.join(packDirectory, "artifacts", flavor, "runtime", directory, "scr_decl_adopt.o");
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, `${flavor} ${directory}`);
+      }
+    }
+    const pack = { version: "0.4.11", flavors };
+    assert.deepEqual(libraryAdoptionUnit(packDirectory, pack as never, "release"), {
+      member: "scr_decl_adopt.o",
+      object: path.join(packDirectory, "artifacts/release/runtime/default/scr_decl_adopt.o"),
+      sha256: undefined,
+      size: undefined,
+    });
+    assert.equal(libraryAdoptionUnit(packDirectory, pack as never, "dev")!.object,
+      path.join(packDirectory, "artifacts/dev/runtime/default/scr_decl_adopt.o"));
+    // A release whose library flavor carries the unit needs no completion, and
+    // the library-only mobile packs ship no executable flavor to take it from.
+    (flavors["library-release"] as { runtime_units: unknown[] }).runtime_units.push(adopt("release"));
+    assert.equal(libraryAdoptionUnit(packDirectory, pack as never, "release"), null);
+    (flavors["library-release"] as { runtime_units: unknown[] }).runtime_units.pop();
+    const libraryOnly = { version: "0.4.11", flavors: { "library-release": flavors["library-release"], "library-dev": flavors["library-dev"] } };
+    assert.equal(libraryAdoptionUnit(packDirectory, libraryOnly as never, "release"), null);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the core archive completion adds the pack's verified unit through zig ar", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-complete-"));
+  try {
+    fs.mkdirSync(path.join(root, "scripts"));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ nativeToolchain: { scriptc: "0.4.11" } }));
+    fs.writeFileSync(path.join(root, "scripts", "scriptc-toolchain.json"), JSON.stringify({ schemaVersion: 1, version: "0.4.11", releases: { "linux-x64-gnu": {} } }));
+    const origin = path.join(root, "package.json");
+    const options = { origin, platform: "linux", arch: "x64", libc: "gnu", env: { NATIVE_SDK_SCRIPTC_CACHE: path.join(root, "cache") } };
+    const config = releaseConfiguration(origin, options)!;
+    const put = (name: string, bytes: string | Buffer) => {
+      const file = path.join(config.root, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, bytes);
+      return file;
+    };
+    const object = put("api/node_modules/@scriptc/runtime-linux-x64-gnu/artifacts/release/runtime/default/scr_decl_adopt.o", "adoption unit");
+    const sha256 = createHash("sha256").update("adoption unit").digest("hex");
+    const pack = put("api/node_modules/@scriptc/runtime-linux-x64-gnu/runtime-pack.json", JSON.stringify({
+      version: "0.4.11",
+      flavors: {
+        release: { optimization: "-O2", runtime_units: [{ source: "scr_decl_adopt.c", predicate: true, variants: [{ id: "default", when: { workers: false }, defines: [], path: "artifacts/release/runtime/default/scr_decl_adopt.o", sha256, size: 13 }] }] },
+        "library-release": { optimization: "-O2", runtime_units: [{ source: "scr_shared.c", predicate: true, variants: [] }] },
+      },
+    }));
+    const nativeManifest = put("release/bin/scriptc.json", JSON.stringify({ runtime_packs: [{ target: "linux-x64-gnu", path: "../../api/node_modules/@scriptc/runtime-linux-x64-gnu" }] }));
+    const archive = put("libfixture_core.a", "archive");
+    const profile = put("profile.json", JSON.stringify({ optimization: "release" }));
+    const calls: string[][] = [];
+    const ar = (args: string[]) => { calls.push(args); return { status: 0 }; };
+    assert.equal(completeLibraryArchive(archive, { ...options, profile, targetPlatform: "x86_64-linux-gnu", ar }), "scr_decl_adopt.o");
+    assert.deepEqual(calls, [["rcs", archive, object]]);
+    // A host-only compile links the host pack.
+    calls.length = 0;
+    assert.equal(completeLibraryArchive(archive, { ...options, profile, ar }), "scr_decl_adopt.o");
+    assert.deepEqual(calls, [["rcs", archive, object]]);
+    // A target the release carries no pack for, and an installation the build
+    // has not made, both leave the compile's own archive untouched.
+    calls.length = 0;
+    assert.equal(completeLibraryArchive(archive, { ...options, profile, targetPlatform: "aarch64-linux-musl", ar }), null);
+    fs.rmSync(path.join(config.root, "release"), { recursive: true, force: true });
+    assert.equal(completeLibraryArchive(archive, { ...options, profile, ar }), null);
+    assert.deepEqual(calls, []);
+    // The unit must match the manifest before it reaches the archive.
+    fs.mkdirSync(path.join(config.root, "release/bin"), { recursive: true });
+    fs.writeFileSync(nativeManifest, JSON.stringify({ runtime_packs: [{ target: "linux-x64-gnu", path: "../../api/node_modules/@scriptc/runtime-linux-x64-gnu" }] }));
+    fs.writeFileSync(object, "substituted unit");
+    assert.throws(() => completeLibraryArchive(archive, { ...options, profile, ar }), /does not match its manifest/);
+    assert.deepEqual(calls, []);
+    fs.writeFileSync(object, "adoption unit");
+    fs.writeFileSync(pack, JSON.stringify({ version: "0.4.11", flavors: {} }));
+    assert.equal(completeLibraryArchive(archive, { ...options, profile, ar }), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

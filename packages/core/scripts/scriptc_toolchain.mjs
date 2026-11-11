@@ -1,5 +1,6 @@
 // Resolve the SDK's exact release installation without downloading at build
 // time. Compiler overrides and older SDK package fixtures keep their own route.
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -122,4 +123,103 @@ export function stageContractTypes(destination, origin, options = {}) {
   if (!config?.release.packages.types) return;
   fs.cpSync(path.join(config.root, "api", "node_modules", "@scriptc", "types"),
     path.join(destination, "node_modules", "@scriptc", "types"), { recursive: true });
+}
+
+// The runtime pack a target links, named the way the installed release's
+// compiler manifest lists it (`runtime_packs[].target`). The build graph
+// states Zig triples; the compiler's own target table names its packs:
+// x86_64 is `x64`, aarch64 `arm64`, Android and iOS are platforms of their
+// own, and both Windows ABIs link the one x64 COFF pack. Null when the
+// triple names no pack the release carries.
+export function runtimePackTargetName(triple) {
+  const [rawArch, rawOs, rawAbi = ""] = triple.split("-");
+  const architecture = { x86_64: "x64", aarch64: "arm64", wasm32: "wasm32" }[rawArch];
+  const os = rawOs?.split(".")[0];
+  // A glibc floor rides the ABI (`gnu.2.34`); the pack is chosen by ABI alone.
+  const abi = rawAbi.split(".")[0];
+  if (architecture === undefined || os === undefined) return null;
+  if (os === "linux") {
+    if (abi.startsWith("android")) return `android-${architecture}`;
+    return abi === "gnu" || abi === "musl" ? `linux-${architecture}-${abi}` : null;
+  }
+  if (os === "macos") return `macos-${architecture}`;
+  if (os === "ios") return `${abi === "simulator" ? "ios-simulator" : "ios"}-${architecture}`;
+  if (os === "windows") return `windows-${architecture}-msvc`;
+  if (os === "wasi") return `wasm32-wasi`;
+  return null;
+}
+
+// The runtime unit that completes a library archive. scriptc 0.4.11's
+// library flavors select their objects from a fixed table that omits the
+// declaration-adoption runtime (`scr_decl_adopt.c`), while the compiler still
+// lowers an adopting cast of a dynamic value to `scr_dyn_adoptable` and
+// `scr_dyn_adopt_shared` calls — so a compiled core whose facade adopts a
+// shared declaration carries undefined symbols from the start, and every
+// link against its archive fails. The pack ships that unit for its executable
+// flavors; it is plain runtime state, shared with the plain library flavors
+// (the threaded library flavors compile their exception state per instance
+// instead, which is why only the plain ones can take it), and it is compiled
+// for the same target from the same sources. So the archive gains the pack's
+// own prebuilt unit rather than a stub. A release whose library flavor lists
+// the unit itself needs nothing, and the mobile packs — library-only — ship
+// no executable flavor to take it from; both cases return null.
+export function libraryAdoptionUnit(directory, pack, optimization = "release") {
+  const library = pack.flavors?.[optimization === "dev" ? "library-dev" : "library-release"];
+  if (!Array.isArray(library?.runtime_units)) return null;
+  if (library.runtime_units.some((unit) => unit.source === "scr_decl_adopt.c")) return null;
+  const companion = pack.flavors?.[optimization === "dev" ? "dev" : "release"];
+  const unit = (companion?.runtime_units ?? [])
+    .find((entry) => entry.source === "scr_decl_adopt.c" && entry.predicate !== false);
+  // The worker build of the same unit keeps exception state per worker; the
+  // archive is one instance, so it takes the default variant.
+  const variant = (unit?.variants ?? []).find((candidate) =>
+    candidate.when?.workers !== true && !(candidate.defines ?? []).includes("SCR_WORKERS") &&
+    typeof candidate.path === "string");
+  if (variant === undefined) return null;
+  const object = path.join(directory, variant.path);
+  if (!fs.statSync(object, { throwIfNoEntry: false })?.isFile()) return null;
+  return { member: path.basename(variant.path), object, sha256: variant.sha256, size: variant.size };
+}
+
+// Add the adoption unit a compiled core archive is missing (libraryAdoptionUnit)
+// with the build's own zig ar — the archiver scriptc itself assembles library
+// archives with, which preserves the archive's object format and rewrites its
+// symbol index. The caller passes the profile the compile ran under (its
+// optimization selects the library flavor), and the target triple when the
+// build knows one; a host-only compile links the host pack. Returns the added
+// member, or null when the archive needs nothing (or the installation knows no
+// pack for the target, leaving the compile's own archive as it stands).
+export function completeLibraryArchive(archive, options = {}) {
+  if (!fs.statSync(archive, { throwIfNoEntry: false })?.isFile()) return null;
+  const config = releaseConfiguration(options.origin, options);
+  if (config === null) return null;
+  const target = options.targetPlatform === undefined ? nativeTargetName(config.host) : runtimePackTargetName(options.targetPlatform);
+  if (target === null) return null;
+  // A compiler override can build against a release this SDK never installed;
+  // then there is no pack to complete the archive from.
+  const nativeManifestPath = path.join(config.root, "release", "bin", nativeManifestName(config.host));
+  if (!fs.statSync(nativeManifestPath, { throwIfNoEntry: false })?.isFile()) return null;
+  const nativeManifest = JSON.parse(fs.readFileSync(nativeManifestPath, "utf8"));
+  const registered = (nativeManifest.runtime_packs ?? []).find((entry) => entry.target === target);
+  if (registered === undefined) return null;
+  const directory = path.resolve(path.join(config.root, "release", "bin"), registered.path);
+  if (!fs.statSync(path.join(directory, "runtime-pack.json"), { throwIfNoEntry: false })?.isFile()) return null;
+  const pack = JSON.parse(fs.readFileSync(path.join(directory, "runtime-pack.json"), "utf8"));
+  const profile = options.profile === undefined ? {} : JSON.parse(fs.readFileSync(options.profile, "utf8"));
+  const unit = libraryAdoptionUnit(directory, pack, options.optimization ?? profile.optimization);
+  if (unit === null) return null;
+  const bytes = fs.readFileSync(unit.object);
+  if ((unit.size !== undefined && bytes.length !== unit.size) ||
+    (unit.sha256 !== undefined && createHash("sha256").update(bytes).digest("hex") !== unit.sha256)) {
+    throw new Error(`the installed scriptc runtime pack's ${unit.member} does not match its manifest — reinstall the pinned toolchain`);
+  }
+  const ar = options.ar ?? ((arArgs) => spawnSync(options.zigExe ?? "zig", ["ar", ...arArgs], { encoding: "utf8" }));
+  const appended = ar(["rcs", archive, unit.object]);
+  if (appended.status !== 0 || appended.error !== undefined) {
+    // Leave the compile's own archive in place rather than failing every
+    // build of a core that never adopts a shared declaration.
+    console.error(`could not add scriptc's ${unit.member} to ${path.basename(archive)} (${appended.error ?? appended.stderr ?? `exit ${appended.status}`}) — a core that adopts a shared declaration will not link until the toolchain is complete`);
+    return null;
+  }
+  return unit.member;
 }
