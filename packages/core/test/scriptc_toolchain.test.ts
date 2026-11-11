@@ -5,7 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { test } from "node:test";
-import { downloadVerified, extractVerified } from "../scripts/install_scriptc.mjs";
+import { downloadTimeouts, downloadVerified, extractVerified } from "../scripts/install_scriptc.mjs";
 import { hostRelease, installedRelease, nativeManifestName, nativeTargetName, releaseConfiguration, scriptcVersion, stageContractTypes } from "../scripts/scriptc_toolchain.mjs";
 
 test("host selection preserves desktop distributions and explicit libc", () => {
@@ -82,39 +82,67 @@ test("transient fetch and HTTP failures retry within a bounded verified download
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("slow transfers retain the complete asset budget while retries share the remaining time", async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-budget-"));
-  const originalNow = Date.now, originalTimeout = AbortSignal.timeout;
+test("the download budget fits the large toolchain assets and is configurable", () => {
+  // scriptc 0.4.11 host releases are 130-160 MB. At a slow-but-ordinary
+  // 2 Mbit/s the largest asset needs ~640 s, well past the old two-minute
+  // budget, and inside this one.
+  const defaults = downloadTimeouts({});
+  assert.ok(defaults.timeoutMs >= (160 * 1024 * 1024 * 8) / (2 * 1000 * 1000) * 1000);
+  assert.equal(defaults.stallMs, 60_000);
+  assert.deepEqual(downloadTimeouts({ NATIVE_SDK_SCRIPTC_DOWNLOAD_TIMEOUT_MS: "3600000", NATIVE_SDK_SCRIPTC_DOWNLOAD_STALL_MS: "120000" }), { timeoutMs: 3_600_000, stallMs: 120_000 });
+  assert.throws(() => downloadTimeouts({ NATIVE_SDK_SCRIPTC_DOWNLOAD_TIMEOUT_MS: "soon" }), /positive number of milliseconds/);
+  assert.throws(() => downloadTimeouts({ NATIVE_SDK_SCRIPTC_DOWNLOAD_STALL_MS: "-1" }), /positive number of milliseconds/);
+});
+
+test("a stalled transfer fails with the URL, received bytes, and what to do", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-stall-"));
   try {
-    const payload = Buffer.from("verified slow transfer");
-    const asset = { url: "https://example.com/release.tar.gz", sha256: createHash("sha256").update(payload).digest("hex"), bytes: payload.length };
+    const asset = { url: "https://example.com/release.tar.gz", sha256: "0".repeat(64), bytes: 160 * 1024 * 1024 };
     const file = path.join(root, "asset");
-    let now = 0, attempts = 0;
-    const timeouts: number[] = [];
-    Date.now = () => now;
-    AbortSignal.timeout = ms => { timeouts.push(ms); return originalTimeout(ms); };
-    await downloadVerified(asset, file, {
-      sleep: async (ms: number) => { now += ms; },
-      fetch: async () => {
-        now += 45_000;
-        if (++attempts === 1) throw Object.assign(new Error("temporary reset"), { code: "ECONNRESET" });
-        return new Response(payload);
-      },
-    });
-    assert.deepEqual(timeouts, [120_000, 74_000]);
-    assert.equal(attempts, 2); assert.equal(now, 91_000);
-    assert.deepEqual(fs.readFileSync(file), payload); fs.unlinkSync(file);
-    now = 0; attempts = 0; timeouts.length = 0;
+    let attempts = 0;
     await assert.rejects(downloadVerified(asset, file, {
-      sleep: async () => { assert.fail("exhausted budget must stop before backoff"); },
-      fetch: async () => { attempts++; now = 119_800; throw Object.assign(new Error("budget exhausted"), { code: "ECONNRESET" }); },
-    }), /budget exhausted/);
-    assert.equal(attempts, 1); assert.deepEqual(timeouts, [120_000]);
+      timeoutMs: 300, stallTimeoutMs: 50,
+      fetch: async (_url: string, { signal }: { signal: AbortSignal }) => {
+        assert.ok(signal instanceof AbortSignal);
+        attempts++;
+        return new Response(new ReadableStream({ start() { /* never delivers a byte */ } }));
+      },
+    }), (error: Error) => {
+      assert.match(error.message, /download stalled for 50 ms with no data/);
+      assert.match(error.message, /example\.com\/release\.tar\.gz/);
+      assert.match(error.message, /0 B of 160\.0 MiB received on attempt 1/);
+      assert.match(error.message, /npm run toolchain:install/);
+      assert.match(error.message, /NATIVE_SDK_SCRIPTC_DOWNLOAD_TIMEOUT_MS/);
+      return true;
+    });
+    // One stall retries, but a 300 ms budget cannot absorb the 1 s backoff.
+    assert.equal(attempts, 1);
     assert.equal(fs.existsSync(file), false);
-  } finally {
-    Date.now = originalNow; AbortSignal.timeout = originalTimeout;
-    fs.rmSync(root, { recursive: true, force: true });
-  }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("downloads report progress and completion for large assets", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-progress-"));
+  try {
+    const payload = Buffer.alloc(64 * 1024, 7);
+    const sha256 = createHash("sha256").update(payload).digest("hex");
+    const asset = { url: "https://example.com/release.tar.gz", sha256, bytes: payload.length };
+    const reports: { bytes: number; total?: number; attempt: number; complete?: boolean }[] = [];
+    await downloadVerified(asset, path.join(root, "asset"), {
+      progress: (report: { bytes: number; total?: number; attempt: number; complete?: boolean }) => reports.push(report),
+      fetch: async () => new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(payload.subarray(0, 32 * 1024));
+          controller.enqueue(payload.subarray(32 * 1024));
+          controller.close();
+        },
+      })),
+    });
+    assert.ok(reports.length >= 3);
+    assert.deepEqual(reports.slice(0, 2).map((report) => report.bytes), [32 * 1024, 64 * 1024]);
+    assert.equal(reports.at(-1)!.complete, true);
+    assert.equal(reports.at(-1)!.bytes, payload.length);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test("a failed response body is discarded before a fresh stream and hash are admitted", async () => {
@@ -236,6 +264,52 @@ test("a completed receipt still requires the compiler and every target pack", ()
     fs.writeFileSync(receiptPath, JSON.stringify(receipt));
     // A receipt alone cannot turn a failed installation into a usable one.
     assert.throws(() => installedRelease(origin, options));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("completed installations require the TypeScript 7 checker the compiler shells out to", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "native-scriptc-checker-"));
+  try {
+    fs.mkdirSync(path.join(root, "scripts"));
+    fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ nativeToolchain: { scriptc: "0.4.11" } }));
+    fs.writeFileSync(path.join(root, "scripts", "scriptc-toolchain.json"), JSON.stringify({
+      schemaVersion: 1, version: "0.4.11", runtimeAbi: 48, tscTsVersion: "0.1.3",
+      releases: { "linux-x64-gnu": {} },
+      packages: {
+        compiler: { name: "@scriptc/compiler", version: "0.4.11" },
+        typescript: { name: "typescript", version: "7.1.0-beta" },
+        typescript5: { name: "typescript", version: "5.9.3" },
+        "tsc-ts": { name: "tsc-ts", version: "0.1.3" },
+      },
+    }));
+    const origin = path.join(root, "package.json");
+    const options = { platform: "linux", arch: "x64", libc: "gnu", env: { NATIVE_SDK_SCRIPTC_CACHE: path.join(root, "cache") } };
+    const config = releaseConfiguration(origin, options)!;
+    const put = (name: string, value: unknown = {}) => {
+      const file = path.join(config.root, name);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(value));
+      return file;
+    };
+    put("installed.json", { manifestSha256: config.identity, host: config.host, version: "0.4.11", complete: true, runtimeAbi: 48, runtimePacks: ["runtime-linux-x64-gnu"] });
+    for (const [key, name, version] of [["compiler", "@scriptc/compiler", "0.4.11"], ["typescript", "typescript", "7.1.0-beta"], ["typescript5", "typescript", "5.9.3"], ["tsc-ts", "tsc-ts", "0.1.3"]]) {
+      put(`api/node_modules/${name.startsWith("@scriptc/") ? name : key}/package.json`, { name, version });
+    }
+    for (const file of ["release/bin/scriptc.json", "release/bin/scriptc", "api/node_modules/@scriptc/compiler/dist/index.js", "api/node_modules/@scriptc/compiler/surface-manifest.json", "api/node_modules/@tsc-ts/linux-x64-gnu/lib/tsc-ts", "api/node_modules/@scriptc/runtime-linux-x64-gnu/runtime-pack.json"]) put(file);
+    put("api/node_modules/@scriptc/runtime-linux-x64-gnu/runtime-pack.json", { version: "0.4.11", runtime_abi: { version: 48 } });
+    const platformPackage = put("api/node_modules/@tsc-ts/linux-x64-gnu/package.json", { name: "@tsc-ts/linux-x64-gnu", version: "0.1.3" });
+    assert.equal(installedRelease(origin, options)!.root, config.root);
+    // The compiler resolves the checker through the launcher package and its
+    // platform executable, so a receipt without either cannot build.
+    fs.unlinkSync(path.join(config.root, "api/node_modules/@tsc-ts/linux-x64-gnu/lib/tsc-ts"));
+    assert.throws(() => installedRelease(origin, options), /missing api\/node_modules\/@tsc-ts\/linux-x64-gnu\/lib\/tsc-ts/);
+    put("api/node_modules/@tsc-ts/linux-x64-gnu/lib/tsc-ts");
+    fs.rmSync(path.join(config.root, "api/node_modules/@tsc-ts"), { recursive: true, force: true });
+    assert.throws(() => installedRelease(origin, options));
+    fs.mkdirSync(path.dirname(platformPackage), { recursive: true });
+    fs.writeFileSync(platformPackage, JSON.stringify({ name: "@tsc-ts/linux-x64-gnu", version: "0.1.2" }));
+    put("api/node_modules/@tsc-ts/linux-x64-gnu/lib/tsc-ts");
+    assert.throws(() => installedRelease(origin, options), /incorrect tsc-ts checker identity/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 

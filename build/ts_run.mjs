@@ -23,10 +23,10 @@
 // so the runner gives the same Node 24 teaching instead of surfacing a raw
 // extension/stripping error.
 
-import module, { createRequire } from 'node:module';
-import { readFileSync } from 'node:fs';
+import module from 'node:module';
 import { resolve } from 'node:path';
-import { pathToFileURL, fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { registerTsModules } from '../packages/core/scripts/ts_modules.mjs';
 
 const target = process.argv[2];
 if (!target) {
@@ -53,45 +53,15 @@ if (typeof module.registerHooks !== 'function') {
     process.exit(1);
   }
 } else {
-  let ts = null;
-  module.registerHooks({
-    load(url, context, nextLoad) {
-      if (url.startsWith('file:') && url.endsWith('.ts')) {
-        const filePath = fileURLToPath(url);
-        // The frontend's own pinned compiler, resolved from the target
-        // module's location (packages/core/node_modules after the taught
-        // `npm ci`, or the dependency npm installed beside the CLI):
-        // resolving from the target finds our own nested/hoisted exact
-        // pin first, so a consumer tree's conflicting hoisted typescript
-        // never wins nearest-wins over it (same reasoning as
-        // typed_ast.ts).
-        if (ts === null) {
-          try {
-            ts = createRequire(targetPath)('@typescript/old');
-          } catch {
-            // A missing toolchain reaches here only on a direct
-            // `node ts_run.mjs` run: every CLI verb gates resolution with
-            // a fuller per-layout teaching before this runner is spawned.
-            // Keep the direct-run error sane and name the checkout fix.
-            console.error(
-              `ts_run.mjs: the transpiler's TypeScript toolchain (@typescript/old) does not resolve from ${targetPath} - on a repo checkout, run \`npm ci --include=dev\` in packages/core.`,
-            );
-            process.exit(1);
-          }
-        }
-        const { outputText } = ts.transpileModule(readFileSync(filePath, 'utf8'), {
-          fileName: filePath,
-          compilerOptions: {
-            target: ts.ScriptTarget.ESNext,
-            module: ts.ModuleKind.ESNext,
-            verbatimModuleSyntax: true,
-          },
-        });
-        return { format: 'module', source: outputText, shortCircuit: true };
-      }
-      return nextLoad(url, context);
-    },
-  });
+  // The shared hook resolves the frontend's own pinned compiler from the
+  // target module's location (packages/core/node_modules after the taught
+  // `npm ci`, or the dependency npm installed beside the CLI). Resolving
+  // from the target finds our own nested/hoisted exact pin first, so a
+  // consumer tree's conflicting hoisted typescript never wins nearest-wins
+  // over it (same reasoning as typed_ast.ts). Every script that imports the
+  // transpiler tier — including the external-compile staging script — uses
+  // this same hook.
+  registerTsModules(targetPath);
 }
 
 await import(pathToFileURL(targetPath).href);

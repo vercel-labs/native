@@ -56,10 +56,10 @@
     "@typescript/old": "npm:typescript@6.0.3"
   },
   "dependencies": {
-    "@scriptc/types": "0.3.2",
+    "@scriptc/types": "0.4.11",
     "tar": "7.5.22"
   },
   "nativeToolchain": {
-    "scriptc": "0.3.2"
+    "scriptc": "0.4.11"
   }
 }

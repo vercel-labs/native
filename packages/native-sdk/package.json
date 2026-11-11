@@ -67,6 +67,6 @@
   },
   "license": "Apache-2.0",
   "nativeToolchain": {
-    "scriptc": "0.3.2"
+    "scriptc": "0.4.11"
   }
 }

@@ -88,8 +88,12 @@ export function installedRelease(origin, options = {}) {
     const pkg = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8"));
     if (pkg.name !== asset.name || pkg.version !== asset.version) throw new Error(`scriptc installation has an incorrect package identity: ${key}`);
   }
-  for (const name of [`release/bin/${nativeManifestName(config.host)}`, `release/bin/scriptc${config.host.startsWith("win32-") ? ".exe" : ""}`, "api/node_modules/@scriptc/compiler/dist/index.js", "api/node_modules/@scriptc/compiler/surface-manifest.json", "api/node_modules/typescript/package.json", "api/node_modules/typescript5/package.json", ...(config.release.packages.types ? ["api/node_modules/@scriptc/types/index.d.ts"] : []), ...(config.release.packages.threads ? ["api/node_modules/@scriptc/threads/index.d.ts", "api/node_modules/@scriptc/threads/index.js"] : []), ...packs.map(name => `api/node_modules/@scriptc/${name}/runtime-pack.json`)]) {
-    if (!fs.statSync(path.join(config.root, name)).isFile()) throw new Error(`scriptc installation is missing ${name}`);
+  for (const name of [`release/bin/${nativeManifestName(config.host)}`, `release/bin/scriptc${config.host.startsWith("win32-") ? ".exe" : ""}`, "api/node_modules/@scriptc/compiler/dist/index.js", "api/node_modules/@scriptc/compiler/surface-manifest.json", "api/node_modules/typescript/package.json", "api/node_modules/typescript5/package.json", ...(config.release.tscTsVersion ? ["api/node_modules/tsc-ts/package.json", `api/node_modules/@tsc-ts/${config.host}/lib/${config.host.startsWith("win32-") ? "tsc-ts.exe" : "tsc-ts"}`] : []), ...(config.release.packages.types ? ["api/node_modules/@scriptc/types/index.d.ts"] : []), ...(config.release.packages.threads ? ["api/node_modules/@scriptc/threads/index.d.ts", "api/node_modules/@scriptc/threads/index.js"] : []), ...packs.map(name => `api/node_modules/@scriptc/${name}/runtime-pack.json`)]) {
+    if (!fs.statSync(path.join(config.root, name), { throwIfNoEntry: false })?.isFile()) throw new Error(`scriptc installation is missing ${name}`);
+  }
+  if (config.release.tscTsVersion) {
+    const tscTs = JSON.parse(fs.readFileSync(path.join(modules, "@tsc-ts", config.host, "package.json"), "utf8"));
+    if (tscTs.name !== "@tsc-ts/" + config.host || tscTs.version !== config.release.tscTsVersion) throw new Error("scriptc installation has an incorrect tsc-ts checker identity");
   }
   for (const name of packs) {
     const pack = JSON.parse(fs.readFileSync(path.join(modules, "@scriptc", name, "runtime-pack.json"), "utf8"));
