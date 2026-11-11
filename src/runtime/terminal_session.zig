@@ -72,6 +72,16 @@ pub const PointerSelectionResult = struct {
     selection_active: bool = false,
 };
 
+/// An application-owned byte transport for terminal sessions that do not
+/// come from a local PTY (SSH, serial, a websocket, a test feeder). The
+/// store keeps the emulator and the widget contract; only the bytes and
+/// the window size cross this seam.
+pub const ExternalTransport = struct {
+    context: *anyopaque,
+    write: *const fn (context: *anyopaque, key: u64, bytes: []const u8) bool,
+    resize: *const fn (context: *anyopaque, key: u64, cols: u16, rows: u16) void,
+};
+
 pub const TerminalSessions = if (enabled) EnabledStore else DisabledStore;
 
 /// The stub-build store: every entry point compiles against the same
@@ -88,6 +98,24 @@ const DisabledStore = struct {
     pub fn setGateway(self: *DisabledStore, gateway: PtyGateway) void {
         _ = self;
         _ = gateway;
+    }
+    pub fn setExternalTransport(self: *DisabledStore, transport: ExternalTransport) void {
+        _ = self;
+        _ = transport;
+    }
+    pub fn isExternal(self: *const DisabledStore, pty: u64) bool {
+        _ = self;
+        _ = pty;
+        return false;
+    }
+    pub fn feedExternal(self: *DisabledStore, pty: u64, bytes: []const u8) void {
+        _ = self;
+        _ = pty;
+        _ = bytes;
+    }
+    pub fn feedExternalExit(self: *DisabledStore, pty: u64) void {
+        _ = self;
+        _ = pty;
     }
     pub fn beginBuild(self: *DisabledStore, tokens: canvas.DesignTokens) void {
         _ = self;
@@ -168,7 +196,13 @@ const EnabledStore = struct {
     /// no `<terminal>` pay nothing.
     threaded: ?*std.Io.Threaded = null,
     entries: [max_sessions]Entry = @splat(.{}),
+    /// The dispatching gateway installed by `setGateway`: it routes a
+    /// key to the external transport when the key was fed externally,
+    /// and to the effects PTY gateway otherwise.
     gateway: ?PtyGateway = null,
+    effects_gateway: ?PtyGateway = null,
+    external_transport: ?ExternalTransport = null,
+    external_keys: [max_sessions]u64 = @splat(0),
     /// The tokens the CURRENT build resolves snapshots with, stamped by
     /// `beginBuild` (the palette's theme mapping needs them). Valid for
     /// the duration of one build — exactly the window `resolve` runs in.
@@ -196,7 +230,86 @@ const EnabledStore = struct {
     }
 
     pub fn setGateway(self: *EnabledStore, gateway: PtyGateway) void {
-        self.gateway = gateway;
+        self.effects_gateway = gateway;
+        self.gateway = .{
+            .context = @ptrCast(self),
+            .write = dispatchWrite,
+            .resize = dispatchResize,
+        };
+    }
+
+    /// Register the transport for sessions fed with `feedExternal`.
+    /// The effects PTY gateway stays installed for local PTY keys.
+    pub fn setExternalTransport(self: *EnabledStore, transport: ExternalTransport) void {
+        self.external_transport = transport;
+    }
+
+    pub fn isExternal(self: *const EnabledStore, pty: u64) bool {
+        if (pty == 0) return false;
+        for (self.external_keys) |key| {
+            if (key == pty) return true;
+        }
+        return false;
+    }
+
+    fn markExternal(self: *EnabledStore, pty: u64) void {
+        if (pty == 0) return;
+        for (&self.external_keys) |*key| {
+            if (key.* == pty) return;
+            if (key.* == 0) {
+                key.* = pty;
+                return;
+            }
+        }
+    }
+
+    fn dispatchWrite(context: *anyopaque, key: u64, bytes: []const u8) bool {
+        const self: *EnabledStore = @ptrCast(@alignCast(context));
+        if (self.isExternal(key)) {
+            const transport = self.external_transport orelse return false;
+            return transport.write(transport.context, key, bytes);
+        }
+        const gateway = self.effects_gateway orelse return false;
+        return gateway.write(gateway.context, key, bytes);
+    }
+
+    fn dispatchResize(context: *anyopaque, key: u64, cols: u16, rows: u16) void {
+        const self: *EnabledStore = @ptrCast(@alignCast(context));
+        if (self.isExternal(key)) {
+            const transport = self.external_transport orelse return;
+            transport.resize(transport.context, key, cols, rows);
+            return;
+        }
+        const gateway = self.effects_gateway orelse return;
+        gateway.resize(gateway.context, key, cols, rows);
+    }
+
+    /// Feed output from an application-owned transport into the session
+    /// bound to `pty`. The caller must run this on the store's loop
+    /// thread, like every other store method.
+    pub fn feedExternal(self: *EnabledStore, pty: u64, bytes: []const u8) void {
+        if (pty == 0 or bytes.len == 0) return;
+        const session = self.ensureSession(pty) orelse return;
+        self.markExternal(pty);
+        if (session.ended) session.resetForRespawn();
+        session.feedOutput(self.gateway, pty, bytes);
+        session.snapshot_dirty = true;
+    }
+
+    /// End an externally fed session exactly like the PTY exit tap: no
+    /// further bytes can land, queued outbound is dropped counted, and
+    /// the published grid reports a stopped session.
+    pub fn feedExternalExit(self: *EnabledStore, pty: u64) void {
+        const session = self.find(pty) orelse return;
+        self.markExternal(pty);
+        session.ended = true;
+        session.grid.running = false;
+        session.outbound_dropped += session.outbound_len;
+        session.outbound_dropped += session.response_len;
+        session.outbound_head = 0;
+        session.outbound_len = 0;
+        session.clearResponses();
+        session.snapshot_dirty = true;
     }
 
     pub fn beginBuild(self: *EnabledStore, tokens: canvas.DesignTokens) void {
