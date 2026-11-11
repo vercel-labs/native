@@ -7,6 +7,7 @@ import {
   Sub,
   dbText,
   utf8Bytes,
+  type DbValue,
   decodeNotesInFolderPage,
   decodeSearchNotesPage,
 } from "@native-sdk/core";
@@ -169,6 +170,14 @@ export function update(model: Model, msg: Msg): Model | [Model, Cmd<Msg>] {
   }
 }
 
+// A live query is generic over the message type, and the compiler refuses to
+// copy a record across that erased boundary. Build the params at an ordinary
+// return, where wrapping the bytes as TEXT is an exact conversion; the
+// declared type is the generated parameter type, termwise.
+function searchParams(bytes: Uint8Array): { readonly term: DbValue | null } {
+  return { term: dbText(bytes) };
+}
+
 export function subscriptions(model: Model): Sub<Msg> {
   if (!model.watching) return Sub.none;
   return Sub.batch([
@@ -177,7 +186,7 @@ export function subscriptions(model: Model): Sub<Msg> {
       done: "notes_done",
       err: "db_failed",
     }),
-    Sub.qSearchNotes(model.alternateKeys ? "fts-results-b" : "fts-results", { term: dbText(model.search) }, {
+    Sub.qSearchNotes(model.alternateKeys ? "fts-results-b" : "fts-results", searchParams(model.search), {
       page: "search_page",
       done: "search_done",
       err: "db_failed",

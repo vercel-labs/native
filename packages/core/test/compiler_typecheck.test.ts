@@ -53,13 +53,14 @@ test("an npm package outside the static tier fails check with the compiler note 
       name: "dynamic-only", version: "1.0.0", type: "module", types: "index.d.ts", exports: "./index.js",
     }));
     fs.writeFileSync(path.join(vendor, "index.d.ts"), "export default function probe(value: string): string;\n");
-    // getCipherInfo is typed but has no static lowering in the pinned compiler.
-    // The package itself remains marked "static" in coverage, so this pins
-    // Native SDK's stricter requirement that the total be 100%.
+    // privateDecrypt is typed but has no static lowering in the pinned
+    // compiler (getCipherInfo gained one in scriptc 0.4.11). The package
+    // itself remains marked "static" in coverage, so this pins Native SDK's
+    // stricter requirement that the total be 100%.
     fs.writeFileSync(path.join(vendor, "index.js"), [
-      'import { getCipherInfo } from "node:crypto";',
+      'import { privateDecrypt } from "node:crypto";',
       "export default function probe(x) {",
-      '  getCipherInfo("aes-256-cbc");',
+      "  privateDecrypt(x, new Uint8Array(0));",
       "  return x;",
       "}",
       "",

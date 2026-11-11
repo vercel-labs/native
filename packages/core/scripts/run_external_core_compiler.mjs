@@ -23,6 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { compilerArgv, publishedScriptcArgv } from "./compiler_command.mjs";
+import { completeLibraryArchive } from "./scriptc_toolchain.mjs";
 
 function parseArgs(argv) {
   const args = {};
@@ -204,6 +205,21 @@ try {
   const produced = [`${args.name}.lib.a`, args.name].find((name) => fs.existsSync(path.join(work, name)));
   if (!produced) {
     console.error(`the external core compile produced no archive (expected ${args.name}.lib.a or ${args.name})`);
+    process.exit(1);
+  }
+  // The library flavors of a release can omit a runtime unit the compiler
+  // still lowers calls into; the pack's own prebuilt unit completes the
+  // archive here, where every lane's core archive passes, rather than at each
+  // link site. See libraryAdoptionUnit for the gap and its bounds.
+  try {
+    completeLibraryArchive(path.join(work, produced), {
+      origin: args.manifest,
+      profile: path.join(work, "profile.json"),
+      targetPlatform: args["target-platform"],
+      zigExe: args["zig-exe"],
+    });
+  } catch (error) {
+    console.error(`the compiled core archive could not be completed: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
   const sidecar = path.join(work, "core.contract.json");

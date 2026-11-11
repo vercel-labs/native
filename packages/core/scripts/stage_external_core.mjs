@@ -33,9 +33,16 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { compileViewProgram } from "../src/view_frontend.ts";
-import { appViewSources } from "../src/view_sources.ts";
 import { stageContractTypes } from "./scriptc_toolchain.mjs";
+import { registerTsModules } from "./ts_modules.mjs";
+
+// The view frontend is TypeScript. On an npm-installed CLI this script lives
+// under node_modules, where node refuses to strip `.ts`
+// (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), so load it through the SDK's
+// pinned compiler on every layout instead of relying on node's own stripping.
+registerTsModules(import.meta.url);
+const { compileViewProgram } = await import("../src/view_frontend.ts");
+const { appViewSources } = await import("../src/view_sources.ts");
 
 function parseArgs(argv) {
   const args = {};

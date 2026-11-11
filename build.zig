@@ -1302,7 +1302,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&gallery_driver_run.step);
         b.step("test-component-gallery", "Compare every component gallery specimen and replay across view backends").dependOn(&gallery_driver_run.step);
         const native_api_tests = b.addSystemCommand(&.{ b.findProgram(&.{"node"}, &.{}) catch unreachable, "--test" });
-        for ([_][]const u8{ "scriptc_toolchain.test.ts", "compiler_command.test.ts", "external_core_compiler.test.ts", "package_manifest.test.ts" }) |file| {
+        for ([_][]const u8{ "scriptc_toolchain.test.ts", "stage_external_core.test.ts", "compiler_command.test.ts", "external_core_compiler.test.ts", "package_manifest.test.ts" }) |file| {
             native_api_tests.addFileArg(b.path(b.fmt("packages/core/test/{s}", .{file})));
         }
         native_api_tests.addFileArg(b.path("packages/core/test/native_testing.test.ts"));
