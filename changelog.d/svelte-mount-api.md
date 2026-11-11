@@ -1,0 +1,1 @@
+fix: **Svelte example and template mount correctly on Svelte 5**: `main.js` used the removed Svelte 4 `new App({ target })` constructor, which throws `component_api_invalid_new` under Svelte 5. Both the `examples/svelte` app and the `native init` Svelte scaffold now mount with `mount(App, { target })` from `svelte`.
