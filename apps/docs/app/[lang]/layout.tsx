@@ -21,7 +21,7 @@ export const metadata: Metadata = {
     default: "Native SDK",
     template: "%s | Native SDK",
   },
-  description: "Build native apps from HTML, CSS and TypeScript.",
+  description: "HTML, CSS and TypeScript compiled into native apps, without Node.js.",
 };
 
 const Layout = async ({ children }: LayoutProps<"/[lang]">) => {

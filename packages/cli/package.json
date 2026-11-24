@@ -1,7 +1,7 @@
 {
   "name": "@native-sdk/cli",
   "version": "0.20.0",
-  "description": "Native apps from HTML, CSS and TypeScript, compiled ahead of time to machine code",
+  "description": "HTML, CSS and TypeScript compiled into native apps, without Node.js",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
