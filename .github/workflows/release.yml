@@ -130,7 +130,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/cli-package"
-          tar -xzf "$RUNNER_TEMP"/pack/*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
+          tar -xzf "$RUNNER_TEMP"/pack/native-sdk-cli-*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
 
       - name: Build the dev host into its package
         if: steps.libnode.outputs.supported == 'true'
