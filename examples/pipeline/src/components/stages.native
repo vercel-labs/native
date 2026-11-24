@@ -1,5 +1,0 @@
-<template name="stages" args="active">
-  <stepper active="{active}" key="stages" label="Release stages">
-    <slot />
-  </stepper>
-</template>

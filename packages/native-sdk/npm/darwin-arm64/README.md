@@ -1,3 +1,0 @@
-# @native-sdk/cli-darwin-arm64
-
-The prebuilt `native` binary for macOS on Apple silicon (arm64). Installed automatically as an optional dependency of [`@native-sdk/cli`](https://www.npmjs.com/package/@native-sdk/cli) — install that package instead of this one.

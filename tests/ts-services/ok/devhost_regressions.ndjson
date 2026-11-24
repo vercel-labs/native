@@ -1,7 +1,0 @@
-{"settle":true}
-{"command":"service.duplicate-parse"}
-{"settle":true}
-{"command":"service.unkeyed-parse"}
-{"settle":true}
-{"command":"service.duplicate-stream"}
-{"settle":true}

@@ -1,8 +1,0 @@
-{
-  "title": "Bridge",
-  "defaultOpen": true,
-  "pages": [
-    "index",
-    "builtin-commands"
-  ]
-}
