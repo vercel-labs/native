@@ -130,7 +130,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/cli-package"
-          tar -xzf "$RUNNER_TEMP"/pack/native-sdk-cli-*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
+          # Unpack from the pack directory with a relative name: a Windows runner's RUNNER_TEMP
+          # starts with a drive letter, which GNU tar reads as a remote host ("Cannot connect to
+          # D: resolve failed").
+          cd "$RUNNER_TEMP/pack"
+          tar -xzf native-sdk-cli-*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
 
       - name: Build the dev host into its package
         if: steps.libnode.outputs.supported == 'true'
@@ -146,9 +150,14 @@ jobs:
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
         run: |
-          tarball=$(ls "$RUNNER_TEMP"/packages/*.tgz)
-          tar -tzf "$tarball" | grep -q -x -e 'package/host' -e 'package/host.exe'
-          tar -tzf "$tarball" | grep -q -x 'package/host.json'
+          cd "$RUNNER_TEMP/packages"
+          tarball=$(ls *.tgz)
+          # List into a file first: `grep -q` stops at the first match, and with `pipefail` the
+          # SIGPIPE that gives tar then fails the step.
+          listing="$RUNNER_TEMP/package-files.txt"
+          tar -tzf "$tarball" > "$listing"
+          grep -q -x -e 'package/host' -e 'package/host.exe' "$listing"
+          grep -q -x 'package/host.json' "$listing"
 
       - uses: actions/upload-artifact@v4
         if: steps.libnode.outputs.supported == 'true'

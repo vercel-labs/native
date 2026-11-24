@@ -618,17 +618,19 @@ export async function ensureDevHost(log: (message: string) => void, options: Ens
     buildHostObjects(dir);
     const args = ["build", join(dir, "host.ts"), "--ffi", join(dir, "ffi.json"), "--optimization", "release",
                   "--define", nodeEnvDefine(true), "-o", executable];
-    // The compiler's LLVM helper fails without a reason now and then under load (SC3004); the
-    // same build compiles on a retry.
+    // The compiler's LLVM helper fails without a reason now and then under load: a SC3004, or a
+    // death that leaves the compiler with no exit status and no output (a helper the kernel
+    // killed, or a pipe the helper's death closed). The same build compiles on a retry.
     const compile = (): Promise<ScriptcResult> => {
       progress.beginScriptc();
       return runScriptc(args, { SCRIPTC_LIBNODE: pack.dir, SCRIPTC_TIMING: "1" },
                         (event) => progress.scriptc(event.phase));
     };
+    const crashed = (r: ScriptcResult): boolean => r.status === null || `${r.stdout}${r.stderr}`.includes("SC3004");
     let sc;
     try {
       sc = await compile();
-      for (let retry = 0; retry < 2 && `${sc.stdout}${sc.stderr}`.includes("SC3004"); retry++) sc = await compile();
+      for (let retry = 0; retry < 2 && crashed(sc); retry++) sc = await compile();
     } catch (err) {
       progress.fail();
       throw err;
@@ -638,7 +640,9 @@ export async function ensureDevHost(log: (message: string) => void, options: Ens
       progress.fail();
       if (said !== "") process.stderr.write(said + "\n");
       const first = said.split("\n").find((line) => /^\S+:\d+:\d+: error|^error\b|fatal/i.test(line)) ?? "";
-      const how = sc.error !== undefined ? sc.error.message : `exit ${sc.status}`;
+      const how = sc.error !== undefined ? sc.error.message
+        : sc.signal !== null && sc.signal !== undefined ? `killed by ${sc.signal}`
+        : `exit ${sc.status}`;
       throw new Error(`native: failed to build the dev host: ${how}${first === "" ? "" : " — " + first}`);
     }
     progress.finish();
