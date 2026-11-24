@@ -68,6 +68,17 @@ export function baselineOffset(el: Node): number {
  * when it has none: its own definite height, or the one its preferred aspect ratio gives it at a
  * definite width. `cbH` is the containing block the box's own percentage height resolves against.
  */
+/**
+ * The definite height a column-wrap container's flex lines are packed within: its own, or the
+ * maximum it takes when that is all it has (CSS Flexbox 9.9.1). NaN when neither is definite.
+ */
+function wrapBasis(el: Node, cbW: number, cbH: number): number {
+  const h = heightBasis(el, cbW, cbH);
+  if (!Number.isNaN(h)) return h;
+  const max = len(el, P.P_MAX_HEIGHT, cbH);
+  return Number.isNaN(max) ? NaN : max;
+}
+
 function heightBasis(el: Node, cbW: number, cbH: number): number {
   let h = specH(el, cbW, cbH);
   if (Number.isNaN(h) && aspectRatio(el) > 0) {
@@ -390,6 +401,31 @@ function contentMaxWidthInner(el: Node, cbW: number, cbH: number = NaN, ownH: nu
     content = tableRunsWidth(el, cbW, false);
   } else if (!isFlexContainer(el) && hasInlineContent(el)) {
     content = hasBlockLevelChild(el) ? anonBlockWidth(el, cbW, basis, false) : inlineMaxContent(el, cbW, basis);
+  } else if (isFlexContainer(el) && !isRowDirection(el.sv[P.P_FLEX_DIRECTION]) &&
+    el.sv[P.P_FLEX_WRAP] !== P.FW_NOWRAP && !isVerticalText(el) && !Number.isNaN(wrapBasis(el, cbW, basis)) && wrapBasis(el, cbW, basis) > 0) {
+    // A column-wrap container's max-content width is the sum of its flex lines' widths: the
+    // container's definite height decides how many items a line (column) takes, and a line is as
+    // wide as its widest item (CSS Flexbox 9.9.1). Items are visited in their paint order, so
+    // `order` decides which ones share a line.
+    const wrap = wrapBasis(el, cbW, basis);
+    const gapMain = zeroIfNaN(len(el, P.P_ROW_GAP, wrap));
+    const ordered = visibleChildren(el).slice().sort((a, b) => a.sv[P.P_ORDER] - b.sv[P.P_ORDER]);
+    let used = 0;
+    let colWidth = 0;
+    let sum = 0;
+    for (const k of ordered) {
+      const described = len(k, P.P_FLEX_BASIS, wrap);
+      const outerMain = (Number.isNaN(described) ? zeroIfNaN(specH(k, cbW, wrap)) : described) +
+        zeroIfNaN(len(k, P.P_MARGIN_TOP, wrap)) + zeroIfNaN(len(k, P.P_MARGIN_BOTTOM, wrap));
+      if (used > 0 && used + outerMain > wrap) {
+        sum += colWidth;
+        colWidth = 0;
+        used = 0;
+      }
+      colWidth = Math.max(colWidth, intrinsicMaxWidth(k, wrap, wrap) + marginH(k, 0));
+      used += outerMain + (used > 0 ? gapMain : 0);
+    }
+    content = sum + colWidth;
   } else {
     const kids = visibleChildren(el);
     const dir = el.sv[P.P_FLEX_DIRECTION];
@@ -404,9 +440,15 @@ function contentMaxWidthInner(el: Node, cbW: number, cbH: number = NaN, ownH: nu
     for (let i = 0; i < kids.length; i++) {
       // A child's percentage margins resolve against this box's own width, which is what is being
       // measured: they are cyclic, and a cyclic percentage resolves against zero here.
-      const outer = (row ? rowItemWidth(el, kids[i], cbW, basis, false) : intrinsicMaxWidth(kids[i], cbW, basis)) + marginH(kids[i], 0);
-      if (row) content += outer + (i > 0 ? zeroIfNaN(len(el, P.P_COLUMN_GAP, cbW)) : 0);
-      else if (isFloat(kids[i])) {
+      let outer = (row ? rowItemWidth(el, kids[i], cbW, basis, false) : intrinsicMaxWidth(kids[i], cbW, basis)) + marginH(kids[i], 0);
+      if (row) {
+        // A definite flex-basis is the item's max-content contribution, never below what its
+        // content cannot break: the basis replaces the content's own preferred size (CSS Flexbox
+        // 9.9.1). Only an auto basis contributes the content's max-content size.
+        const base = len(kids[i], P.P_FLEX_BASIS, cbW);
+        if (!Number.isNaN(base)) outer = Math.max(intrinsicMinWidth(kids[i], cbW, basis), base) + marginH(kids[i], 0);
+        content += outer + (i > 0 ? zeroIfNaN(len(el, P.P_COLUMN_GAP, cbW)) : 0);
+      } else if (isFloat(kids[i])) {
         const clear = kids[i].sv[P.P_CLEAR];
         const side = kids[i].sv[P.P_FLOAT];
         if ((clear === P.CL_LEFT && leftFloat) || (clear === P.CL_RIGHT && rightFloat) ||
@@ -543,9 +585,18 @@ function contentMinWidthInner(el: Node, cbW: number, allowRatio = true, cbH: num
     const kids = visibleChildren(el);
     const row = isFlexContainer(el) && isRowDirection(el.sv[P.P_FLEX_DIRECTION]);
     for (let i = 0; i < kids.length; i++) {
-      const outer = (row ? rowItemWidth(el, kids[i], cbW, basis, true) : intrinsicMinWidth(kids[i], cbW, basis)) + marginH(kids[i], 0);
-      if (row) content += outer + (i > 0 ? zeroIfNaN(len(el, P.P_COLUMN_GAP, cbW)) : 0);
-      else content = Math.max(content, outer);
+      let outer = (row ? rowItemWidth(el, kids[i], cbW, basis, true) : intrinsicMinWidth(kids[i], cbW, basis)) + marginH(kids[i], 0);
+      if (row) {
+        // A definite flex-basis bounds what an item can contribute to the container's min-content
+        // width: an item that can't shrink is at least its basis, and one that can't grow is at
+        // most it (CSS Flexbox 9.9.1) — a 200px-wide child inside `flex: 0 1 100px` gives 100px.
+        const base = len(kids[i], P.P_FLEX_BASIS, cbW);
+        if (!Number.isNaN(base)) {
+          if (kids[i].sv[P.P_FLEX_SHRINK] === 0) outer = Math.max(outer, base + marginH(kids[i], 0));
+          else if (kids[i].sv[P.P_FLEX_GROW] === 0) outer = base + marginH(kids[i], 0);
+        }
+        content += outer + (i > 0 ? zeroIfNaN(len(el, P.P_COLUMN_GAP, cbW)) : 0);
+      } else content = Math.max(content, outer);
     }
   }
   const w = clampW(el, content + padH(el, cbW), cbW);
