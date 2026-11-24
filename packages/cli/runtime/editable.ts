@@ -210,6 +210,64 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
   return true;
 }
 
+/** One character before a text offset; a surrogate pair moves as one. */
+function previousChar(text: string, at: number): number {
+  if (at <= 0) return 0;
+  const low = text.charCodeAt(at - 1);
+  if (at >= 2 && low >= 0xdc00 && low <= 0xdfff) return at - 2;
+  return at - 1;
+}
+
+function nextChar(text: string, at: number): number {
+  if (at >= text.length) return text.length;
+  const high = text.charCodeAt(at);
+  if (high >= 0xd800 && high <= 0xdbff && at + 1 < text.length) return at + 2;
+  return at + 1;
+}
+
+export type CaretMove = "left" | "right" | "home" | "end";
+
+/**
+ * Moves the caret in an editing host, or extends the selection with Shift held. Returns false
+ * when the caret is already at that edge.
+ */
+export function moveCaretIn(host: Element, where: CaretMove, extend: boolean): boolean {
+  const sel = document.getSelection();
+  if (sel === null) return false;
+  const range = selectionIn(host);
+  if (range === null) return false;
+  const total = textNodes(host).reduce((n: number, t: Text) => n + t.data.length, 0);
+  if (!extend && !range.collapsed) {
+    // A plain arrow collapses the selection to the edge it points at.
+    const at = where === "left" || where === "home" ? offsetOfPoint(host, range.startContainer, range.startOffset)
+      : offsetOfPoint(host, range.endContainer, range.endOffset);
+    const point = pointAtOffset(host, at);
+    if (point !== null) selectPoint(point); else sel.collapse(host, 0);
+    invalidatePaint();
+    return true;
+  }
+  const focusAt = offsetOfPoint(host, range.endContainer, range.endOffset);
+  let to: number;
+  if (where === "home") to = 0;
+  else if (where === "end") to = total;
+  else {
+    const text = textNodes(host).map((t: Text) => t.data).join("");
+    to = where === "left" ? previousChar(text, focusAt) : nextChar(text, focusAt);
+  }
+  if (to === focusAt) return false;
+  const point = pointAtOffset(host, to);
+  if (point === null) return false;
+  if (extend) {
+    const anchor = sel.anchorNode;
+    if (anchor !== null) sel.setBaseAndExtent(anchor, sel.anchorOffset, point.node, point.offset);
+    else sel.collapse(point.node, point.offset);
+  } else {
+    selectPoint(point);
+  }
+  invalidatePaint();
+  return true;
+}
+
 /** Selects the whole host, as Cmd+A does in a focused editing host. */
 export function selectHost(host: Element): void {
   const total = textNodes(host).reduce((n: number, t: Text) => n + t.data.length, 0);
