@@ -1,0 +1,9 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "typecheck": {
+      "inputs": ["scripts/**", "compiler/**", "shared/**", "runtime/**", "tests/**/*.ts", "tsconfig.json", "$TURBO_ROOT$/tsconfig.base.json"]
+    }
+  }
+}

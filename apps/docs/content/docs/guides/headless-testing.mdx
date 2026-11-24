@@ -1,0 +1,88 @@
+---
+title: "Headless testing"
+description: "Drive an app with scripted input and save a screenshot."
+---
+
+An app built by `native` can run without a window. Set `NATIVE_STEPS` to a list of steps, separated by `|`, and the app runs them through the same pointer and keyboard paths as real input.
+
+```console
+$ NATIVE_STEPS='click #new | type Buy milk | key Enter | hover .item | print #left' \
+  NATIVE_SNAPSHOT=out.png ./build/todo
+1 item left
+```
+
+## Steps
+
+Pointer:
+
+- `click <selector>`: a press and release at the element's centre.
+- `clickat <x> <y> [Meta|Shift|Alt|Ctrl]`: a press and release at a viewport point, with the modifier keys.
+- `dblclick <selector>` and `tripleclick <selector>`: presses and releases with the click count a browser reports.
+- `hover <selector>`: moves the pointer to the element's centre, which sends the hover events and sets `:hover`.
+- `drag <selector> <dx> <dy>`: presses at the centre, moves by the offset in two steps, then releases.
+- `dragat <x0> <y0> <x1> <y1> [Meta|Shift|Alt|Ctrl]`: the same drag between viewport points.
+- `dropfiles <selector> <path>[,<path>…]`: files dragged in from outside the app and dropped on the element.
+- `wheel <selector> <dy> [dx]`: positive `dy` scrolls down and positive `dx` scrolls right.
+- `contextmenu <selector>`: the second button's press at the element's centre.
+
+Keyboard and text:
+
+- `type <text>`
+- `key [Meta+|Shift+|Alt+|Ctrl+]<Enter|Backspace|ArrowLeft|…|SelectAll|Copy|Cut|Paste>`
+- `keydown <key>`, `keyrepeat <key>` and `keyup <key>`: the three steps on their own, so a held key's repeat is a `keyrepeat` with `repeat` true.
+- `compose <text>`, `commit <text>` and `cancelcompose`: an input method reports marked text, commits it, or abandons it.
+
+Reading the page:
+
+- `print <selector>`: an input's value, or the element's text.
+- `selected <selector>`: a select's chosen index and which of its options are chosen.
+- `selection <selector>`: a field's selection range.
+- `scrolltop <selector>` and `scrollleft <selector>`.
+- `title`: the window's title as the host has it.
+- `layout <incremental|full|verify>`: turns incremental layout on, off, or on with every frame checked.
+- `paintstats`: what the compositor drew.
+
+The window and the app:
+
+- `resize <width> <height>`
+- `focus`, `blur`, `hide`, `show`: the window becomes the key window, stops being it, is minimized, or comes back.
+- `menu`: the menu bar the page built, one item per line.
+- `menuclick <path>`: chooses an item by its path, such as `Edit/Copy`.
+- `message <id> <json>`: a message from the window with that id, as its `postMessage()` would deliver it.
+- `quit`: asks the app to quit, as ⌘Q does; `beforeunload` can keep it open.
+
+Animation and waiting:
+
+- `frame [ms]`: runs the animation callbacks queued for the next frame, with that timestamp.
+- `wait <ms>`: pauses that long, letting the app's timers, promises and network requests finish.
+
+Snapshots:
+
+- `snapshotnow <path>`: writes the display list as the frames left it, without a full paint first.
+- `snapshotcomposited <path>`: the composited picture of that display list.
+
+Between steps the runner lets queued microtasks and timers settle, so a renderer that batches its updates, as Preact does, is on screen before the next step. Work a renderer schedules for the next animation frame, such as Preact's `useEffect`, runs on the next `frame` step.
+
+A snapshot is taken after the last step. `requestAnimationFrame` callbacks only run on a `frame` step, so an app that draws from its frame loop, such as a canvas or an animation, needs one or more before the snapshot:
+
+```console
+$ NATIVE_STEPS='frame 0 | frame 800' NATIVE_SNAPSHOT=out.png ./build/animation
+```
+
+`pnpm test` builds the examples and checks scripted flows this way.
+
+## Without a snapshot
+
+`NATIVE_SNAPSHOT` is optional. With `NATIVE_STEPS` alone the app still runs the steps headlessly, prints what they print, and exits with status 0 after the last one. A CI job that only checks output doesn't leave a window up.
+
+## Environment variables
+
+- `NATIVE_STEPS`: the steps to run.
+- `NATIVE_SNAPSHOT`: the PNG file to write after the last step.
+- `NATIVE_PASTEBOARD`: a file that holds the run's clipboard instead of the system pasteboard. A copy writes it and a paste reads it, so a headless test never touches the user's clipboard and two runs at once don't race.
+- `NATIVE_TARGET_TEXT`: opens the app with a text fragment, the value a URL's `#:~:text=` carries (`[prefix-,]start[,end][,-suffix]`, with percent escapes decoded). The first match, ASCII case-insensitively, paints as `::target-text` says: its `background-color` and `color`, or the browser's pale yellow when the page gives no rule.
+- `NATIVE_STORAGE`: points `localStorage` at another file.
+- `NATIVE_REDUCED_MOTION`: pins the reduced-motion preference.
+- `NATIVE_MEDIA`: set to `print` to make `@media print` and `matchMedia("print")` match.
+
+The [CLI reference](/reference/cli) covers the commands that build and run an app.

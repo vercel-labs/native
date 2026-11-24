@@ -1,0 +1,195 @@
+---
+title: "Supported DOM"
+description: "The DOM, selection, scrolling, observers and element APIs that the runtime provides."
+---
+
+## DOM
+
+Nodes are real: `Node` is the base class, `Element`/`HTMLElement` (with `HTMLInputElement` and `HTMLCanvasElement`) inherit from it,
+and `Text`, `Comment`, `DocumentFragment` and `Document` are nodes of their own, so `instanceof` and `nodeType` (`1`,
+`3`, `8`, `9`, `11`) answer as on the web. Text in the markup is a text node (a `#text` child with `data`),
+editing `data` or `textContent` restyles and repaints, and generated boxes stay out of the tree. Every node has `nodeName`,
+`nodeValue`, `parentNode`, `parentElement`, `childNodes`, `firstChild`/`lastChild`/`nextSibling`/`previousSibling`,
+`ownerDocument` and `textContent`, and `compareDocumentPosition` answers where another node sits — preceding,
+following, containing, contained by — or that the two are in different trees, as the DOM's bitmask has it;
+elements add `children`, `firstElementChild`/`lastElementChild`/`nextElementSibling`/`previousElementSibling`,
+`childElementCount`, `namespaceURI` and `localName`. `document` has `documentElement`, `body`, `title`,
+`activeElement`, `createElement`, `createElementNS`, `createTextNode`, `createComment`, `createDocumentFragment`,
+`createTreeWalker` (over a subtree, taking the node types `NodeFilter`'s `SHOW_*` flags name — all of them at
+first — and what a filter accepts, rejects, or skips: a function, or an object whose `acceptNode()` is;
+`TreeWalker` walks forward and back, and steps to a child, sibling or parent, from `currentNode`, which is where
+the walk left it. An element that still holds its content as its own text gives it the `#text` child a browser
+would have had before the walk reads its children), and `createNodeIterator` (the same nodes in document order,
+one at a time from a cursor that sits beside a reference node, so it keeps its place when a caller removes
+the node it was just given),
+`getElementById`, `querySelector`/`querySelectorAll` and the live `getElementsByTagName`,
+`getElementsByClassName` and `getElementsByName` lists (an `HTMLCollection` re-reads the tree as
+nodes, classes, ids and names come and go; it is an array subclass, so positional reads, `length`
+and iteration are the array's, and `Array.isArray` is true of it, which a browser's is not);
+`elementFromPoint` and `elementsFromPoint` answer where the pointer would land at a viewport
+point — the topmost element, or every element under it, topmost first — laying the page out first
+as a browser forces layout, and skipping a box the pointer can't reach (`pointer-events: none`,
+inert, `display: none`), an ancestor with no box under the point, and any point outside the
+viewport, even where a box overflows past its edge; on elements: `textContent`, `className`, `classList`,
+`id`, `hidden`, `get/set/remove/has/toggleAttribute`, `style`, `appendChild`, `append`, `prepend`, `insertBefore`,
+`replaceChild`, `removeChild`, `remove`, `replaceChildren`, `replaceWith`, `contains`, `closest`, `matches`,
+`focus`, `blur`, `click`. `style` is a `CSSStyleDeclaration`: `getPropertyValue`, `setProperty` and
+`removeProperty` take any name, and every property this build parses also has its camelCase accessor, on the
+declaration a style attribute gives and on the computed one `getComputedStyle` returns (`el.style.maxWidth`,
+`cs.pointerEvents`, `style.webkitUserSelect` for the prefixed spelling), so asking for a property this build
+doesn't parse is a type error at build time. Only `clear` has no accessor, since the name is the declaration's
+own `clear()`, which drops every declaration.
+A document fragment inserts its children when appended, as a browser does.
+`querySelector`/`querySelectorAll`/`matches`/`closest` take the same selectors as the style sheets do — combinators,
+selector lists (`a, b`), `:is()`/`:where()`/`:not()` (including a selector list inside `:not()`), attribute selectors
+with every operator and the `i` flag, the structural pseudo-classes and `:scope` — so the DOM and the cascade select
+the same elements; a pseudo-class or pseudo-element the runtime has no use for is valid and matches nothing, and an
+invalid selector throws a `SyntaxError` as a browser does. `getBoundingClientRect` and `getClientRects` answer in
+viewport coordinates: a box that has one reports its border box, an inline box reports a rect per run of its
+fragments — one per line it is broken across and one around each nested inline box, as tall as its font box plus its
+vertical padding and border, with its margins left out — and its bounding rect is the union of them, so an inline
+span has the height of its text rather than of its line. In a box that lays its content out down the page the rects
+are turned back onto the page with the line, so a column's rect is a page rect as tall as the text it holds.
+
+## Popovers and inert
+
+An element with the `popover` attribute draws only while it is open (the UA sheet's
+`[popover]:not(:popover-open) { display: none }`), `popover` reads `"auto"`, `"manual"` or null, and `showPopover()`,
+`hidePopover()` and `togglePopover()` fire `beforetoggle` (cancelable) and `toggle` with their `oldState` and `newState`,
+throwing `NotSupportedError` or `InvalidStateError` where the DOM does. A button or input with `popovertarget` toggles
+the element it names (`popoverTargetElement`, with `popoverTargetAction` for `show` and `hide`), a press outside an open
+auto popover or Escape closes it, and showing an auto popover closes the auto popovers already open. An open popover
+lives in the top layer (see [The top layer](#the-top-layer)) and draws above the page. `inert` takes the element's subtree
+out of the tab order and out of the pointer's reach.
+
+## Containment
+
+`contain` takes `none`, `strict`, `content` or any of `size`, `layout`, `style`
+and `paint` (a combination ORs them), plus the level-2 axis sizes `inline-size` and `block-size`, which contain
+one axis only. `size` makes the box ignore its contents for its own inline and block
+sizes — the same rule a size container follows — `layout` makes it a formatting-context root and a containing
+block for its out-of-flow descendants, `paint` clips its contents to its padding box, and `style` changes nothing
+here because `native` has no counters for it to scope.
+
+## Scroll markers
+
+`scroll-marker-group: before | after` on a scroll container generates its
+`::scroll-marker-group` box as a sibling just before or after the container, and each of the container's
+element children generates a `::scroll-marker` inside that group, styled by the child's own rule and drawing
+`content` (a bullet when the rule gives none) — a row of markers that tracks the children as they are added or
+removed. `:target-current` names the child whose top the scrollport starts at (and so its marker), following the
+container as it scrolls, and clicking a marker scrolls its child to the start of the scrollport. The scroll
+buttons (`::scroll-button()`) aren't there yet.
+
+## The top layer
+
+`showModal()` puts a dialog in the top layer: it paints above everything else, in the order the
+top-layer elements were shown (later ones on top), at its own place in the viewport rather than where it sits in the
+tree, and a `::backdrop` box fills the viewport under it with that pseudo-element's background (`rgba(0, 0, 0, 0.1)`
+from the UA sheet; only the background is painted, so a blur or an image there isn't). `close()`, a closed `open`
+attribute or `hidePopover()` takes the element back out, and it paints where it sits again. Light dismiss, Escape and
+the dialog's `close` event behave as above. A popover in the top layer takes Chrome's place for it — the UA sheet
+gives it `position: fixed`, `inset: 0`, a `fit-content` size in both axes and `margin: auto`, so it sits as big as
+its content wants, centred in the viewport, and an author's `left`/`top` combine with the auto margins Chrome's
+style leaves the other insets at.
+
+## Selection
+
+A drag over text with the pointer selects it (from where the press landed to the
+pointer), a double-click selects the word under the pointer and a triple-click the whole element,
+counted by the host's own click count (`MouseEvent.detail` says which), and
+`document.createRange()` and a `Selection` over one range — `setStart`/`setEnd`,
+`selectNodeContents`, `collapse`, `toString`, `commonAncestorContainer`, `collapsed`, and a range's
+`getClientRects`/`getBoundingClientRect` (one rect per line it spans, as wide as the characters that line holds);
+the selection's
+`addRange`/`removeAllRanges`/`collapse`/`extend`/`selectAllChildren`, its `anchorNode`/`focusNode`/
+`rangeCount`/`type`/`isCollapsed` readers, and `toString()`/`containsNode()` answer from the text the range
+covers, across element boundaries. The selected text paints the system's selection colour behind it (the host's
+`selectedTextBackgroundColor`, which follows the user's accent colour), Cmd+C fires a cancelable `copy` event and,
+unless it is handled, puts the selected text on the pasteboard, and a `::selection` rule's `background-color` and
+`color` paint the selected stretch, inheriting down the tree as a highlight does. Text-field selection is the
+field's own.
+
+## Value ranges
+
+`createValueRange(start, end)` on an `<input>` of type text, search, url, tel or password, or a
+`<textarea>`, makes an `OpaqueRange` (also an `AbstractRange`, as `Range` and `StaticRange` are) whose
+`startOffset`/`endOffset` are live offsets into the control's value rather than nodes: replacing the value or
+calling `setRangeText()` moves them as replace data moves a live DOM range's (writing the same text changes
+nothing), `disconnect()` or taking the control out of its document (an input changed to a type with no value
+text included) collapses it, and `getClientRects`/`getBoundingClientRect` give the boxes the covered text draws
+in, one per line (a collapsed range reports a caret box). Offsets past the value are an `IndexSizeError`, and an
+element with no value text is a `NotSupportedError`. A `Range` is live the same way through `replaceData()`
+(and `appendData`/`insertData`/`deleteData`, which it is built on).
+
+## Custom highlights
+
+The Custom Highlight API's data model — `new Highlight(...ranges)` with `add`, `delete`,
+`has`, `clear`, `size`, an integer `priority` and `type`, iterating over its ranges as a set does (a text node
+stands for a range over all of its text) — and `CSS.highlights`, the registry keyed by name with
+`get`/`has`/`set`/`delete`/`clear`/`size` and iteration over [name, highlight] pairs; a name that isn't a CSS
+custom-ident throws, as the API says. A `::highlight(name)` rule paints the ranges registered under that
+name: its `background-color` behind them and its `color` on their glyphs, highest `priority` on top, the style
+inherited down the tree as Chrome's is, and the selection's own highlight painting over them.
+
+## Text fragments
+
+An app opened with a text fragment (`NATIVE_TARGET_TEXT`, described in [Headless testing](/guides/headless-testing)) paints the first match. The value is the one a URL's
+`#:~:text=` directive carries, `[prefix-,]start[,end][,-suffix]`, with percent escapes decoded. The first match, ASCII case-insensitively, paints where it falls: the page's `::target-text` rule gives the highlight's
+`background-color` and `color`, and without a rule it is the browser's pale yellow (`rgba(255, 255, 0, 0.4)`).
+A prefix or suffix the text doesn't have, or a start that isn't there, matches nothing, and the selection paints
+over the target's highlight.
+
+## Inputs
+
+`value`, `placeholder`, `type`, `select()`, `setSelectionRange`, and the usual macOS editing keys (⌥ moves by word, ⌘ by line, ⇧ extends the selection, ⌘A selects all, ⌘C copies the field's selection, ⌘V pastes), plus click and drag to select, Tab focus cycling, a blinking caret, Enter submitting the form the field is in, and Enter or Space on a focused button clicking it.
+
+## Selects
+
+A closed `<select>` draws its chosen option's label and opens the UA's own picker on a click the user makes, Enter, Space, Alt+↓ or an arrow key — a panel over the page with the options under their `optgroup` labels, the chosen one highlighted, and a list taller than the window scrolled to it. The arrows and Home/End move the highlight and type-ahead reaches an option by the letters it starts with, both moving the field to the option as Chrome's menulist does and sending `input` then `change`; a disabled option is passed over and painted grey; a click picks the row under the pointer; a wheel scrolls the rows; and Escape, Tab, Enter or Space closes the panel. A list box (`multiple`, or a `size` over one) keeps its rows in the page, chosen by a click or the arrows and extended with Shift.
+
+## Scrolling
+
+Trackpad and wheel scrolling of `overflow: auto` containers, and of the page itself, on both axes — a wheel's horizontal delta
+(`scrollWheel`'s `deltaX`) rolls a container or the page sideways, a vertical one scrolls it down, and each axis follows its own overflow:
+a wheel rolls only an axis that is `auto` or `scroll` (never `hidden` or `clip`), and the rest of the delta chains to the next scrollport up,
+as in a browser. The root element scrolls the viewport when its content overflows (with `overflow` propagating from the root,
+or the body when the root's is `visible`, so `hidden` on either stops it), a wheel that nothing inside took rolls the page,
+`window.scrollX`/`scrollY`, `scrollTo()` and `scrollBy()` move it, the `scroll` event fires on the document and then the window,
+`position: fixed` boxes stay put while it rolls, a macOS-style overlay scrollbar for the viewport and for containers (down the right edge,
+and along the bottom edge for horizontal scrolling, and only on the axes that can scroll), `document.scrollingElement`,
+and `scrollTop`, `scrollLeft`, `scrollHeight`, `scrollWidth`, `clientHeight`, `clientWidth`, `scrollIntoView()`,
+and the element's own `scroll()`, `scrollTo()` and `scrollBy()` (numbers or an options object),
+which lay the page out first, as a browser forces layout for a scroll, so a scroll made before the
+first frame or right after a change clamps against the box's real scroll extent.
+Script scrolls a `hidden` box as well as an `auto` one, but an axis that is `clip` or `visible` has nothing to scroll and keeps its offset at 0.
+`scroll-behavior: smooth` (inherited) makes a script's scroll travel instead of jump: `scrollTo()`, `scrollBy()`, `scroll()` and a
+`scrollTop`/`scrollLeft` assignment ease to the target over animation frames and fire `scroll` events as they move, while
+`behavior: "instant"` in the options jumps at once and `behavior: "auto"`, or no options, follows the box's computed value.
+The root's value reaches the viewport; a body's does not. A wheel stops a journey where it has got to.
+`scrollIntoView({block, inline, behavior})` lines the box up with `start`, `center`, `end` or `nearest` on each axis
+(the defaults are `start` and `nearest`), scrolling every container on the way to the viewport.
+A container clips everything it holds, relative and sticky descendants and all — only a box whose containing block is outside it,
+such as a fixed one or an absolutely positioned one anchored above it, escapes — and its scrollbar is drawn over that content rather than under it.
+A box's scrollable overflow is its content: a child box wider than it, a `nowrap` line or other inline content running past its content edge,
+and any absolutely positioned box, whose margin box reaches into every ancestor whose content box it passes. A descendant that scrolls or clips itself
+(`overflow` other than `visible` on either axis) ends there: its own overflow is its own, and it doesn't grow an ancestor's `scrollWidth`.
+That reach is measured past the content box, so a box's own padding is never scrollable overflow: `scrollWidth` is `clientWidth`
+plus how far the content goes past the content edge, and `scrollLeft` stops short there too.
+
+## IntersectionObserver
+
+`observe`, `unobserve`, `disconnect` and `takeRecords`, with `root` (the viewport when null),
+`rootMargin` (one to four px or % values) and `threshold` (a number or a list). After each frame's layout an entry
+arrives for a target that first became observed or whose ratio crossed a threshold, carrying `isIntersecting`,
+`intersectionRatio`, `boundingClientRect`, `intersectionRect` and `rootBounds`. A target is not reported as
+intersecting while its box is `display: none` or out of the document. The intersection is clipped by the root's box
+and margin only, not by the scroll containers in between.
+
+## Geometry
+
+`offsetParent`, `offsetLeft`, `offsetTop` and `ResizeObserver`. Offsets measure
+from the padding edge of the nearest positioned ancestor (a table or table cell counts), and a box with none measures
+from the initial containing block. A `ResizeObserver` callback runs in the next frame with the content box as
+`contentRect` and the border box as `borderBoxSize`, once for each observed element and again when a frame's size
+for it differs.

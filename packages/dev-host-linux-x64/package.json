@@ -1,0 +1,33 @@
+{
+  "name": "@native-sdk/dev-host-linux-x64",
+  "version": "0.20.0",
+  "description": "Prebuilt native dev host for Linux x64 (glibc), used by @native-sdk/cli's `native dev`",
+  "license": "Apache-2.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "host",
+    "host.exe",
+    "host.json",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:native": "node ../cli/scripts/prebuilt-dev-host.ts . --force"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/native.git",
+    "directory": "packages/dev-host-linux-x64"
+  },
+  "homepage": "https://github.com/vercel-labs/native/tree/next/packages/dev-host-linux-x64",
+  "publishConfig": {
+    "access": "public"
+  }
+}

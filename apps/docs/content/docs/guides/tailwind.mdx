@@ -1,0 +1,75 @@
+---
+title: "Tailwind CSS"
+description: "Generate a Tailwind stylesheet for a Native SDK app with the Tailwind CLI."
+---
+
+Tailwind CSS is a stylesheet compiler, and Native SDK builds a page from the stylesheets the page links. So a Tailwind app has two steps: Tailwind turns its input into a CSS file, and `native` compiles the page with that file linked like any other stylesheet.
+
+## Install
+
+```console
+$ npm install --save-dev tailwindcss @tailwindcss/cli
+```
+
+Tailwind 4 is the version this guide uses. It finds the classes your page and scripts use by reading the files around its input, so nothing needs a config file to get started.
+
+## Write the input
+
+`src/input.css`:
+
+```css
+@import "tailwindcss";
+```
+
+`index.html` links the generated file, not the input:
+
+```html
+<!doctype html>
+<html>
+  <head>
+    <title>Haven</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body class="bg-neutral-950 text-neutral-100">
+    <main class="grid gap-6 p-8">
+      <h1 class="text-3xl font-semibold">Rooms</h1>
+      <button class="rounded-lg bg-indigo-600 px-4 py-2 hover:bg-indigo-500">Add room</button>
+    </main>
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>
+```
+
+## Generate the stylesheet
+
+```console
+$ npx @tailwindcss/cli -i src/input.css -o style.css
+```
+
+While you work, add `--watch` and leave it running. A `package.json` script keeps both steps together:
+
+```json
+{
+  "scripts": {
+    "css": "tailwindcss -i src/input.css -o style.css",
+    "css:watch": "tailwindcss -i src/input.css -o style.css --watch",
+    "build": "npm run css && native build . -o build/app",
+    "dev": "npm run css && native dev ."
+  }
+}
+```
+
+The build reads `style.css` as the page's own file, so it has to be written before `native build` runs — the `build` script above does that. `native check` and `native build` also work on the generated file on their own, since it is plain CSS by then.
+
+## Diagnostics
+
+Tailwind 4's preflight carries vendor-prefixed selectors and properties that Native SDK doesn't support — `::-webkit-datetime-edit-*`, `::-moz-focus-inner`, `-webkit-font-smoothing` and the like. They are part of the reset for browser quirks an app here doesn't have, so the build skips them and reports them once:
+
+```console
+$ native check .
+style.css:12:1: warning: 14 vendor-prefixed selectors are not supported yet; skipped: ::-webkit-datetime-edit, … and 8 more
+```
+
+Anything else it reports is about a class your page uses. A utility that needs a property this build doesn't have shows up under its own class, which is what to work around or replace.
+
+Rerun the Tailwind command after editing a class in the page or a script: the generated file holds only the utilities that were in use when it last ran.

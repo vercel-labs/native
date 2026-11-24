@@ -1,0 +1,110 @@
+---
+title: "CLI reference"
+description: "Commands, options and environment variables for the native CLI."
+---
+
+Run the CLI as `npx @native-sdk/cli <command>`, from a `package.json` script (the package installs the `native` command), or from a checkout of the repository as `node packages/cli/compiler/cli.ts <command>`.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `build <dir> [-o out]` | Compile an app to a self-contained app bundle. |
+| `run <dir>` | Build the app, then run it. |
+| `dev <dir> [-o out]` | Watch the app and apply edits as they are saved. |
+| `check <dir>` | Report diagnostics without building. |
+| `wpt <fetch\|run>` | Fetch and run web-platform-tests. See [Web platform tests](/reference/web-platform-tests). |
+
+`build` compiles the app's TypeScript with scriptc, whose frontend gets a JavaScript heap sized to the machine (most of its memory, up to 8 GB, unless `NODE_OPTIONS` already names `--max-old-space-size`), so a large app compiles without one.
+
+`build` takes its output path from `-o`, or uses the app directory's name inside it (`hello/hello`) without one. On macOS the executable and the app's files go inside `<out>.app`; elsewhere the executable is written at that path with its files beside it in `<out>.resources`. `dev` writes the executable to the path directly, without a bundle.
+
+```console
+$ npx @native-sdk/cli build hello -o build/hello
+$ ./build/hello
+```
+
+`run` builds the app and starts it in one step:
+
+```console
+$ npx @native-sdk/cli run hello
+```
+
+`dev` watches the app's directory. An HTML or CSS edit applies to the open window in place. A TypeScript edit rebuilds and relaunches it. See [Live editing](/guides/live-editing).
+
+A build compiles the whole runtime, so a large app can take minutes. It names the step it is in — resolving modules, compiling TypeScript, generating code, optimizing code, linking, packaging the app — and how long that step took. A terminal shows the current step live, with a spinner, its elapsed time, and an estimate from the last build of the same output. A pipe or CI log gets one line per step, so a long build still says where it is without redrawing the log. The one-time dev host build in `native dev` reports the same steps.
+
+`check` lists everything an app uses that isn't supported, without writing an executable:
+
+```console
+$ npx @native-sdk/cli check hello
+```
+
+## Bundles
+
+A built app carries the files it reads, so it keeps working when it is moved and its source is
+deleted. On macOS the build writes an app bundle: `hello.app/Contents/MacOS/hello` is the
+executable, `hello.app/Contents/Resources` holds the app's files, and an `Info.plist` makes it an
+app Finder can open; the path given with `-o` stays a way to run the app. On other platforms the
+executable is written at that path with a `<name>.resources` directory beside it.
+
+The files keep the layout they had in the app, so a page-relative URL names the same file at
+runtime: images (`<img src>`, `srcset` candidates, CSS `url()`, inline styles and `data:` URLs),
+`@font-face` files, linked and imported style sheets, `.svg` images, and the files a script names
+with a literal `fetch()` or imports as a non-code file. The bundle also holds `.native/page.json`, the
+compiled page and style tables the runtime reads at startup: the executable carries none, so an
+edit to the markup or styles rewrites that one file and needs nothing compiled. `dev` keeps the
+source paths and copies nothing.
+
+## App identity
+
+Every bundled build names the app from its own page, the way a browser reads it. The name goes in the macOS app menu and `Info.plist`, together with the identifier and the version.
+
+- **Display name**: the web app manifest's `name` or `short_name`, then the page's `<title>`, then a `productName` (or the `name`, without its scope) in a `package.json` beside the page, then the app directory's name.
+- **Bundle identifier**: `NATIVE_APP_ID`, then the manifest's `id` when it is a valid identifier, then `dev.native-sdk.<name>` made from the display name.
+- **Version**: `NATIVE_APP_VERSION`, then the manifest's `version`, then `1.0.0`.
+
+```html
+<head>
+  <title>Tide</title>
+  <link rel="manifest" href="app.webmanifest">
+</head>
+```
+
+```json
+{ "name": "Tide", "short_name": "Tide", "id": "com.example.tide", "version": "1.2.0" }
+```
+
+A manifest's `icons` give the app's icon, and its `update_url` turns on the update check. A release build of a macOS app is also signed and packaged as a `.dmg`.
+
+## Environment variables
+
+- `NATIVE_STEPS`: headless steps to run, separated by `|`.
+- `NATIVE_SNAPSHOT`: PNG file to write after the last headless step.
+- `NATIVE_PASTEBOARD`: file that holds the run's clipboard.
+- `NATIVE_TARGET_TEXT`: text fragment that the app opens with.
+- `NATIVE_STORAGE`: file used for `localStorage`.
+- `NATIVE_REDUCED_MOTION`: pins the reduced-motion preference.
+- `NATIVE_MEDIA`: set to `print` to make `@media print` and `matchMedia("print")` match.
+- `NATIVE_APP_ID`: the bundle identifier, overriding the manifest's `id`.
+- `NATIVE_APP_VERSION`: the app version, overriding the manifest's `version`.
+- `NATIVE_SCRIPTC`: the `scriptc` executable a build should use, instead of the installed package. Set it to a path to build with a checkout or a build of the compiler itself.
+- `NATIVE_ANGLE_DIR`: the ANGLE build a Windows app's WebGL 2 uses, instead of the one in the `@native-sdk/angle-win32-x64` package. A build copies its `libEGL.dll`, `libGLESv2.dll` and `d3dcompiler_47.dll` into the app's resources.
+
+The [headless testing guide](/guides/headless-testing) describes the steps and the snapshot behavior.
+
+## Window options
+
+Set the window's size and titlebar in the page's `<head>` with `<meta name="native-window">`. See [Windows](/guides/windows) for every option and the drag regions.
+
+## JSX
+
+Apps may use `.tsx` and `.jsx` sources. The app's `tsconfig.json` sets the JSX mode. See [JSX](/guides/jsx).
+
+## Related pages
+
+- [How it works](/guides/how-it-works)
+- [Supported HTML](/reference/supported-html)
+- [Supported CSS](/reference/supported-css)
+- [Supported DOM](/reference/supported-dom)
+- [Web platform tests](/reference/web-platform-tests)

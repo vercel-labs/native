@@ -1,0 +1,27 @@
+{
+  "name": "native-monorepo",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "packageManager": "pnpm@11.28.12",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "test:examples": "turbo run test:examples --filter=@native-sdk/cli",
+    "wpt": "turbo run wpt --filter=@native-sdk/cli",
+    "postinstall": "node scripts/fix-native-modes.mjs"
+  },
+  "devDependencies": {
+    "turbo": "^2.6.0",
+    "typescript": "^5.8.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/native.git"
+  }
+}

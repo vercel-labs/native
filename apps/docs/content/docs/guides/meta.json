@@ -1,0 +1,11 @@
+{
+  "title": "Guides",
+  "pages": [
+    "how-it-works",
+    "live-editing",
+    "headless-testing",
+    "windows",
+    "tailwind",
+    "jsx"
+  ]
+}

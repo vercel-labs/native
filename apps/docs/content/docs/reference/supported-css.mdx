@@ -1,0 +1,430 @@
+---
+title: "Supported CSS"
+description: "The CSS properties, values, at-rules and layout features that the native CLI compiles."
+---
+
+## Layout and box model
+
+`display` takes `block`, `flex`, `inline`, `inline-block`, `inline-flex`, `grid`, `inline-grid`, `list-item` and `none`. It also takes `flow-root` (a block box with a block formatting context of its own), `contents` (the box isn't generated and the children take its place in the parent's flow), the two-keyword forms such as `inline flex` and `block grid`, the vendor aliases `-webkit-flex`/`-webkit-inline-flex`, and the table values below.
+flex (direction with `row-reverse` and `column-reverse`, `flex-wrap`/`flex-flow` with multiple lines and `align-content`,
+justify, align-items/self, `order`, gap, grow/shrink/basis, `flex`, auto margins that take the free space before justify-content),
+box model (`margin` incl. `auto`, `padding`, `border`, `box-sizing`, width/height/min/max), and the logical forms
+`margin-inline`/`margin-block`, `padding-inline`/`padding-block` and `inset-inline`/`inset-block` (each with one value
+for both sides or a start and an end one) plus their `-start`/`-end` longhands, and `border-inline`/`border-block` with
+their `-start`/`-end` and `-width`/`-style`/`-color` forms, all mapped to left/right and top/bottom as a horizontal,
+left-to-right page has them, with vertical margins collapsing between siblings,
+escaping the top and bottom of a parent that has no border or padding there, collapsing through empty blocks,
+and combining negatives as the largest positive plus the most negative, replaced elements (an `<img>` is sized from its intrinsic size,
+`width`/`height` attributes act as presentational hints that author CSS overrides, an `auto` dimension follows the intrinsic ratio,
+and min/max widths and heights clamp with the ratio carried over; an inline image sits on the baseline with its bottom margin edge, and a missing or undecodable image has no intrinsic size and draws nothing.
+
+
+## Borders, backgrounds, and effects
+
+Borders per side: `border`,
+`border-top/right/bottom/left`, and the `-width`, `-color` and `-style` longhands, with each side its own width and color;
+`currentColor` is the text color; borders are drawn snapped to whole pixels, and a fractional width is floored to the device pixels it covers as browsers do,
+so a 1.9px border is 1px wide; `border-style` draws `solid`, `dashed` (dashes three widths long, one width apart),
+`dotted` (dots one width across, one width apart), `double` (two lines a third of the width), `groove`,
+`ridge`, `inset` and `outset` (shaded toward white and black from the border color), with each side keeping its own style and cut to the quadrilateral between the border box and the padding box,
+so neighbouring sides split a corner along the miter and a zero-size box draws triangles (each side runs the full length of its edge into both corners, so a double line,
+a side's first dash and a dot at the corner reach as far as the miter lets them); a rounded corner is the ring between the outer and inner rounded rect,
+and a border whose four sides agree in width, color and style is drawn as whole rings or whole runs of dashes, so its corners have no seam,
+with a dashed or dotted border's corner arcs drawn whole on a rounded box, a double border drawn as two rings and the 3D styles shading the ring's outer and inner halves.
+
+### Border images
+
+`border-image` (the shorthand and its `-source`, `-slice`, `-width`, `-outset` and `-repeat` longhands: a raster file, an SVG
+or a gradient source cut into nine slices, drawn into four corner boxes and four side bands that stretch or tile
+(`repeat` centres the tiles on the band and clips the ends, `round` rescales them to a whole number, `space`
+spreads them with equal gaps), with the middle painted only by `fill` and tiled by the same keywords;
+the bands are as wide as the borders (the initial width is `1`) unless `-width` changes them,
+in border widths, lengths or percentages, or `auto`
+makes each band the natural size of its slice, and `-outset` pushes the picture out past the border box;
+a border image replaces the border styles and is not cut by a rounded corner).
+
+### Images and overflow
+
+`visibility` (`visible`, `hidden`, `collapse`, inherited: a hidden box keeps its room in the layout but paints nothing
+of itself and takes no pointer event, while a descendant that says `visible` shows again inside it; `collapse`
+behaves as `hidden` everywhere for now), `object-fit` (`fill`, `contain`, `cover`, `none`, `scale-down`) and `object-position` (the `<position>` keywords,
+percentages and lengths, including the four-value `right 10px bottom 20%` form), which fit the image into the content box and are clipped to it,
+`image-rendering: pixelated`/`crisp-edges` (the host scales the image with nearest-neighbour sampling instead of interpolating it),
+and `image-orientation` (inherited, `from-image` by default; `none` leaves an image's EXIF rotation unapplied),
+`overflow` (`hidden`/`auto`/`scroll`/`clip`, as the shorthand's one- or two-keyword form and as the `overflow-x`
+and `overflow-y` longhands, so one axis can scroll while the other clips or shows; only an axis left `visible`
+beside one that scrolls computes to `auto`, as CSS Overflow 3 says, and `clip` beside a scrolling axis stays `clip`,
+a box that scrolls one axis and clips the other having no scrollable value on the clipped one; `img`, `canvas` and `svg` default to `clip`,
+so an image is painted inside its content box unless CSS gives it `overflow: visible`),
+`overflow-clip-margin` (the clip a `clip` axis cuts content at is its padding box, grown by this margin on that axis
+and measured from the `content-box`, `padding-box` or `border-box` the value names; the clip edge's rounded corners grow
+with the margin, and hit testing follows it; a negative margin shrinks the clip).
+
+### Positioning
+
+`position` takes `relative`,
+`sticky`, `absolute` and `fixed`, with `top`/`right`/`bottom`/`left`; a sticky box stays in the flow and shifts inside the scrollport of its nearest scroll container,
+or the viewport's for the page, to keep its own insets until its containing block's content box stops it, and paint, hit testing and `getBoundingClientRect()` report it where it has shifted to;
+an out-of-flow box is taken out of the flow and blockified,
+its containing block is the padding box of the nearest positioned ancestor, or of a transformed ancestor — the viewport for `fixed` and when there is none, and for the root element itself, whose own `absolute` or `fixed` insets then size and place the whole page — a positioned inline ancestor gives the box its fragments generate,
+so a split inline's box is the union of its fragments — an `auto` offset falls back to where the box would have gone in the flow,
+and an `auto` width shrinks to fit in the room from there to the containing block's end), `z-index` (positioned boxes paint above in-flow content, negative ones below it,
+sorted by z-index within their stacking context, and clicks are routed in the same order — and a box that is a stacking
+context without being positioned, one with `opacity` below 1 or a transform, paints in the z-index: 0 layer above the
+in-flow content of its context, as CSS 2.1 Appendix E orders it, floats included (a plain inline box keeps its place among
+the runs of its line); `position: relative` also gives elements an offset parent).
+
+### Units and math
+
+The supported units are px, %, em, rem, vw, vh and lh (the element's used line height), and the absolute in, cm, mm, q, pt and pc (96px to the inch). The `inset` shorthand (`inset: 10px 20px`) sets the four offsets.
+lengths inside `calc()`, `max()`, `min()` and `clamp()` (an expression whose units agree is folded at build time,
+so `calc(10px * 1.5)` and `calc(2px + 3px)` are plain lengths; one that mixes units, such as `calc(50% - 10px)` or `calc(1em + 4px)`,
+is kept as an expression and worked out when the value is used, against the same percentage base the property would use, the element's own font size for an em, the root's for a rem and the element's used line height for an lh (a value the layout reads straight from the computed style,
+such as a border width, is worked out as the style is computed), and a `calc()` may nest the other functions,
+as in `calc(min(50%, 100px) + 5px)`; a `calc()` may follow a `var()`, e.g. `border-radius: calc(var(--r) * 1.5)`;
+each argument of `max()`/`min()`/`clamp()` keeps its own unit, so `max(24px, 4vw)` grows with the window,
+and the result is `auto` when the base is indefinite; `calc(infinity * 1px)`, which Tailwind's `rounded-full` writes,
+means the largest length that fits, so a corner takes the largest radius its box allows; a length inside a media query is a plain number and unit,
+not an expression). `env(safe-area-inset-top/right/bottom/left)` is zero on macOS.
+
+### Media queries
+
+`@media` supports the `width` and `height` features (the colon form with `min-`/`max-` prefixes, and the range
+form `(600px <= width < 800px)` with `<`, `<=`, `>`, `>=` and `=`), `aspect-ratio`, `orientation`, `resolution`
+(dppx/dpi/dpcm), `hover`/`any-hover` (hover), `pointer`/`any-pointer` (fine), `prefers-color-scheme` (the macOS
+appearance, following a change while the app runs), `prefers-contrast`, `prefers-reduced-transparency`,
+`prefers-reduced-motion`, `forced-colors` (none), `color-gamut` (srgb), `scripting`, `update`, `display-mode` and the
+boolean form of any of them, joined by `and` and `or` with parentheses, comma lists, `not`, `only` and the `screen`/`all`
+(and never `print`) types, re-evaluated when the window is resized or a system setting changes (a length there is px, the
+absolute units, em or rem — both the initial 16px font size, as a media query has no element — ch (the initial font's "0"),
+the viewport units, or a `calc()`, `min()`, `max()` or `clamp()` of them).
+
+### Container queries
+
+`@container` takes a size query — `(width)`, `(height)`, `(inline-size)`, `(block-size)`,
+`(aspect-ratio)` and `(orientation: landscape/portrait)`, with `min-`/`max-` prefixes, the colon form, the `<`, `<=`, `>`, `>=` and `=` operators
+and the range form `400px < width < 800px`, and `and`, `or` and `not` combining them, and a top-level comma list standing for `or` — tested against the nearest ancestor
+whose `container-type` measures the axis the query reads (`size` for both axes, `inline-size` only for the inline one), and a query that names
+a container finds only one with that `container-name`; a query with no such ancestor doesn't apply, even under `not`. `container-type`,
+`container-name` (a space-separated list) and the `container` shorthand (`<name> [ / <type> ]`) set that up; a container applies
+style containment and size containment (inline-size containment for `inline-size`, so its content sizes neither its intrinsic width nor,
+for `size`, its auto height), and answers `style(--x: value)` queries with its computed custom property. The `cqw`/`cqh`/`cqi`/`cqb`/`cqmin`/`cqmax`
+units measure the nearest container (its content box; the viewport when there is none, or for the block axis of an inline-size container),
+on their own or inside a `calc()`/`min()`/`max()` of them, in a transform (`translate`, `transform-origin`), a `box-shadow`
+or `text-shadow` length, an `object-position`, a grid track, `overflow-clip-margin`, a background layer's size and position, and a colour
+stop or position of a gradient,
+and a query whose answer changes layout is re-evaluated after layout until the size it read is the size layout made;
+`@container` rules nested in a runtime `<style>` re-evaluate as a sheet is refreshed, as `@media` ones do. `clip: rect(top, right, bottom, left)` applies to an absolutely positioned box (a side may be `auto`).
+
+### Backgrounds
+
+`background-color`; `background-image` with local image files (`url()` is resolved at build time next to the page,
+or against the site root for a URL starting with `/`, and the host decodes it with ImageIO — PNG, JPEG,
+GIF and the other formats it reads; the file is copied into the app's bundle),
+or with `linear-gradient()`, `radial-gradient()` and `conic-gradient()` (a direction as an angle in deg/grad/rad/turn, or a `calc()` of angles, or as `to <corner>`,
+whose angle follows the box's shape; colour stops with percentages, lengths and em, a stop with two positions for a hard band,
+and the CSS stop fixup for missing, out-of-range or out-of-order ones; radial sizes as a circle or ellipse with explicit radii or `closest`/`farthest` `side`/`corner`;
+a conic turn with `from <angle>` and `at <position>`, whose stops are percentages or angles of the turn;
+a colour hint — a bare position between two stops — in any of the three, bending the mix so the two stops are half mixed where it sits;
+`background-color` (`color(srgb …)`, `color(display-p3 …)`, `color(a98-rgb …)`, `color(prophoto-rgb …)`,
+`color(rec2020 …)`, `color(xyz …)`, `color(xyz-d50 …)`, `color(xyz-d65 …)` and `color(srgb-linear …)`,
+each converted to sRGB the way a browser draws it on an sRGB surface — the channels clamped, the space's
+gamma undone, through XYZ to linear sRGB, then clipped); `background-image` with local image files `repeating-linear-gradient()`,
+`repeating-radial-gradient()` and `repeating-conic-gradient()` tile their stops along the line or round the turn,
+and a period too short for the stop budget fades to its average colour; stops mix in premultiplied alpha as CSS does,
+and the host draws the stops with CoreGraphics in sRGB), a comma-separated list of layers painted bottom-most first with `background-repeat` (`repeat`,
+`no-repeat`, `repeat-x`, `repeat-y`, and `space`/`round`, which spread the left-over room between the tiles
+or stretch them so a whole number of them fills the positioning area), `background-position`
+(keywords, percentages, lengths, and the four-value `right 10px bottom 20%` form),
+`background-size` (`auto`, lengths, percentages, `cover`, `contain`), `background-origin` and `background-clip` (`border-box`,
+`padding-box`, `content-box`, with the inner curve of a rounded corner following the outer one), `background-attachment` (`scroll`,
+`fixed` to position and size the layer against the viewport and hold it there while the page scrolls,
+though it is still only visible inside the element's own box, or `local` to position it against the element's contents, so the layer
+rides along as the element scrolls), the `background` shorthand for colours and images (`background: #0f0 url(x.png) no-repeat right 10px / 20px 30px padding-box`;
+the shorthand resets every background longhand, as it does in a browser), with a background on `<html>`,
+or on `<body>` when the root has neither a colour nor an image, painting the whole canvas but
+sized and positioned against the root's box.
+
+### Masks and clipping
+
+A mask on a box keeps that much of its paint as the mask image's alpha has: `mask-image` (`none`,
+a gradient or a local image file), with `mask-repeat`, `mask-position`, `mask-size`, `mask-origin` and `mask-clip`
+placing and clipping it the way their background counterparts do (a mask sits in the middle of its border box
+and repeats by default), and the `mask` shorthand resetting every mask longhand,
+`clip-path` (a basic shape — `inset()` with its corner radii, `circle()`, `ellipse()`, `polygon()`
+and `path()` — measured against the border, padding or content box, or `url(#id)` naming a
+`<clipPath>` in the page whose shapes are drawn in its own user space or in the reference box's
+unit square, with its `clip-rule`).
+
+### Rounded corners and shadows
+
+`border-radius` takes a radius for each corner,
+with the `border-top-left-radius` and other longhands taking one value or two for an elliptical curve,
+and the shorthand taking 1–4 values with an optional `/` between the horizontal and vertical radii; a percentage is taken against the box's width across and its height down,
+and adjacent corners that would overlap are scaled down together, as browsers do), `box-shadow` (one or more comma-separated shadows painted in the written order,
+the first on top; each takes `inset`, up to four lengths — the x and y offsets, then the blur and the spread,
+which may be negative — and a color that defaults to `currentColor`, in any order the grammar allows;
+an outer shadow follows the box's rounded corners and grows them with a positive spread while square corners stay square,
+and is clipped inside the border box; an inset shadow is painted inside the padding box, with the inner shape moved by the offsets;
+the blur is Gaussian, so a very large blur (past about 20px on a 2× display) is a little softer-edged than a browser's),
+`text-shadow` (a comma-separated list of shadows of the glyphs, each two or three lengths — the offsets and the blur — and a color that defaults to `currentColor`,
+painted behind the text in the written order with the first on top; a hard shadow is the run drawn again in the shadow color,
+while a blurred one is cast by the glyphs themselves, which the text covers again, so a translucent text color or opacity composites the glyphs twice),
+`outline` (`outline-style`, `outline-width`, `outline-color`, `outline-offset` and the shorthand;
+`outline-style` takes every border style, each drawn as the matching border side is, and `auto` paints as a solid ring;
+the ring is painted outside the border box and takes no room in layout), `color`.
+
+## Typography
+
+`font-size` (including the relative `smaller` and `larger` keywords,
+and the `medium` default, which is 16px but 13px in the generic `monospace` family, as browsers size it;
+a size that still rests on `medium` scales to the new family's medium when the family changes, and a size of 0 lays the text out at no width and draws nothing),
+`font-weight` (the 100–900 numbers with `normal` and `bold`, and `bolder` and `lighter` relative to the
+inherited weight as CSS Fonts 4 resolves them), `font-style`, `font-family` (the generic families `sans-serif`, `serif` and `monospace`
+with their `system-ui`, `ui-*` and `-apple-system` spellings, any installed family named by the page — `Arial`, `Menlo`,
+`Georgia` and the rest, taken with the faces the system has for them, so bold and italic are real ones — and fonts loaded with `@font-face` from local files:
+a family may have several faces, each with its own `font-weight` value or range and its `font-style`, and `src` lists
+may name the same face in several places, the first source that can be used being the one taken — a `local()` name the system
+has, or a file that loads (`.ttf`, `.otf`, `.woff` and `.woff2` all read) — and a `local()` name the system lacks falls through;
+a face's `unicode-range` limits it to those characters, the rest of the family list then taking the others in order (the
+system font when the list has none), and each family keeps its own `font-palette`; a face's `font-feature-settings`
+applies to the text it draws, with the element's own settings overriding a tag they share, its `font-stretch`
+picks the face a normal-width text uses, and `ascent-override`, `descent-override` and `line-gap-override`
+replace its line metrics with that share of the font size).
+
+### Font features
+
+`font-kerning` (`auto`, `normal` and `none`,
+which turns the font's kern feature off), `font-language-override` (`normal`, or a quoted four-character language
+tag kept for the computed value), `font-optical-sizing` (`auto` or `none`, kept for the computed value) and
+`font-size-adjust` (`none`, or the x-height ratio, which scales the face so its x-height is that share of
+the font size), `font-stretch` (a keyword from `ultra-condensed` to `ultra-expanded`, or a percentage: the
+family's faces are matched by their own `font-stretch` descriptors), `font-synthesis-weight`, `-style` and
+`-small-caps` (`auto` or `none`, which the `font-synthesis` shorthand sets together) and `font-variant-emoji`
+(`normal`, `text`, `emoji` or `unicode`, kept for the computed value), `text-underline-position`
+(`auto`, `under`, `left`, `right` or `from-font`, kept for the computed value), `text-decoration-skip-ink`
+(`auto`, `none` or `all`, kept for the computed value) and `white-space-collapse` (`collapse`, `preserve`,
+`preserve-breaks`, `preserve-spaces` or `break-spaces`, kept for the computed value), `text-box-trim`
+(`none`, `trim-start`, `trim-end` or `trim-both`), `text-box-edge` (one or two of `text`, `cap`, `ex`,
+`alphabetic`, `ideographic` and `leading`, or `auto`), both kept for the computed value until the trim is
+laid out, `initial-letter` (`normal`, or a size and optional sink, kept for the computed value), and the
+SVG text baselines `alignment-baseline`, `baseline-shift` (`baseline`, `sub`, `super` or a length) and
+`dominant-baseline` (kept for the computed value),
+`font-feature-settings` (`normal`, or any number of quoted four-character OpenType tags, each with `on`, `off` or a
+whole number: the settings are put on the run's font, so both the drawing and the measuring of the text follow them,
+and a tag the font doesn't have changes nothing),
+`font-variant` and its longhands (`caps`, `ligatures`, `numeric`, `east-asian`, `position` and `alternates`: each keyword
+picks OpenType features for the font, so the text measures and draws with them, and a keyword the font lacks changes nothing;
+`font-feature-settings` is applied after the variants, so an explicit tag there overrides one a variant asked for), an
+`@font-feature-values` rule's named alternatives (`styleset(name)`, `stylistic(name)`, `character-variant(name)`,
+`swash(name)`, `ornaments(name)` and `annotation(name)` in `font-variant-alternates` resolve to the OpenType feature the
+rule names for that alias — `ss04`, `cv04`, `swsh`, `ornm`, `nalt` or `salt` — which the text then measures and draws with;
+the alias is taken page-wide rather than per family, and an alias no rule names makes the declaration invalid),
+`font-variation-settings` (`normal`, or any number of quoted four-character axis tags, each with a number: the axes are
+set on the run's font, so a variable font's text measures and draws as the axes say,
+and an axis the font doesn't have changes nothing;
+the axes ride with the feature settings, so one run can take both), `font-synthesis` (`weight`, `style`, `small-caps`,
+`none`, or several of them: a family with no face for a weight or an italic has the text emboldened by a wider stroke or
+slanted by a shear, either way leaving the advance it measures with unchanged as a browser's synthetic face does,
+and a kind turned off leaves that text on the face the family does have),
+`font-palette` (`normal`, `light`, `dark`, or a `--name` an `@font-palette-values` rule defines, for a colour
+font's COLR glyphs: `light` and `dark` take the first palette the font's CPAL table marks for that background and
+fall back to palette 0 when it marks none or has no CPAL table, and a named rule's `base-palette` and
+`override-colors` pick a palette index and replace entries of it; the palette is set on the run's font, so drawing
+and measuring agree, and a rule applies only to the font its `font-family` names, with the last matching rule
+winning).
+
+### Line height and vertical alignment
+
+The `font` shorthand (`font: italic bold 14px/1.4 sans-serif`, its weight taking `bolder` and `lighter` too
+and its line height a unitless `calc()`), `line-height` (a number, or a `calc()` of numbers as Tailwind writes
+`calc(1.75 / 1.25)`, a length — a percentage or an em of the element's own font size — or `normal`,
+which uses the font's own ascent, descent and line gap, each rounded to a whole device pixel as browsers round them,
+so a normal line box is whole pixels at every backing scale), `vertical-align` on inline boxes and atomic inlines (`baseline`,
+`sub`, `super`, `text-top`, `text-bottom`, `middle`, `top`, `bottom`, and a length or percentage of the element's line height;
+`sub` and `super` use the traditional small offsets from the baseline, and the UA sheet styles `<sub>` and `<sup>` with them and a smaller font size).
+
+### Text alignment and writing modes
+
+`text-align` (`start` and `end` line up with the side the direction says the text starts on, and
+`left`, `center` and `right` stay as written; `justify` spreads a line's spare room across its word spaces,
+or between its characters with `text-justify: inter-character`, leaving the last line of the block — and each
+line a forced break ends — to `text-align-last`, which starts it by default), `direction` (`ltr` or `rtl`, inherited, and set by the `dir`
+attribute: it moves `start` and `end`, and an rtl line takes its `text-indent` off the right edge;
+bidi reordering isn't done, so a run of another script stays in the order the document gives it),
+`writing-mode` (`horizontal-tb`, and `vertical-rl`/`vertical-lr`: the lines run down the page and stack across it, right
+to left or left to right, each line turned a quarter clockwise. The box's content is laid out in that frame, so an element
+child's width is the frame's block size and its height the frame's inline size, its margins, borders and padding swap and
+turn with it, and it is drawn on the page at the rect the frame maps it to with each border on its own side. A child with
+an auto width shrinks to its column and one with an auto height fills the frame's inline size, as a block's auto width
+fills and its auto height grows in a horizontal page. A box with no height of its own is as tall as the longest line its
+content makes — a `max-height` caps that — and a box whose writing mode runs across its containing block's establishes its
+own formatting context, so its margins stay inside it, and wraps at the space that block leaves across its block axis, or
+at the nearest scroll container's when that leaves none — the page's at worst, and never below its longest word. A box
+whose own writing mode
+runs across the frame's keeps its own axes: horizontal text inside a vertical box runs across the page, and the other way
+round. `sideways-rl`/`sideways-lr` lay out the same way; an inline box's own background and border still turn with its
+line rather than staying a page rect. A page takes the body's writing mode when the root element's own is the initial
+one, as overflow propagates, and the body keeps the one it was given. Upright text (`text-orientation`) isn't done yet),
+`text-transform` (`uppercase`, `lowercase` and `capitalize`; the drawn and measured text changes while the DOM's stays as written),
+`letter-spacing` and `word-spacing` (a length or `normal`; the extra room is measured into the line,
+so wrapping accounts for it, and drawn between the glyphs), `text-indent` (a length or a percentage of the content width,
+inherited, shifting and narrowing the first line; the `hanging` and `each-line` keywords aren't supported),
+`tab-size` (how many characters a preserved tab advances to, 8 by default; the column count starts over at each line break),
+`text-overflow: ellipsis` (a line that runs past the content edge ends in an ellipsis instead of being cut off at an arbitrary glyph;
+it needs `overflow` other than `visible`, and it applies to a line of the element's text,
+whether that text is the element's own or a text node inside it, such as one `innerHTML` inserted),
+`line-clamp` and `-webkit-line-clamp` (a positive whole number of lines, `none`, or `line-clamp: auto`
+to keep as many lines as the box's max-height holds: the block is then that many lines tall,
+the last of them cut to the content width and ended with an ellipsis, for its own text and for its inline children alike;
+`block-ellipsis: no-ellipsis` leaves that last line whole instead, and `line-clamp: 3 no-ellipsis` sets both;
+`display: -webkit-box` and `-webkit-box-orient` are accepted so the old spelling of a clamp works. Text below the cut
+isn't pulled up onto the last line, and a block-ellipsis string, `line-clamp: auto` without a max-height, and the
+`discard` continuation aren't supported),
+`overflow-wrap` and `word-break` (`break-word`, `anywhere` and `break-all` break a line inside a word that doesn't fit it;
+`break-all` also fills the line before breaking, and `break-all` and `anywhere` shrink a run's min-content width to its widest character — `break-word` doesn't,
+as CSS says; breaks between CJK characters aren't added at all, so `keep-all` changes nothing here),
+`hyphens` (`manual` at first: a word breaks at each soft hyphen it holds, and the hyphen is drawn where the break is
+taken and nowhere else; `none` drops the soft hyphens and breaks nowhere; `auto` keeps its computed value but breaks
+where `manual` does, since no hyphenation dictionary ships with this build), and `text-wrap` with `text-wrap-mode`
+and `text-wrap-style` (`nowrap` keeps the text on one line, as `white-space: nowrap` does, and `balance` hands the
+words of a block of six lines or fewer out evenly over the lines it wraps to; `pretty` moves the word before a lone
+last word down, so the text doesn't end on it; `auto` and `stable` break as `wrap` does. `white-space` sets the mode
+too, so `pre` and `nowrap` show in the computed `text-wrap`, and a white-space whose wrapping the mode takes away
+keeps its own collapsing and space handing).
+
+### Text decoration and emphasis
+
+`text-decoration` with `text-decoration-line` (`none`, `underline`, `overline` and `line-through`, in any combination;
+a decoration belongs to the element that declares it and is drawn over the text of its in-flow descendants, in the
+colour, style and thickness that element gave it, with nested decorations all drawn, and it stops at an inline
+block, a float or an out-of-flow box, which take their own layout), `text-decoration-style` (`solid`, `double`,
+`dotted`, `dashed` and `wavy`, which draws a sine wave), `text-decoration-color` (a colour or `currentColor`,
+the initial value), `text-decoration-thickness` (a length, a percentage of the font size, `auto` or `from-font`)
+and `text-underline-offset` (a length or a percentage of the font size that may be negative, or `auto`,
+which keeps the underline just below the baseline), `text-emphasis` with `text-emphasis-style` (`none`, or a mark that is
+`filled` or `open` — `filled` at first — of the shapes `dot`, `circle`, `double-circle`, `triangle` and `sesame`,
+the dot at first; a string mark isn't drawn yet), `text-emphasis-color` (a colour or `currentColor`,
+the text's own colour at first) and `text-emphasis-position` (`over` or `under`, `over` at first, and `right` or
+`left`, which only vertical text would use and only the computed value keeps): a mark is drawn for every character,
+centred on its advance and a little beyond the font's ascent or descent, and it adds nothing to the text's advance.
+
+### Cursor and control appearance
+
+`cursor` (every keyword: the arrow, pointer, I-beam, contextual menu, crosshair, vertical I-beam, alias and copy,
+the open and closed hands, not-allowed, the four edge resizes and the corner and axis resizes, each mapped to the
+closest NSCursor macOS has publicly; the ones it has no cursor for — help, progress, wait, move, all-scroll and
+zoom in and out — are drawn at 24x24 with their hot spot in the middle, a disc with a question mark, a ring, a
+ring with hands, four arrows, and a magnifier with a plus or a minus —
+and a `url()` image before the keyword becomes the cursor, with its hotspot in the image's own pixels
+(`cursor: url(point.png) 4 5, pointer`; an image the build doesn't have leaves the keyword), while
+the keyword after it is the fallback the computed value keeps), `opacity`, `appearance` (also `-webkit-appearance`: a widget keyword and `auto` both get the UA's own
+painting, and `none` leaves the control's box entirely to the author), `accent-color` (inherited; the colour a
+checked box, a chosen radio and a range's lit parts take, `auto` at first, which is the UA's own blue),
+`color-scheme` (inherited; `dark` paints the UA's dark colours — white text, the #121212 canvas, dark fields,
+buttons, dialogs and popovers, Chrome's dark defaults — while `light`, `normal` and a list whose `light` comes
+first under a light system keep the light ones; `light dark` follows the system's `prefers-color-scheme`), `touch-action` (read back as the gestures it allows, `auto` at first; the app has a pointer and no touchscreen, so it changes nothing),
+`pointer-events` (inherited; `none` makes a box see-through to the pointer, which reaches what is painted behind
+it — its hover, presses, clicks and carets — while a descendant can ask for them again with `auto`; the SVG
+keywords all hit as `auto`, since a picture is drawn whole) and `user-select` (also `-webkit-user-select`,
+inherited: its computed value is kept and serialised, but the one selection here is a text field's own and a
+browser lets a press take that text whatever the field says, so it changes nothing yet.
+
+## Transforms, filters, and blending
+
+`transform` (`matrix()`, `translate()`/`translateX()`/`translateY()`,
+`scale()`/`scaleX()`/`scaleY()`, `rotate()`, `skew()`/`skewX()`/`skewY()`, and `matrix3d()`/`translate3d()`/`scale3d()`/`rotateZ()`/`rotate3d()` about the z axis and the other 3D functions (`matrix3d()`,
+`translate3d()`/`translateZ()`, `scale3d()`/`scaleZ()`, `rotateX()`/`rotateY()`/`rotateZ()`, `rotate3d()`),
+comma separated and applied right-to-left as CSS does, an angle taking a `calc()` of angles (`rotate(calc(var(--angle) * -2))`),
+with the whole list multiplied out in 4x4 so a rotation that turns the box onto the page composes with a depth translation the way it does in a browser,
+and the result projected onto the page; a matrix that can't be inverted paints nothing, `transform-origin`'s z is honoured,
+and a constant `w` divide is folded into the projection (`matrix3d(..., 0,0,0,2)` paints at half size);
+the box paints and hit tests through the matrix, and a transformed box is a stacking context of its own,
+the containing block for its absolutely and fixed positioned descendants, and a transformed fill is snapped to device pixels as a browser snaps a transformed layer) and `transform-origin` (keywords,
+lengths and percentages, against the border box, defaulting to its centre), the individual `translate`,
+`rotate` and `scale` properties composing outside `transform` as `scale`, `rotate`, `translate`,
+`transform-style` (`flat`, the initial value, or `preserve-3d`; a 3D rendering context isn't built
+yet, so a preserve-3d page is painted flattened into its parent's plane), `will-change` as a hint that changes nothing,
+`filter` (`blur()`, `brightness()`, `contrast()`, `grayscale()`, `hue-rotate()`, `invert()`, `opacity()`, `saturate()` and `sepia()`,
+each taking its number or percentage, and `drop-shadow()` with two or three lengths and a color that defaults to `currentColor`;
+`none`, or a list whose functions apply in the written order, the later ones to the output of the earlier ones.
+The element and its descendants paint into a layer covering the border box grown by 10% on every side, so a blur or drop-shadow bleeds
+that far and no further, as in a browser, and the layer is a stacking context of its own; the blur is Gaussian, matching a browser's),
+`mix-blend-mode` (`normal`, `multiply`, `screen`, `overlay`, `darken`, `lighten`, `color-dodge`, `color-burn`, `hard-light`,
+`soft-light`, `difference`, `exclusion`, `hue`, `saturation`, `color`, `luminosity` and `plus-lighter`; the element's own layer blends
+with what is already painted behind it, and the element becomes a stacking context) and `isolation` (`auto`, or `isolate` to make a
+stacking context that keeps its descendants' blending to the layers inside it); `backdrop-filter` takes the same filter list and
+filters what is already painted behind the element within its border box, leaving the element's own
+content to paint over the result (a filtered box is also a containing block for its out-of-flow
+descendants).
+
+## Custom properties and the cascade
+
+Custom properties (`--accent: #333`, case-sensitive, inherited, set by a rule, a style attribute or `style.setProperty()`,
+with `var(--accent)` and `var(--x, fallback)` substituted into any value when its style is computed,
+so they work inside shorthands; the substituted value stays a token sequence of its own, so `var(--b)red`
+with `--b: orange` reads as two identifiers rather than the one colour `orangered`; a cycle, or a var() with neither a value nor a fallback, leaves the property guaranteed-invalid,
+and a substituted value that doesn't parse leaves its property — every longhand of a shorthand — at the inherited or initial value,
+as invalid-at-computed-value-time does in a browser, and in a debug or headless run it is reported once per property and substituted value on stderr,
+with the parser's reason; `getPropertyValue("--accent")`, `setProperty` and `removeProperty` read and write them,
+and changing one restyles the elements that read it; `CSS.registerProperty()` makes one non-inheriting or gives it
+an initial value, while `CSS.supports()` answers from the same value parser and `CSS.escape()` serializes an
+identifier; a `@property` rule registers one with a `syntax`, an `inherits` flag and an `initial-value`, each rule
+checked at build time and an invalid one dropped whole with a note: `syntax` is `*` or a `|` list of component types —
+`<length>`, `<percentage>`, `<length-percentage>`, `<number>`, `<integer>`, `<angle>`, `<time>`, `<resolution>`,
+`<color>`, `<string>`, `<custom-ident>`, `<url>` and the rest of the grammar — and keywords, with `+`, `#` and `{m,n}`
+multipliers, and `initial-value` must belong to it; a registered property doesn't inherit unless `inherits: true`,
+starts at its initial value where nothing sets it, keeps that initial value where a declaration doesn't belong to the
+syntax, and `inherit`, `initial`, `unset`, `revert` and `revert-layer` resolve against the registration; a rule may sit
+in a `@media` or `@supports` block at build time, and the last rule for a name wins), the CSS-wide `inherit`, `initial`,
+`unset`, `revert` and
+`revert-layer` on every property this build supports, shorthands included: `inherit` takes the parent's computed value,
+`initial` the property's own initial one, and `unset`/`revert`/`revert-layer` inherit on an inherited property and take
+the initial value otherwise, with `!important` allowed as with any value, `@starting-style` (the declarations of the rules inside style an element's first rendered state, so a
+transition set on the element runs from them to the regular style; they apply for that one pass only,
+and an element no such rule matches costs nothing extra), `@namespace` (a default namespace and named prefixes, matched by `ns|tag`, `*|tag` and `|tag`; an element under
+an inline `<svg>` is in the SVG namespace, as a browser's DOM has it), `@scope` (`@scope (.card) { … }`, or with a
+`to (.limit)` end: a rule inside matches only elements within the nearest ancestor matching the scope root, and not
+those at or below an element matching the limit; an unnamed root means the whole document), cascade layers (`@layer name { … }` blocks, `@layer a, b;` order
+statements, dotted and anonymous layers, and nested layers whose own rules come after their sublayers; a later layer beats
+an earlier one for normal declarations and the order reverses for important ones, and rules outside any layer are in the
+implicit final layer, so they beat every layer normally and lose to every layer when important), `@supports` with `(prop: value)`,
+`not`, `and`, `or` and parentheses, decided at build time against what this build compiles (so `@supports (not (-webkit-appearance: -apple-pay-button))`
+holds and `@supports (color: color-mix(in lab, red, red))` does too, while a guard for a property or value this build rejects doesn't;
+a failing guard's rules are dropped with a note), the conditional at-rules a rule may hold (`@supports`, `@media`, `@container` and `@starting-style`), whose declarations apply in place
+to the rule's selector when their condition holds, and CSS Nesting's nested style rules (`&:hover { … }`, a child written as
+a descendant selector, `&` anywhere in the selector, and nesting inside a nested at-rule; the nesting selector takes the
+specificity of what it stands for, as the spec says), `transition` (`transition-property`, `-duration`,
+`-timing-function` and `-delay`, each a comma-separated list, with `all` and `none`, named properties,
+the named curves, `cubic-bezier()` and `steps()` with each jump keyword, and delays; lengths, colors,
+numbers and opacity interpolate, and a property that changes partway through starts again from where it had got to;
+a `transform` list interpolates function by function when both ends name the same functions, `none` as the
+identity of the other list, and otherwise through the matrices the two lists resolve to, decomposed into
+translation, rotation, scale and skew as CSS Transforms 2 has it),
+`@keyframes` (percentages, `from` and `to`, the last block at an offset winning) with `animation-name`,
+`-duration`, `-timing-function`, `-delay`, `-iteration-count` (`infinite` too), `-direction`, `-fill-mode` and `-play-state`,
+the `transition` and `animation` shorthands, and the `transitionrun`, `transitionstart`, `transitionend`
+and `transitioncancel` events, plus the `animationstart`, `animationiteration`, `animationend` and
+`animationcancel` ones (`propertyName`, `animationName` and `elapsedTime`; a transition a new value
+replaces, or one `display: none` takes away, is canceled), all driven by the frame clock
+(`requestAnimationFrame`'s timestamp, which headless runs set with `frame <ms>` so tests are deterministic),
+`getAnimations()` on an element (with `{ subtree: true }`) and on `document`, reporting each running
+transition and animation with `transitionProperty`, `animationName`, `playState`, `currentTime`,
+`startTime`, `cancel()`, `finish()`, `pause()`, `play()` and a `finished` promise,
+and `!important` on any declaration (an important declaration beats normal ones whatever their specificity or order;
+among important declarations the origin order reverses, so an important inline style outranks an important rule,
+which outranks a normal inline style.
+
+## Colors
+
+Colors include named colors, `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa`, `rgb()`/`rgba()` and `hsl()`/`hsla()` in both the
+comma and space syntax with an optional `/ alpha` (a number or a percentage), and `oklab()`, `oklch()`, `lab()` and
+`lch()`, each with `L`, the Cartesian components or the polar chroma and hue (degrees, or `deg`/`grad`/`rad`/`turn`),
+and the `/ alpha` form; percentages mean their component's 0–100% range. `lab()` and `lch()` are the D50 CIE spaces
+and convert through chromatic adaptation to sRGB. `light-dark(<color>, <color>)` picks by the element's used colour scheme (`color-scheme`). `color-mix(in <space>, <color> [<percentage>], <color> [<percentage>])`
+interpolates premultiplied by alpha in `srgb`, `srgb-linear`, `oklab`, `oklch`, `lab` or `lch`, with a hue following
+the shorter arc, a missing percentage the complement of the other (both missing means an even mix), and percentages
+that don't add up to 100% normalised. A component may be a `calc()` of numbers or percentages, which folds at build
+time: `hsl(calc(var(--hue) + 40), 80%, 50%)` reads as `hsl(40, 80%, 50%)` once its `var()` is substituted, in a
+gradient as much as in a plain color. Any property that takes a color takes all of these, at build time and when a
+script sets one.

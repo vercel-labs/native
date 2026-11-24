@@ -1,0 +1,110 @@
+---
+title: "Scripting"
+description: "JSX, events, the window, fetch and the page lifecycle."
+---
+
+## JSX
+
+An app's `.tsx` and `.jsx` sources build like its `.ts` ones, whether the page's `<script src>` names one or another of the app's files imports it. The app's `tsconfig.json` picks the JSX mode: the automatic runtime (`react-jsx`, its `jsxImportSource` naming the package) or the classic one (`react`, with `jsxFactory` and `jsxFragmentFactory`).
+The runtime's package is compiled with the app from the app's own `node_modules`, so the imports the transform writes into each file and the app's own imports reach one copy of it, and a dev build uses the package's `jsx-dev-runtime` when it ships one.
+
+## Events
+
+`click`, `mousedown`, `mouseup`, `keydown`, `keyup`, `input`, `change`, `focus`, `blur`, `scroll`;
+they bubble to `document`, and support `stopPropagation`/`stopImmediatePropagation`/`preventDefault` (which only cancels a `cancelable` event). A listener is a function,
+or an object with `handleEvent`, added with `capture`, `once` and `passive` honoured; it sees the event's `target`,
+`currentTarget`, `eventPhase` and `composedPath()`, and `isTrusted` is true for an event the host's input produced. Each event has the class a browser gives it,
+with that class's own members: `MouseEvent` (`clientX`/`clientY`, `button`, `buttons`, …), `KeyboardEvent` (`key`/`code`, `repeat` and the modifier flags),
+`FocusEvent` (`relatedTarget`), `InputEvent`, `CustomEvent` (`detail`), `UIEvent`, `PointerEvent`, `WheelEvent`,
+`SubmitEvent`, `ToggleEvent`, `AnimationEvent` and `TransitionEvent`. Keyboard events carry `key` and `code` (`" "`/`"Space"`,
+`"a"`/`"KeyA"`, `"ArrowLeft"`, …), and after bubbling through the document they reach `window` listeners too. A press
+sends `keydown`, a held key's repeats send more `keydown`s with `repeat` true, and the release sends `keyup` with the
+same `key` and `code`. `addEventListener` on the window, the document and an element types its listener from the event
+name through the element, document and window event maps, as the DOM lib does, so `(event: KeyboardEvent)` is a
+`keydown` listener.
+A mouse event measures `offsetX`/`offsetY` from its target's box, and a pointer event's `getCoalescedEvents()` is itself,
+as the host never holds a move back. `setPointerCapture()` makes an element the target of a pressed pointer's moves
+wherever it goes — what a drag that leaves its element needs — until the button lifts or `releasePointerCapture()` gives it up;
+the element hears `gotpointercapture` and `lostpointercapture`, and `hasPointerCapture()` says where the capture is.
+The touch events (`TouchEvent` with its `Touch` list) are declared, but the host never fires them: its input is a
+mouse and a keyboard, so a listener for `touchstart` is never called, as on a browser without a touchscreen.
+Composition events are real: an input method composes into the focused text field, `compositionstart`,
+`compositionupdate` and `compositionend` carry its text, and the marked text is underlined where it sits.
+`DragEvent`, `ClipboardEvent` and `new DataTransfer()` are real too.
+Inline handler attributes (`onclick="…"`, `oninput="…"`, `<body onload="…">`) are compiled into listeners as the page builds, with `this` and `event` as HTML gives them,
+a handler that returns `false` cancelling the event; the element's `on…` property reports the compiled handler, and setting it to `null` detaches it
+
+## Window
+
+`requestAnimationFrame`/`cancelAnimationFrame`, run on the app's frame loop with the frame's timestamp;
+`window.innerWidth`, `innerHeight` and `devicePixelRatio`; `matchMedia` over the same media features and syntax as `@media`,
+with `matches`, `addEventListener("change")`, the legacy `addListener`, and a `change` event when the window is resized or a
+system setting (the appearance, contrast, transparency, reduce motion) changes under the running app; window `addEventListener`/`removeEventListener` for `resize`,
+`load` (fired once the page's first layout is done, as a `<body onload>` attribute waits for) and the key events;
+`localStorage` (`length`, `getItem`, `setItem`, `removeItem`, `clear`, `key`), one file per app under `~/Library/Application Support/native/<title>/localStorage.json`,
+created the first time it is used (`NATIVE_STORAGE` points tests at another file, and `NATIVE_REDUCED_MOTION` pins the reduced-motion preference),
+and `sessionStorage` with the same members, which lasts only as long as the app runs;
+the constructors a page reaches through `window` — `ResizeObserver`, `IntersectionObserver`, `MutationObserver` — and
+`window.CSS` / `window.customElements` are the same objects the bare names are.
+`navigator` reports a macOS identity (a Macintosh user agent naming this runtime, platform, language `en-US`,
+no touch points, `cookieEnabled` false as there are no cookies, `onLine`) and `window.navigator` is the same object.
+The window's titlebar can be hidden, inset or transparent (`<meta name="native-window" content="titlebar=…">`,
+with `min-width`, `min-height` and `resizable=no`); `env(titlebar-area-x/-y/-width/-height)` and `env(safe-area-inset-top)`
+give the area beside the traffic lights, and `app-region: drag`/`no-drag` (also `-webkit-app-region`) marks what drags the window;
+`env()` of any other name takes its fallback.
+
+## `fetch()`
+
+A page-relative URL, a `/` URL (the page's directory is the site root, as it is for markup) or a `file:`
+URL names a file in the app's bundle (the page's directory in a dev build); a `data:` URL decodes in place; and an `http:` or `https:` URL
+goes to the network. The promise resolves with a `Response` carrying the status, status text, headers, URL, `redirected` and
+`type`, with `text()`, `json()`, `arrayBuffer()`, `blob()` and `formData()` reading its body once and `clone()` copying it
+beforehand. `body` is a `ReadableStream`: a network response streams the bytes as the server sends them, and a file is handed
+over in 64 KiB chunks, so a loader that reads it reports progress. `Request`, `Response` and `Headers` take the bodies and
+options a browser's do — a string, `ArrayBuffer` or typed array, `Blob`, `FormData`, `URLSearchParams` or `ReadableStream`;
+`method`, `headers`, `body`, `signal`, `redirect` and the rest; `Headers` lowercases names, combines repeated ones and keeps
+`getSetCookie()` — and `new Response(...)`, `Response.json()`, `Response.redirect()` and `Response.error()` build responses.
+A redirect follows by default (`redirect: "follow"`), `"manual"` gives an opaque-redirect response and `"error"` rejects.
+A request's `AbortSignal` aborts the transfer and rejects with an `AbortError`, and `ProgressEvent`
+reports progress. A request's `integrity` is enforced as Subresource Integrity specifies: the body is
+checked against its `sha256`/`sha384`/`sha512` digests, a mismatch or a redirect rejects with
+`TypeError: Failed to fetch`, and a `no-cors` request with integrity throws at construction.
+
+The app is a desktop program with no origin, so CORS isn't enforced (no `Origin` header is sent) and cookies are not stored
+or sent: `credentials` is accepted and ignored, and a `Set-Cookie` header is readable on the response. A network failure
+rejects with a `TypeError` (`Failed to fetch`). TLS uses the platform certificate store.
+
+## `XMLHttpRequest` and `EventSource`
+
+`XMLHttpRequest` makes asynchronous requests over the same transport and URLs as `fetch()`, with `open`, `send`,
+`setRequestHeader`, `abort`, `timeout`, `responseType` (`""`, `"text"`, `"json"`, `"arraybuffer"` and `"blob"`),
+`responseText`, `response`, `responseURL`, `getResponseHeader`, `getAllResponseHeaders`, `overrideMimeType` and the
+`readystatechange`, `loadstart`, `progress`, `load`, `error`, `abort`, `timeout` and `loadend` events. A synchronous request
+(`open(..., false)`) throws `InvalidAccessError`, and progress arrives as one update with the response's size.
+
+`EventSource` reads server-sent events over `fetch()`, with `onopen`, `onmessage`, named events, `lastEventId`, the
+server's `retry` interval, automatic reconnection and `close()`.
+
+`WebSocket` speaks RFC 6455 over the same transport: `ws:` goes over `http:` and `wss:` over `https:`, with the
+platform's TLS. The handshake checks the accept value and the subprotocol, text and binary messages arrive whole,
+`binaryType` picks a `Blob` or an `ArrayBuffer`, pings are answered, and `close()` runs the close handshake and reports
+its code, reason and `wasClean`.
+
+## Bundles
+
+A built app carries the files it reads. The images a page or its sheets name (`<img src>`, `srcset` candidates,
+CSS `url()` in backgrounds, border images, masks and cursors, inline styles, `data:` images), the files
+`@font-face` names, linked and imported style sheets, `.svg` images, and the files scripts name with a literal
+`fetch("…")` or import as non-code files are copied into the app's bundle — the `.app`'s Resources on macOS, a
+`<executable>.resources` directory elsewhere — each at the place it had in the app, so a page-relative URL still
+names it. `dev` keeps the source paths and copies nothing. `srcset` selection isn't implemented yet and
+`image-set()` isn't read, so their candidates are only partly collected.
+
+## Page lifecycle and timers
+
+`document.readyState` goes `"loading"` → `"interactive"` for `DOMContentLoaded` → `"complete"`
+for `load`; `DOMContentLoaded` fires at the document, and `load` at the window once the page's scripts have run and its first
+layout is done. `setTimeout`/`clearTimeout` and `setInterval`/`clearInterval` return numeric ids and run on the app's frame
+loop, and `self` names the window. Each page of an app starts with an empty event loop and window, as a browser's page does.
+A promise rejection nothing handled is reported as a console error and an `unhandledrejection` event at the
+window, with the page left running, as a browser does.

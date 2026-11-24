@@ -1,0 +1,16 @@
+{
+  "title": "Reference",
+  "pages": [
+    "cli",
+    "supported-html",
+    "supported-css",
+    "supported-dom",
+    "layout",
+    "graphics",
+    "scripting",
+    "elements-and-forms",
+    "not-yet-supported",
+    "compiler-limitations",
+    "web-platform-tests"
+  ]
+}

@@ -1,0 +1,64 @@
+---
+title: "Elements, forms and shadow DOM"
+description: "Inline handlers, custom elements, form controls, FormData and shadow trees."
+---
+
+## Inline event handlers
+
+A handler attribute a script adds at runtime, through `setAttribute()` or `innerHTML`, is inert, because only the build compiles handler code. A handler's code reaches the DOM and the window's globals but not the names a page script declares at its top level, because a script is a module.
+
+## Custom elements
+
+`customElements.define()`, `get()`, `whenDefined()` and `upgrade()` define a class per tag. An element of a defined tag is an instance of its class, whether the markup was compiled, parsed or made with `createElement`, and the elements of that tag already in the tree are upgraded when the name is defined. Each reports its existing attributes to `attributeChangedCallback` before `connectedCallback`. Elements inserted later become instances of their class as they are inserted, and `connectedCallback`/`disconnectedCallback` run as the element enters and leaves the document.
+
+A class's `observedAttributes` can't be read through its class value yet, so `attributeChangedCallback` is called for every attribute change instead of only the listed ones, and a change made through `el.style` isn't reported.
+
+An upgrade replaces the element with a new one of its class, so a reference a script kept to the element before the upgrade is stale. `upgrade()` leaves a detached root itself to be upgraded when it is inserted, while upgrading its children. `extends:` customized built-ins aren't supported. A bad name or a second definition throws an `Error` whose message names the failure (`SyntaxError`, `NotSupportedError`) rather than a `DOMException`.
+
+## Element classes
+
+Every tag also makes an element of its own class (`HTMLButtonElement`, `HTMLLabelElement`, and so on), and those classes carry the members a script reads.
+
+- A control has `form`, `name`, `value`, `disabled`, `required`, `labels`, `setCustomValidity()` and `validity`/`validationMessage`. The constraints checked are `required` and a script's custom error. `pattern`, `min`/`max`, `minlength` and `step` aren't checked yet, and the message is English.
+- A checkbox has `checked` and `indeterminate`. A range or number field has `valueAsNumber`, sanitized into the field's `min`/`max` and to a whole number of its `step`s, which is also where a range with no value sits: the middle of its range.
+- A label has `control` and `htmlFor`. A click on the label forwards to the control it names, which takes its own default action.
+- A select has `options`, `selectedIndex` and `value`.
+- A textarea has `value`, `defaultValue` and a selection range.
+- An image has `naturalWidth`/`naturalHeight`, which are 0 until the load lands because the host decodes it and reports back a turn later, and `complete`, which is true when there is no source or the load has finished or failed.
+- A form has `elements`, `checkValidity()` and `reset()`.
+- An option has `value`, `text` and `selected`.
+- A disabled control's text takes the UA's grey unless a rule sets its colour, as Chrome's does; its background stays what its own rules give it.
+
+## Form submission
+
+A form submits as HTML says. A click on a submit button starts its form's submission, and so does Enter in a single-line text field, through the form's default button when it has one, or by the form itself when that field is its only one. The form checks the controls first unless it is `novalidate`, then fires a cancelable `submit` `SubmitEvent` whose `submitter` is the button that started it. `submitter` is null for `submit()` and for a form submitting itself. A reset button resets the form.
+
+`requestSubmit()` takes the same path and refuses a control that isn't a submit button of the form. `submit()` fires the event without checking. A submit nobody cancels does nothing more, since there is nowhere to navigate to.
+
+## FormData
+
+`new FormData(form)` collects what that submit would send, in document order:
+
+- Every named control of the form that isn't disabled and isn't a button.
+- A checked box or radio, whose value is `on` when its value attribute is absent.
+- A file field's files.
+- A select's chosen options.
+- A field's text.
+
+An empty `FormData` takes `append`, `set` (which replaces the first entry under the name and drops the rest), `delete`, `get`, `getAll`, `has`, `keys`, `values`, `forEach` and `entries`. Each list is an array here where a browser gives an iterator.
+
+A file input never opens a picker, so `files` is empty unless a script sets it. A media element has no playback, and an `<iframe>` has no content document.
+
+## Shadow DOM
+
+An element's `attachShadow()` makes a shadow tree that layout, paint, hit testing and the DOM queries reach through its flattened children. Each `<slot>` is filled by the light children assigned to it, or its own fallback, with `slot`, `assignedSlot`, `assignedNodes()`, `assignedElements()` and a `slotchange` when the assignment changes. The root has `host` and `mode`.
+
+A shadow tree's own `<style>` styles that tree and nothing else. `:host`/`:host(sel)` styles its host, and `::slotted(sel)` styles the nodes a slot took. An event from inside the tree is retargeted for listeners outside it, which see the host as the target, and `composedPath()` hides the nodes a listener can't see through. A non-composed event stays inside the tree.
+
+Declarative shadow DOM (`<template shadowrootmode>`), `::part()`, `::theme()` and `adoptedStyleSheets` on a shadow root are not supported.
+
+## Selection and viewport
+
+`document.getSelection()` answers an empty, collapsed `Selection` that doesn't follow the caret in an input and can't be changed.
+
+`window.visualViewport` reports the layout viewport and never fires its events.

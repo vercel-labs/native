@@ -1,0 +1,105 @@
+---
+title: "Graphics"
+description: "Canvas 2D, WebGL 2, inline SVG and SVG images."
+---
+
+## Canvas 2D
+
+`canvas.getContext("2d")` with `width`/`height` (setting either resets the bitmap and the drawing state),
+and on the context: the state stack (`save`/`restore`), transforms (`translate`, `rotate`, `scale`, `transform`,
+`setTransform`, `resetTransform`), paths (`beginPath`, `closePath`, `moveTo`, `lineTo`, `quadraticCurveTo`,
+`bezierCurveTo`, `arc`, `arcTo`, `ellipse`, `rect`, `roundRect` with one radius, a point or a list of one to four
+spread over the corners and shrunk to fit), `fill`/`stroke`/`clip` with the optional `"evenodd"` rule,
+`fillRect`/`strokeRect`/`clearRect`, `fillStyle`/`strokeStyle` as any CSS color (**Colors:** above), or a `CanvasGradient` from `createLinearGradient`/`createRadialGradient` with `addColorStop`,
+`globalAlpha`, `globalCompositeOperation` (`source-over`, `lighter`, `copy`, `destination-out` and the usual other Porter-Duff and blend modes),
+`filter` (the CSS filter functions `blur`, `brightness`, `contrast`, `saturate`, `grayscale`, `sepia`, `hue-rotate`,
+`invert` and `opacity`, alone or in a chain, applied to each drawing operation as the page draws it; `drop-shadow()`
+and `url()` references are not supported),
+`lineWidth`, `lineCap`, `lineJoin`, `fillText`/`strokeText` with `font`, `textAlign` and `textBaseline`,
+and `measureText` (the advance, the ink box `actualBoundingBox*`, the font box `fontBoundingBox*` and the
+hanging/alphabetic/ideographic baselines). `createImageData`, `getImageData` and `putImageData` move the bitmap's
+pixels in and out as straight RGBA (`putImageData` writes where it is told and ignores the transform, the clip and
+`globalAlpha`, as a browser's does; the bitmap is premultiplied inside, so a translucent colour reads back within a
+step). The bitmap is backed by a CoreGraphics bitmap context in the host and drawn into the page as an image,
+so a canvas scales and clips like any replaced element, and a snapshot is pixel-exact.
+
+## WebGL 2
+
+`canvas.getContext("webgl2", attributes)` returns a typed `WebGL2RenderingContext` backed by an OpenGL 4.1 core context (CGL) of its own;
+calls execute as they are made, and each paint resolves the drawing buffer into the canvas bitmap the page draws,
+so a WebGL canvas scales, clips and composites like a 2D one. The context attributes are honoured: `alpha` (a false one paints the bitmap opaque),
+`depth`, `stencil` and `antialias` (4x MSAA, resolved on paint) decide the attachments, and `premultipliedAlpha`,
+`preserveDrawingBuffer`, `powerPreference`, `failIfMajorPerformanceCaveat` and `desynchronized` are accepted and reported back by `getContextAttributes`. Shaders are written in GLSL ES 3.00 (`#version 300 es`) and compiled as desktop GLSL 4.10,
+with only the version line rewritten, so `precision` declarations are accepted as they are. On the context: buffers,
+textures (`texImage2D`, `texImage3D`, `texSubImage2D`, parameters, `generateMipmap`, pixel-store state),
+shaders and programs (`shaderSource`, compile and link, the info logs, active uniform and attribute reflection,
+`bindAttribLocation`), uniform locations and every `uniform1/2/3/4{f,i,iv,fv,uiv}` and `uniformMatrix{2,3,4}fv`,
+vertex arrays and vertex attributes (including `vertexAttribIPointer` and the divisor), framebuffers and renderbuffers (`checkFramebufferStatus`),
+draws (`drawArrays`, `drawElements`, and the instanced pair), the state setters (`enable`/`disable`,
+`clear`, colour/depth/stencil masks, cull and front face, depth func and range, blend func/equation,
+`polygonOffset`, viewport, scissor, `lineWidth`, `hint`), `readPixels`, `getParameter` with WebGL's answers (version and shading-language strings,
+the uniform-vector limits as component counts, `MAX_ELEMENT_INDEX`, the current bindings and state),
+`getShaderPrecisionFormat`, `getError`, `finish`/`flush` and object deletion. Framebuffer 0 is the canvas's own drawing buffer,
+and vertex array 0 is a default one, as in WebGL. Extensions aren't offered (`getExtension` returns null and `getSupportedExtensions` is empty),
+the context is never lost, `readPixels` always reads RGBA8, `UNPACK_FLIP_Y_WEBGL` and `UNPACK_PREMULTIPLY_ALPHA_WEBGL` are recorded and reported but don't change the pixel data yet,
+and texture storage and copy calls, sampler objects, uniform buffers, transform feedback, queries, sync objects and compressed textures aren't implemented yet.
+
+On Windows the same API runs on ANGLE, an implementation of OpenGL ES over Direct3D 11. `@native-sdk/cli` depends on the `@native-sdk/angle-win32-x64` package, which npm installs there, and a Windows build copies its libraries into the app's `<executable>.resources`, so the built app carries WebGL 2 with it. `NATIVE_ANGLE_DIR` builds against another ANGLE build instead.
+
+## Inline SVG
+
+An `<svg>` in the document is a replaced box whose picture is drawn from its own subtree
+through the host's CoreGraphics paths, rasterized at the device scale, so it stays sharp and is sampled in a snapshot like any other paint. It draws `<rect>` (with `rx`/`ry`),
+`<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>` and `<path>` (the whole path grammar: absolute and relative commands,
+`H`/`V`, the cubic and quadratic curves with their smooth continuations, and arcs), nested in `<g>` groups,
+each carrying a `transform` (`translate`, `scale`, `rotate`, `skewX`, `skewY`, `matrix`; a `transform` list applies left to right).
+The root's `viewBox` scales user units into the view port, with `preserveAspectRatio` (`meet` by default, `slice` and `none`,
+and the `xMin`/`xMid`/`xMax`×`yMin`/`yMid`/`yMax` alignments). `fill`, `stroke`, `fill-opacity`, `stroke-opacity`,
+`stroke-width`, `stroke-linecap`, `stroke-linejoin`, `stroke-dasharray`, `stroke-dashoffset`, `fill-rule` and `opacity` are ordinary inherited CSS properties,
+so a rule, a `style=""` attribute and a presentation attribute all reach them through one cascade, in that order of precedence,
+and `currentColor` follows the element's `color`. A presentation attribute is read again whenever a script changes it, so
+`arc.setAttribute("stroke-dasharray", "280 302")` and `arc.removeAttribute("fill")` restyle the shape like a browser's do, and a changed
+geometry attribute (`cx`, `r`, `d`, `points`, `x`/`y`, `width`/`height`) redraws it. An `<svg>` a script builds with
+`document.createElementNS("http://www.w3.org/2000/svg", "svg")` paints the same way: its box and picture come from the subtree
+it has at paint time, so a child appended later, a changed `viewBox` and a changed presentation attribute all show on the next paint. A `fill` or `stroke` of `url(#id)` names a paint server: a `<linearGradient>` or
+`<radialGradient>` or a `<pattern>` in the same `<svg>`, read from its own attributes and (for a gradient) its `<stop>` children
+(`offset`, `stop-color`, `stop-opacity`, also in `style=""`), with `gradientUnits` (`objectBoundingBox` by default, `userSpaceOnUse`),
+`gradientTransform`, and the attributes or stops an `href` inherits. A pattern tiles its own content across the shape, clipped to each
+tile: `patternUnits`, `patternContentUnits`, `x`/`y`/`width`/`height`, `patternTransform`, `viewBox` and `preserveAspectRatio` are read,
+and its content may itself use gradients. A transform attribute is SVG's own grammar — bare numbers, so a CSS unit or percentage makes it
+invalid and leaves the element untransformed — and the CSS `transform`, `translate`, `rotate` and `scale` properties draw an SVG element
+too, the property replacing the attribute, turned about the `transform-origin` attribute or property (0 0 by default). Geometry attributes take lengths in user units or percentages of the view port,
+and the element's own size comes from its `width` and `height` attributes (300 by 150 without them, a length or a percentage of the window)
+and its ratio from the `viewBox`, CSS sizing and `aspect-ratio` included. `<defs>`, `title`, `desc` and `metadata` are not drawn where they
+are written, and neither is the subtree of an `svg` with `display: none`. A `<use>` (its `href` or `xlink:href`) draws a copy of what it
+names, at its `x` and `y`: a shape, a group, or an `<svg>` or `<symbol>`, which it sizes with its own `width` and `height` and fits through
+the symbol's `viewBox` and `preserveAspectRatio`. What the `<use>` declares (its `fill`, `stroke`, `color`, …) is inherited by the copy, so
+one definition can be drawn in a dozen colours, while what the referenced element declares itself still wins; a reference chain stops
+where it would loop. A `clip-path` of `url(#id)` names a `<clipPath>` in the same `<svg>`: the element is drawn only where the clip path's
+own shapes (and groups) cover it, with `clipPathUnits` (`userSpaceOnUse` by default, `objectBoundingBox` for the element's own bounds) and
+the path's `clip-rule` (`nonzero` or `evenodd`) honoured, the clip resolved in the element's own user space so it moves with its
+`transform`, and nested clips intersecting. A `<text>` is drawn with the host's line layout along its baseline: `x` and `y` place the
+baseline's start, `dx`/`dy` shift it, whitespace collapses as a browser collapses it, and `<tspan>` and `<a>` inside take their own
+`x`/`y`/`dx`/`dy`, `font-family`, `font-size`, `font-weight`, `font-style`, `fill`, `stroke` and the rest of the paint properties,
+so one text can mix sizes and colours. `text-anchor` (`start`, `middle`, `end`) moves a run of text to its anchor point. The glyphs
+follow the element's `transform` and are clipped by its `clip-path` like a shape.
+
+## SVG images
+
+A local `.svg` file named by an `<img src>` or a CSS `url()` (in a stylesheet or a `style=""` attribute) is compiled at build
+time into a draw program — the same geometry and paint the inline `<svg>` painter draws, so the shapes, groups, transforms, the path grammar,
+`viewBox` with `preserveAspectRatio`, `fill`/`stroke`/their opacities/`stroke-width`/`stroke-linecap`/`stroke-linejoin`/`stroke-dasharray`/`stroke-dashoffset`/`fill-rule`/`opacity`
+the gradients those paints name (`url(#id)`), `<use>`/`<symbol>` references, `clip-path`/`<clipPath>` clipping and `<text>` with its
+`<tspan>`s and `text-anchor`, all work in a file too.
+It draws that program into a bitmap of its own at the size it is drawn at and at the device scale, so an image stays
+sharp at any used size; `object-fit`/`object-position`, `background-size`/`background-repeat`/`background-position`, `border-radius` clipping
+and `image-rendering` behave as they do for a raster image. The intrinsic size is the file's `width` and `height` attributes when both are
+absolute lengths, and the one of them plus the other from the `viewBox`'s ratio when there is one; a percentage (or missing) attribute
+gives no dimension of its own, since it resolves against the box the image is drawn in. A file with only a `viewBox` has a ratio and no
+size of its own: an auto width fills the space the image is given (its containing block's width, or the cross size of a flex item) and
+the ratio gives it a height, so a logo drawn that way scales to the box it sits in, and a background-image with an auto size fits that
+ratio into its positioning area. A picture without a `viewBox` scales with the box it is drawn into: its attributes describe its own
+viewport, so a `width="8px"` rectangle in an 8 by 32 file is 192 wide in a 192 by 768 box. A background image far larger than its box
+(the cover fit of a picture whose ratio is extreme) is drawn only where it shows, at the box's resolution, and a `viewBox` with a zero
+width or height draws nothing, as SVG says. An image is its own document: `currentColor` and
+inherited properties take the file's root values (the initial colour, black), not the page's.

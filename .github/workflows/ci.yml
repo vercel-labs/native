@@ -1,0 +1,150 @@
+# Type-checks the workspace and builds the docs site, then builds and launches every app under
+# examples/, headlessly, with a scripted interaction and a snapshot of the first frame: on Linux
+# against the headless host, and on Windows against the Win32 host, whose windows run there have a
+# desktop. The Linux apps need the host's development libraries and a C toolchain; see
+# packages/cli/host/linux.c, packages/cli/host/windows.cpp and packages/cli/docs/cli.md.
+name: ci
+
+on:
+  push:
+    branches: [next]
+  pull_request:
+    branches: [next]
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm turbo run lint
+      - run: pnpm turbo run build --filter=@native-sdk/cli --filter=@native-sdk/docs
+
+  linux-examples-shards:
+    runs-on: ubuntu-24.04
+    # Every example's build is tens of minutes of scriptc on the runner's four cores, and the suite
+    # takes about five hours as one job: long enough that the runner is killed for want of memory
+    # or disk partway through ("the hosted runner lost communication"), with no useful log left
+    # behind. Four shards each build and run a quarter of the apps, so a job lasts a quarter as
+    # long and writes a quarter as much, and a failure names the shard it came from.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    timeout-minutes: 150
+    steps:
+      # The image's toolchains (Android, .NET, GHC, CodeQL, ...) take tens of gigabytes this job
+      # never uses. Without that room, the last React apps run the disk dry while scriptc compiles
+      # them.
+      - name: Make room for the example builds
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/share/swift
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install the host's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld pkg-config \
+            libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
+            libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
+            libegl-dev libgl-dev libgl1-mesa-dri libsqlite3-dev fonts-dejavu-core ffmpeg
+          # The archives the install downloaded are no longer needed, and every gigabyte counts.
+          sudo apt-get clean
+      - name: Build the FFmpeg the Linux host decodes video with
+        working-directory: packages/cli
+        run: sh ./host/ffmpeg/build.sh
+      # The host links the libraries installed into host/ffmpeg/prefix. The source tree and the
+      # objects that built them are not read again.
+      - name: Drop the FFmpeg build tree
+        run: rm -rf packages/cli/host/ffmpeg/build packages/cli/host/ffmpeg/src
+      - run: pnpm install --frozen-lockfile
+      - name: Build and run every example (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+        env:
+          # Each app is built once, so the native cache's copy of every app's executable is only
+          # space. (The compiler's own cache is bounded on its own, at 4 GB.)
+          NATIVE_NO_CACHE: "1"
+        run: pnpm turbo run test:examples --filter=@native-sdk/cli -- --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+  # The branch protects one check named linux-examples. It keeps that name and stays the Linux
+  # examples gate: it is green only when every shard did, and red when one failed or was cancelled
+  # (`always()` so a failed shard still runs this job instead of skipping it, which would leave the
+  # required check missing).
+  linux-examples:
+    name: linux-examples
+    needs: linux-examples-shards
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every example shard passed
+        env:
+          SHARDS: ${{ needs.linux-examples-shards.result }}
+        run: |
+          echo "linux-examples: four shards -> $SHARDS"
+          test "$SHARDS" = "success"
+
+  windows-examples:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # The Windows host is C++ over the platform's own Direct2D, DirectWrite and Direct3D. scriptc
+      # links a Windows app with `zig cc` for the GNU target, so the host object is a zig build too:
+      # an MSVC-built object asks that link for libraries a GNU link has no archives for.
+      - name: Install zig
+        shell: pwsh
+        run: |
+          $version = "0.17.1"
+          $root = "$env:RUNNER_TEMP\zig-$version"
+          if (-not (Test-Path "$root\zig.exe")) {
+            Invoke-WebRequest -UseBasicParsing "https://ziglang.org/download/$version/zig-x86_64-windows-$version.zip" -OutFile "$env:RUNNER_TEMP\zig.zip"
+            Expand-Archive "$env:RUNNER_TEMP\zig.zip" -DestinationPath "$env:RUNNER_TEMP\zig-unpack" -Force
+            Move-Item "$env:RUNNER_TEMP\zig-unpack\zig-x86_64-windows-$version" $root
+          }
+          "$root" | Out-File -Append -FilePath $env:GITHUB_PATH
+          & "$root\zig.exe" version
+      # WebGL 2 on the Windows host runs on ANGLE, which the build copies into each app's
+      # resources from the @native-sdk/angle-win32-x64 package pnpm installs here, the same way an
+      # installed CLI gets it; the gate needs no download of its own.
+      - run: pnpm install --frozen-lockfile
+      # The host is compiled on its own first, so the compiler's own diagnostics reach the log
+      # instead of being summarised away by the examples gate's one-line failure detail.
+      - name: Compile the Windows host
+        working-directory: packages/cli
+        run: |
+          zig c++ -target x86_64-windows-gnu -c -O2 -Wall -fno-exceptions -fno-rtti host/windows.cpp -o host-check.obj
+          Remove-Item -Force -ErrorAction SilentlyContinue host-check.obj
+      # Every example the Windows host draws, WebGL 2 included; preact-todo needs a package install
+      # of its own, which the Linux job covers.
+      - name: Build and run the examples the Windows host draws
+        working-directory: packages/cli
+        run: node tests/scratch.ts node tests/examples.ts counter article todo dashboard canvas webgl-cube webgl-texture
+
+      # The input method's own path: the app gives its window an IME context (NATIVE_IME_TEST) and a
+      # PowerShell client posts the composition messages a keyboard would, while the page prints
+      # what its composition events told it.
+      - name: Check the input method's composition
+        working-directory: packages/cli
+        run: node tests/ime.ts
+
+      # The accessibility tree as a screen reader sees it: the app is started, a PowerShell UI
+      # Automation client finds its window, names its buttons, invokes one and reads the page
+      # again. Its first call can land before the provider is ready, so the check tries twice.
+      - name: Check the accessibility tree over UI Automation
+        working-directory: packages/cli
+        run: node tests/uia.ts

@@ -1,0 +1,69 @@
+---
+title: "Not yet supported"
+description: "Web platform features that Native SDK does not implement."
+---
+
+`native check` reports the unsupported features an app uses. The [supported HTML](/reference/supported-html), [CSS](/reference/supported-css) and [DOM](/reference/supported-dom) pages describe what compiles. This page collects the gaps that matter when porting an app.
+
+## Elements and images
+
+- `<progress>` and `<meter>` widgets are not drawn, and a color input has no picker.
+- IME and multi-line text input are not supported.
+- An image must be a local raster or SVG file. Remote and `data:` URLs are not read, and `alt` text is not drawn when an image can't be loaded.
+
+## Generated content and lists
+
+- `content` takes string literals and `attr()`. The counter and quote keywords in `content`, and the `quotes`, `open-quote` and `close-quote` properties, are not supported.
+- `list-style-image` is not supported.
+- A counter style's `speak-as` descriptor and the `additive-symbols`/`symbols` forms of scripts beyond the predefined sets above are not supported.
+- `background-clip: text` is not supported.
+
+## Canvas
+
+`drawImage`, `toDataURL`, `createPattern`, canvas shadows, `drop-shadow()` filters and `isPointInPath` are not supported.
+
+## SVG
+
+- A `<style>` element inside an SVG file is ignored. The file's presentation attributes and `style=""` attributes apply.
+- Inline or image SVG does not support patterns, masking, filters, markers, `textPath` or glyph positioning (`textLength`, `letter-spacing`). Reference elements besides `<use>` and `<clipPath>` are not supported.
+- A gradient's `spreadMethod` other than the default `pad`, and a focal circle outside its end circle, are not supported.
+- An element's or a group's `opacity` is not composited as one layer. It multiplies into each drawing below it, so a translucent box's background and its children fade one by one rather than as a group.
+
+## Fonts and text
+
+- `palette-mix()` for `font-palette`, and the light or dark choice `font-palette: normal` would make under a non-normal `color-scheme`, are not supported. `normal` always uses the font's palette 0.
+- Per-glyph fallback down a `font-family` list is not supported for a character the first family's face lacks. A `unicode-range` splits the list by its ranges, but a missing glyph otherwise falls to CoreText's own cascade inside the first font.
+- `text-box-trim` and `text-box-edge` are not supported. The trim is the leading above the first line's over edge and below the last line's under edge, and the box shrinks by both. The case of a block whose content is its own text is measured out and checked; inline boxes and trims that accumulate through nested blocks are not.
+- `text-decoration-thickness: from-font` uses the same thickness as `auto`.
+- The `blink`, `spelling-error` and `grammar-error` values of `text-decoration-line`, `text-decoration-skip-ink` and `text-underline-position` are not supported.
+
+## Selectors and form states
+
+- Combinators inside `:is()`, `:where()` or `:not()` are not supported, because their arguments are compounds. An `:is()`/`:where()` argument whose own ancestor chain has to interleave with the one the selector was already building is also not supported, and neither is `:not()` nested inside another `:not()`.
+- Namespaced selectors (`ns|tag`, `[ns|attr]`) are not supported. An `@namespace` rule is read, but its prefixes don't match.
+- The `of S` argument of `:nth-child()` is not supported.
+- Form states cover what a control's own attributes and value say. `:indeterminate` covers a checkbox, not an unchecked radio group or a `<progress>`. `:in-range`/`:out-of-range` compare a `number` or `range` field's value with its `min`/`max`, and no other type has a range. `:invalid` reports a missing `required` value, a failed number range and a custom message, so `pattern`, `step` and a type mismatch don't make a field invalid.
+
+## Printing
+
+- `@page` parses its `size`, `margin` and page-orientation descriptors, but print output has no pagination yet. The media type is `screen` unless the app runs with `NATIVE_MEDIA=print`, which makes `@media print` and `matchMedia("print")` match and `screen` not.
+- Laying a page out for print, `break-before`, `break-after`, `break-inside`, `orphans`, `widows` and `print-color-adjust` parse and inherit as the spec says but have no effect while nothing is fragmented or printed.
+
+## Effects and transforms
+
+- Rubber-band overscroll is not implemented.
+- `perspective` is not supported when `w` varies across the element's plane, so the divide is dropped.
+- `transform-box`, `backface-visibility`, `transform-style: preserve-3d`, and the scrollable overflow area a transformed descendant adds to a scroll container are not supported.
+
+## Platform coverage
+
+- The windowed hosts are macOS and Windows. On Linux the same pages run headlessly — the host the web-platform tests use — so an app there has no window, menu bar or pointer of its own.
+- A window's controls are the platform's: the traffic lights on macOS and the system caption on Windows. A `titlebar` style (`hidden`, `hidden-inset` or `transparent`) is macOS-only, while `app-region: drag` and `no-drag` work on both.
+- The accessibility tree covers the elements this build draws (see [Supported DOM](/reference/supported-dom)). A widget that presents itself some other way — a canvas drawing its own controls, say — has to describe itself with ARIA for a screen reader to see it.
+
+## Text handling
+
+- Caret movement counts UTF-16 code units, so it can land inside an emoji.
+- Only ASCII spaces and tabs collapse. An ideographic space (U+3000) is preserved, gives a break opportunity and hangs at the end of a line, though with `break-spaces` it wraps to the next line instead. Other Unicode spaces are drawn as ordinary characters.
+
+Conformance against web-platform-tests is tracked in [Web platform tests](/reference/web-platform-tests).

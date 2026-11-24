@@ -1,0 +1,123 @@
+---
+title: "Getting started"
+description: "Install Native SDK and build a native app from HTML, CSS and TypeScript."
+---
+
+This guide installs Native SDK, builds a small app, and checks its output. You need Node.js 24 or later, and the tools the native host links with on your platform.
+
+## Install the prerequisites
+
+Check that Node.js 24 or later is available:
+
+```console
+$ node --version
+```
+
+On macOS, install the Xcode command line tools:
+
+```console
+$ xcode-select --install
+```
+
+On Linux, install the host's libraries and a C compiler, which [Shipping a Linux app](https://github.com/vercel-labs/native/blob/next/packages/cli/docs/linux.md) lists. On Windows, put `zig` on the `PATH`.
+
+## Add the CLI to the app
+
+An app is a directory of its own with an HTML page, its stylesheets and its scripts. It doesn't have to live in the Native SDK repository. Create a `hello` directory, anywhere you keep projects, and add the CLI to it:
+
+```console
+$ npm install --save-dev @native-sdk/cli
+```
+
+```json
+{
+  "scripts": {
+    "build": "native build . -o build/hello",
+    "check": "native check .",
+    "dev": "native dev ."
+  }
+}
+```
+
+The package installs the `native` command, so the scripts and `npx @native-sdk/cli` run the same CLI. Don't write `npx native`; the package named `native` on npm is unrelated.
+
+## Create the app
+
+Add three files to the directory.
+
+`index.html`:
+
+```html
+<!doctype html>
+<html>
+  <head>
+    <title>Hello</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <h1 id="greeting">Hello</h1>
+    <button id="wave">Wave</button>
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>
+```
+
+`style.css`:
+
+```css
+body { font-size: 18px; }
+h1 { color: #4338ca; }
+```
+
+`app.ts`:
+
+```ts
+const greeting = document.getElementById("greeting")!;
+document.getElementById("wave")!.addEventListener("click", () => {
+  greeting.textContent = "Hello, native";
+});
+```
+
+## Build and run
+
+Build the app:
+
+```console
+$ npm run build
+$ ./build/hello
+```
+
+The build writes a self-contained app bundle — `build/hello.app` on macOS, with the app's files in
+its Resources, or `build/hello` with a `build/hello.resources` directory elsewhere — so the app
+keeps working when it is moved and the source is deleted. The path given with `-o` runs it either
+way. The window shows a heading and a button. Click **Wave** to change the heading to "Hello, native".
+
+`npx @native-sdk/cli run .` builds and runs in one step, and `npm run dev` watches the app while you edit it.
+
+## Check what the app uses
+
+`native check` reports diagnostics without building an executable:
+
+```console
+$ npm run check
+```
+
+Native SDK supports a subset of HTML, CSS and the DOM. The command lists anything the app uses that isn't supported. The [supported features](/reference/supported-html) pages describe what compiles today.
+
+## Run the app headlessly
+
+Apps can run without a window, driven by scripted input, and save a screenshot:
+
+```console
+$ NATIVE_STEPS='click #wave | print #greeting' NATIVE_SNAPSHOT=out.png ./build/hello
+Hello, native
+```
+
+The run prints the text of `#greeting` after the click and writes `out.png`. The [headless testing guide](/guides/headless-testing) covers every step and environment variable.
+
+## Next steps
+
+- Read [How it works](/guides/how-it-works) to see what `native` and `scriptc` do at build time.
+- Use [live editing](/guides/live-editing) while you work on an app.
+- Configure the [window](/guides/windows) size and titlebar.
+- Read the [CLI reference](/reference/cli) for every command.

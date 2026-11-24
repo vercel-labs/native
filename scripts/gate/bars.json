@@ -1,0 +1,107 @@
+{
+  "version": 1,
+  "smoothness": {
+    "p95FrameMs": 16.7,
+    "frames": 240,
+    "skipFirstFrame": true,
+    "scenarios": {
+      "three-game": {
+        "pre": "click #stage"
+      },
+      "dashboard": {
+        "scroll": ".content"
+      },
+      "tickets": {
+        "scroll": ".rows"
+      },
+      "halyard": {
+        "scroll": ".overflow-y-auto",
+        "pre": "frame 0"
+      },
+      "player": {
+        "scroll": ".overflow-y-auto",
+        "pre": "frame 0"
+      },
+      "ui-dashboard": {
+        "scroll": ".overflow-y-auto",
+        "pre": "frame 0"
+      },
+      "ui-settings": {
+        "scroll": ".overflow-y-auto",
+        "pre": "frame 0"
+      },
+      "canvas-particles": {
+        "scroll": "body",
+        "noScroll": true
+      },
+      "canvas": {
+        "noScroll": true
+      },
+      "css-motion": {
+        "noScroll": true
+      },
+      "webgl-cube": {
+        "noScroll": true
+      },
+      "webgl-texture": {
+        "noScroll": true
+      },
+      "three-hero": {
+        "noScroll": true
+      }
+    }
+  },
+  "coverage": {
+    "passRate": 0.9,
+    "wptRevision": "056c528ccb5844b01628e0cd667520535dee16cc",
+    "dirs": [
+      "css/css-box",
+      "css/css-cascade",
+      "css/css-position",
+      "css/css-display",
+      "dom/events",
+      "html/dom"
+    ],
+    "jobs": 2,
+    "batch": 50
+  },
+  "compile": {
+    "coldBuildMs": 120000,
+    "warmBuildMs": 5000
+  },
+  "reload": {
+    "editToFrameMs": 1000,
+    "examples": [
+      "counter",
+      "ui-dashboard",
+      "three-game"
+    ],
+    "editsPerExample": 3
+  },
+  "uisdk": {
+    "matchPixel": 0.95,
+    "examples": [
+      "ui-dashboard",
+      "ui-settings",
+      "tickets",
+      "player",
+      "halyard"
+    ]
+  },
+  "chrome": {
+    "pixelDelta": 16,
+    "viewportScale": 2,
+    "virtualTimeMs": 300,
+    "calibrated": {
+      "webgl-texture": 0.997,
+      "webgl-cube": 0.99,
+      "three-game": 0.991,
+      "canvas": 0.987,
+      "three-hero": 0.964
+    },
+    "calibratedSource": "ns-webgl-parity, same Chrome flags and 16 ms frame stepping",
+    "notes": {
+      "player": "clock-sensitive: 96.9% when native is compared after a single 300 ms jump"
+    }
+  }
+}

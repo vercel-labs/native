@@ -1,0 +1,24 @@
+---
+title: "Live editing"
+description: "Watch an app and apply edits to the open window as you save."
+---
+
+`native dev` builds the app with scriptc's `dev` optimization and watches its directory.
+
+```console
+$ node packages/cli/compiler/cli.ts dev hello
+```
+
+## HTML and CSS edits
+
+An HTML or CSS edit recompiles the page's tables and applies them to the window that is already open. Nodes that stayed in the markup keep their identity, so listeners, input values and other script state survive.
+
+## TypeScript edits
+
+A TypeScript edit rebuilds the executable and relaunches it. Input values and scroll positions carry over, and the terminal prints how long the rebuild took.
+
+## Build errors
+
+A build error prints in the terminal, and the session keeps watching. A broken script doesn't stop HTML or CSS edits from reloading into the window that is already up.
+
+The [CLI reference](/reference/cli) lists every command.

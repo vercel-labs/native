@@ -1,0 +1,96 @@
+---
+title: "Native SDK"
+navTitle: "Introduction"
+description: "Build native apps from HTML, CSS and TypeScript."
+---
+
+Native SDK builds native apps from HTML, CSS and TypeScript. Its compiler, the `native` CLI, compiles the HTML and CSS ahead of time, and [scriptc](https://scriptc.dev) compiles the TypeScript, both your app's and the SDK's runtime, to machine code. The result is a small native app bundle — an executable with the images, fonts and other files it reads — that runs without a browser, webview or JavaScript engine.
+
+Native SDK is experimental and supports a subset of HTML, CSS and the DOM. Run `native check` on an app to see what it uses that isn't supported, and read [Supported HTML](/reference/supported-html), [Supported CSS](/reference/supported-css) and [Supported DOM](/reference/supported-dom) for the details. It builds on macOS, Linux and Windows: the windowed host is macOS's and Win32's, and on Linux the same pages run headlessly, which is how the web-platform tests run.
+
+## Install
+
+Install with Node.js 24 or later. On macOS the Xcode command line tools provide the compiler (`xcode-select --install`); on Linux the host's libraries and a C compiler are listed in [Shipping a Linux app](https://github.com/vercel-labs/native/blob/next/packages/cli/docs/linux.md); and on Windows `zig` on the `PATH` builds scriptc's link and the Win32 host.
+
+Add the CLI to an app with a package manager and run it from a `package.json` script:
+
+```console
+$ npm install --save-dev @native-sdk/cli
+```
+
+```json
+{
+  "scripts": {
+    "build": "native build . -o build/hello",
+    "dev": "native dev ."
+  }
+}
+```
+
+`npx @native-sdk/cli build .` runs the same CLI without installing it. Don't write `npx native`: the package named `native` on npm is unrelated.
+
+To work on Native SDK itself, clone the repository and install the workspace:
+
+```console
+$ git clone https://github.com/vercel-labs/native.git
+$ cd native
+$ pnpm install
+```
+
+A checkout runs the same CLI as `node packages/cli/compiler/cli.ts`.
+
+## Build an app
+
+An app is an HTML page with its stylesheets and scripts, in a directory of its own. It doesn't have to live in the Native SDK repository. [Getting started](/getting-started) walks through a complete app. The short version:
+
+```console
+$ npx @native-sdk/cli build . -o build/hello
+$ ./build/hello
+```
+
+`native run` builds and runs in one step. `native dev` watches the app and applies HTML and CSS edits to the open window in place; a TypeScript edit rebuilds and relaunches it. See the [live editing guide](/guides/live-editing).
+
+The [examples](https://github.com/vercel-labs/native/tree/next/examples) are:
+
+- `counter`: a counter whose buttons change a heading.
+- `todo`: a todo list with an input and an Add button, and headless-test steps.
+- `article`: an article with inline formatting, a link and headings.
+- `dashboard`: a sidebar, stat cards and a members table.
+- `canvas`: an animated canvas piece.
+- `canvas-particles`: a particle field drawn on a canvas.
+- `webgl-cube`: a spinning WebGL 2 cube.
+- `webgl-texture`: a WebGL 2 quad textured from a file.
+- `css-motion`: `@keyframes` and transitions.
+- `preact-todo`: a todo list in Preact.
+- `ime`: an input method composing marked text in a field.
+- `three-game`: a playable three.js arcade game.
+- `three-hero`: a lit, textured torus knot drawn with three.js.
+- `ui-dashboard`: a React 19 and Tailwind 4 dashboard built with UI SDK parts.
+- `ui-settings`: a React 19 and Tailwind 4 settings app built with UI SDK parts.
+- `halyard`: a React 19 issue tracker built with UI SDK parts, with a command palette and drag to reorder.
+- `player`: a music library and player with album art, a searchable track list and a working player bar.
+
+## Test an app
+
+Apps can run headlessly, driven by scripted input, and save a screenshot:
+
+```console
+$ NATIVE_STEPS='click #wave | print #greeting' NATIVE_SNAPSHOT=out.png ./hello
+Hello, native
+```
+
+The [headless testing guide](/guides/headless-testing) covers steps, snapshots and the environment variables that control a run.
+
+## Documentation
+
+- [Getting started](/getting-started): install Native SDK and build a first app.
+- [How it works](/guides/how-it-works): what happens at build time and what is left for runtime.
+- [CLI reference](/reference/cli): commands, environment variables, app identity and window options.
+- [Windows and menus](/guides/windows): window size, titlebar and drag regions, other windows, the menu bar and context menus.
+- [Tailwind CSS](/guides/tailwind): generate a Tailwind stylesheet for an app.
+- [JSX](/guides/jsx): `.tsx` and `.jsx` sources and the app's `tsconfig.json`.
+- [Live editing](/guides/live-editing): `native dev` and editing a running window.
+- [Supported HTML](/reference/supported-html), [supported CSS](/reference/supported-css), [supported DOM](/reference/supported-dom), [layout](/reference/layout), [graphics](/reference/graphics), [scripting](/reference/scripting) and [elements, forms and shadow DOM](/reference/elements-and-forms): the web platform that compiles today.
+- [Not yet supported](/reference/not-yet-supported): features `native` reports as unavailable.
+- [Known compiler limitations](/reference/compiler-limitations): compiler gaps and their workarounds.
+- [Web platform tests](/reference/web-platform-tests): conformance against the suite browsers share.

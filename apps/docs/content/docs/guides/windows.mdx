@@ -1,0 +1,118 @@
+---
+title: "Windows and menus"
+description: "Set the window size, minimum size, titlebar style and drag regions, open other windows, and build the menu bar."
+---
+
+Set the window's initial size in the page's `<head>`:
+
+```html
+<meta name="native-window" content="width=420, height=480">
+```
+
+The same tag takes `min-width`, `min-height`, `resizable=no` and a `titlebar` style:
+
+- `default`: the standard macOS titlebar.
+- `hidden`: the page draws to the top edge, under a transparent titlebar, with the traffic lights over it.
+- `hidden-inset`: the same, with a taller bar and the traffic lights set in, as in an app with its own toolbar.
+- `transparent`: like `hidden`, keeping the window title.
+
+## Draw into the titlebar
+
+A page that draws into the titlebar lays out around the traffic lights with `env(titlebar-area-x)`, `env(titlebar-area-y)`, `env(titlebar-area-width)`, `env(titlebar-area-height)` and `env(safe-area-inset-top)`. Mark the areas that drag the window with `app-region: drag`; `no-drag` keeps a control inside one clickable.
+
+```html
+<meta name="native-window" content="width=1100, height=680, titlebar=hidden-inset, min-width=760">
+<style>
+  .toolbar { height: env(titlebar-area-height, 40px); padding-left: env(titlebar-area-x, 0px); app-region: drag; }
+  .toolbar button { app-region: no-drag; }
+</style>
+```
+
+Double-clicking a drag area zooms the window. These are the names the web's Window Controls Overlay uses.
+
+## Move and resize
+
+A window's own members are a browser's, so a page can move and size it at any time:
+
+```ts
+window.resizeTo(500, 400);
+window.moveTo(120, 80);
+window.screenX; window.screenY;         // where the window is on screen
+window.outerWidth; window.outerHeight;  // the window's size, titlebar included
+window.close();                         // beforeunload may cancel it
+```
+
+The window hears `move` and `resize` when either changes, whatever changed it.
+
+## Other windows
+
+A link with a target opens another window. The target names it, and a link to the same name reuses
+the window it is already open in:
+
+```html
+<a href="#/settings" target="settings">Settings…</a>
+<a href="#/about" target="_blank">About</a>
+```
+
+`window.open()` does the same from script, with the window's features:
+
+```ts
+const settings = window.open("#/settings", "settings", "width=420,height=300,left=120,top=80");
+settings?.postMessage({ theme: "dark" }, "*");
+```
+
+A window runs the same page at an address of its own, so `location.hash`, `location.search` and
+`window.name` tell it which view it shows. The data a `postMessage()` sends crosses as JSON, and
+`window.opener` reaches the window that opened this one.
+
+## The menu bar
+
+A `<menu type="application">` in the page is the window's menu bar. The page doesn't draw it — the
+app builds a native menu from it — so it takes no room on the page:
+
+```html
+<menu type="application">
+  <menuitem label="New Window" accesskey="N" onclick="openNew()"></menuitem>
+  <hr>
+  <menu label="Edit">
+    <menuitem command="--copy"></menuitem>
+    <menuitem command="--paste"></menuitem>
+  </menu>
+  <menu label="View">
+    <menuitem command="--toggle-fullscreen"></menuitem>
+  </menu>
+</menu>
+```
+
+- A top-level `<menu label="…">` is a menu of the bar; its `<menuitem>`s and `<hr>`s are its items.
+  An item directly in the application menu joins the app's own menu, after About and Hide and
+  before Quit.
+- `label` is what the item reads, and without one it reads its text or its command's standard label.
+- `accesskey` is the shortcut, with the platform's modifier added: `accesskey="N"` is ⌘N and
+  `accesskey="Shift+N"` is ⌘⇧N.
+- `onclick` runs when the item is chosen, and `disabled` greys it out.
+- `command` names an invoker command — `--cut`, `--copy`, `--paste`, `--delete`, `--select-all`,
+  `--undo`, `--redo`, `--close`, `--minimize`, `--zoom`, `--toggle-fullscreen`, `--hide`,
+  `--hide-others`, `--show-all` or `--quit`. Choosing the item fires a bubbling `command` event at
+  the `menuitem`, and the platform runs the commands it knows. A command of the page's own is the
+  page's to handle.
+
+The menu is read when the page loads; changing the markup later doesn't rebuild it yet.
+
+## Context menus
+
+A `contextmenu` attribute names the menu a right-click shows:
+
+```html
+<article id="row" contextmenu="row-menu">…</article>
+
+<menu type="context" id="row-menu">
+  <menuitem command="--copy"></menuitem>
+  <hr>
+  <menuitem label="Remove" onclick="removeRow()"></menuitem>
+</menu>
+```
+
+A right-click fires a cancelable `contextmenu` event first, so a page that draws its own menu can
+call `preventDefault()` and the native one won't show. The items are the same `menuitem`s, with the
+same attributes and commands.

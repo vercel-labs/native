@@ -1,0 +1,199 @@
+---
+title: "Layout"
+description: "Flexbox sizing, multi-column, grid, tables, floats and intrinsic sizing."
+---
+
+## Flexbox sizing
+
+Grow and shrink follow the CSS algorithm: the flex base size comes from `flex-basis`,
+else the item's width, else its max-content size, and ignores the item's own min/max size; the hypothetical main size clamps it by min/max;
+an item with a zero flex factor is frozen at that size; an item that runs into its minimum or maximum size is frozen there and the rest is redistributed;
+and flex factors summing to less than one distribute only that share of the free space. Row items get the automatic minimum size (`min-width: auto`) from their min-content width — a replaced item transfers it through its aspect ratio from its used cross size,
+including a stretched one — and column items from their min-content height (so, as in Chrome, list rows need `flex-shrink: 0` to keep their height inside a scroller). Items in a wrapping container are sized to their fit-content width,
+each line shares the container's cross size through `align-content` (a single wrapped line stretches too),
+an item on `first baseline` or `last baseline` moves along the cross axis until its own baseline meets the line's — the first-baseline items share the largest distance from the cross-start edge to one of theirs and the last-baseline items the largest from one of theirs to the cross-end edge, an item with no baseline of its own standing in with its border box's edge —
+and contiguous text runs become anonymous flex items. An `inline-flex` container is an atomic inline box aligned on the baseline of its first flex line. An absolutely positioned child of a flex container takes its static position from `justify-content` and `align-items` (with `stretch` counting as the start),
+and a flex item with a `z-index` creates a stacking context even while it stays static. An item paints as one unit, the way an inline block
+does, in the order the items stand — so a later item's background covers the text of an earlier one.
+
+## Multi-column
+
+`columns` (a width, a count, or both), `column-count`, `column-width` and `column-gap` (whose `normal`
+is one em here) lay a block's content out into columns: the count and width follow CSS Multicol's pseudo-algorithm, and
+an auto width gives as many columns as fit. `column-fill: balance` (the initial value) balances the content across as
+few columns as it can fit, `auto` fills the columns in order when the box has a height of its own, and a box with no
+height keeps one column's worth of content. A child with `column-span: all` takes the full content width between runs
+of columns. `column-rule`, `column-rule-width`, `column-rule-style` and `column-rule-color` draw a rule in each gutter
+(a style other than `none` is drawn solid). The columns take block-level children: a child taller than its column
+overflows rather than splitting across columns, and text inside one child isn't fragmented, so forced `break-*` breaks
+and line-level splitting between columns aren't there yet.
+
+## Grid lanes
+
+`display: grid-lanes` and `inline-grid-lanes` (masonry): one axis keeps normal tracks
+(`grid-template-columns` or `grid-template-rows`, with `repeat()` and `grid-auto-*`), and the other packs items into
+the least-filled lane. Each item in order takes the shortest lane it can span — the grid-placement properties place it
+in the lanes it names or spans, and a span takes the highest of the lanes it covers — then that lane's running position
+advances by the item's size and the gap. `grid-lanes-direction` takes `row` or `column` (the default follows the
+template: lanes run down columns unless only the rows name tracks) with `fill-reverse` and `track-reverse`:
+`fill-reverse` stacks each lane from the container's end edge (upward in a column lane, leftward in a row lane, with
+that side's margin leading) and hangs the content there, and `track-reverse` numbers the lanes from the end, so auto
+placement starts in the last one and a tie breaks toward it. `grid-lanes-pack: dense` backfills from the start. A row
+lane is as tall as the items that land in it. `fit-tolerance` (a length, `normal` = 1em, or `infinite`) is how
+close to the shortest a lane must be to count as tied. Not yet: subgrid lanes, and the stacking-axis alignment and
+fragmentation rules.
+
+## Grid
+
+`display: grid` and `inline-grid`, with `grid-template-columns`/`grid-template-rows` taking lengths, percentages,
+`auto`, `min-content`, `max-content`, `fit-content()`, `minmax()` and `fr`, and `repeat()` with a positive count,
+`repeat(auto-fill, …)` and `repeat(auto-fit, …)` (as many copies as fit a definite content box, `max-width`, or — through a preferred
+aspect ratio — `max-height`, while a definite `min-width`, or a `min-height` the ratio turns into one, asks for the fewest copies
+that reach it; an `auto-fit` copy no item lands in collapses with its gutters);
+`grid-auto-columns`/`grid-auto-rows` size the implicit tracks an item's placement adds, and `grid-auto-flow` runs
+`row`, `column` or either `dense`; `grid-column`/`grid-row` and `grid-area` (with their `-start`/`-end` longhands) take line
+numbers, negative lines counted back from the end of the explicit grid, `span N` and `auto`;
+a track list's `[name]` groups name the line they sit on (before the next track, or after the last one), and a placement
+may name a line instead of numbering it, either side taking an occurrence count — `a 2`, `b -1` — while `span a 1` reaches
+forward to the next line of that name; a line past the explicit grid carries every name, so a name with no line of its own
+starts on the first implicit line and `span <name>` covers one implicit track. `grid-template-areas` takes its row strings, `grid-area: <name>` fills the named area, and each
+area names its edges `<name>-start` and `<name>-end` for the other placements to reach;
+`gap`/`row-gap`/`column-gap`
+(and the older `grid-gap` spellings) separate the tracks, a percentage resolving against the content box (`normal` is what a gap starts as, and its percentage
+leaves an intrinsic size out); the `grid` and `grid-template` shorthands take `<rows> / <columns>`, and `grid` also the
+`auto-flow` forms that pair one template side with an auto-flowing other side; `place-items`, `place-content` and
+`place-self` set the two axes at once; `justify-items`/`justify-self` and `align-items`/`align-self` (shared with flex) place an
+item in its area, `stretch` included, and auto margins take the free space first. The alignment keywords are CSS Box
+Alignment's: `start`, `flex-start`, `self-start` and `left` sit on the start edge, `center`, and `end`, `flex-end`,
+`self-end` and `right` on the end edge (a page laid out left to right reads the physical edges that way), and a `safe` or
+`unsafe` overflow position may front any of them: `safe` puts an item, or a track set, that overflows its area or its
+container on the start edge, while `unsafe` — and a position with no overflow keyword — lets it overflow both edges.
+Each keyword keeps the word it was written with in the computed value (`start` and `flex-start` included). `normal` stretches an item too, except
+for one that brings a size of its own — a replaced box or one with a preferred aspect ratio — where it starts the item.
+`baseline`, `first baseline` and `last baseline` share a baseline across the items of a row: the row is as tall as the
+furthest item above that baseline plus the deepest one below it, and each item moves down until its own first (or last)
+baseline sits on the group's. A box with no baseline of its own — one that holds no line box, or one written across
+the container's block axis, whose own baselines run along that axis rather than across it — synthesizes one from its
+bottom edge, except that a percentage height, which has no size to resolve against while the row is being measured,
+leaves such a box out of the group. An item spanning tracks joins the group of the row it starts in (the row it ends in, for `last baseline`), an
+auto block margin takes it out of the group. On the inline axis a container whose axis runs down the page shares one
+baseline among the items written across that axis: the group takes the first (or last, as `justify-self` names it)
+baseline of each of them, so it reaches as far before that baseline as the furthest of them and every item moves along
+the axis until its own baseline sits on the group's, which puts a `last baseline` group against the end of the axis.
+A box written the container's own way has no baseline across that axis, so the baseline values fall back to the start
+edge there (`last baseline` the end edge), and an inline auto margin takes an item out of the group. `align-content` and `justify-content` take them too, packing the track set on the start
+edge, or the end edge for `last baseline`, as one container forms a single group. A grid container that is itself aligned on a
+baseline offers the first baseline of the first item in its first row that lines up on one, in grid order — that item's own first
+baseline whichever side of it the item lines up on, or its border box's when no item there lines up on one — and its last row's
+for `last baseline`, so a grid inside a flex or grid line puts that item's baseline on the line. The track sizing algorithm is CSS Grid's: base sizes
+come from fixed lengths or from the items' min-content contributions, growth limits from fixed lengths or max-content
+contributions, free space grows the tracks to their limits, `fr` tracks share what is left after the definite ones (each
+keeping its automatic minimum, and the factors counted as at least one, so `0.4fr` rows leave room over), and every track
+whose maximum is `auto` stretches into the rest of a definite width or
+height — so an `auto-fit` collapse leaves its room to the copies that stay. A percentage track, or a `fit-content()`
+given one, sizes as `auto` while the container's own size is indefinite, and resolves against the size the tracks then
+give the container: in a shrinkwrapped float or an auto-height grid a `20%` row takes a fifth of the height the rows ask
+for, and the auto rows stretch into what it leaves over. A flexible track in a container with no size of its own is worth
+the room its items ask for, and CSS Grid resolves it in two passes: the row takes its factor's share of the item's own
+size, which makes the container that tall, and the rows then share out that height — two `0.4fr` rows around a 100px item
+are 40px each, then 32px. An item spanning more than one column, one of them flexible, has an automatic minimum size of
+zero, so a wide descendant overflows it instead of widening those columns. A run of tracks whose maximums are all fixed
+caps the automatic minimum size of an item that takes its size from its content, so `minmax(auto, 0)` rows and columns
+take no room and their items overflow them, while an item that states its own size keeps it — with its padding
+and borders around it — and a `min-content` or `max-content` minimum keeps the content's size. A baseline-aligned item's minimum contribution carries a shim — the
+distance from its own baseline to the one its group shares — which the fixed maximums in that run clamp along with
+the rest of the contribution, but never below the item's own border, padding and shim, so `minmax(auto, 0)` beside a
+shimmed item keeps the room down to its baseline. An item that scrolls in an axis takes no automatic minimum size in that axis,
+so an `auto` track it alone occupies collapses to nothing and its content overflows. A column's contributions are resolved a second time once the rows have their sizes, so a percentage
+height or an aspect ratio that the row settles can change how wide a track has to be. `justify-content` and `align-content` place the track set in a container with room to spare —
+`start`/`end`/`center`, the three `space-*` packings and `stretch`, which is what `normal` means for a grid. An
+out-of-flow child takes its static position in the content box, aligned by `justify-items`/`align-items` — and one whose
+containing block the grid container is takes the area its placement names as its containing block, so its percentages and
+offsets resolve against the area, and its static position is that area's start corner, aligned by its own
+`justify-self`/`align-self`; an `auto` side of the placement sits on the corresponding padding edge of the grid container,
+so a box with no placement at all fills the padding box, and a line the grid doesn't have counts as `auto`. This holds for
+any out-of-flow descendant the grid is the containing block of, not only a direct child; a baseline keyword there
+falls back to the start edge, or the end edge for `last baseline` — and grid items
+paint in `order`-modified document order. An `inline-grid` shrinks to fit its tracks. Auto-placement follows the placement algorithm:
+items placed on both axes take their cells first, then the cursor walks the flow axis, wrapping at the end of a line and
+taking the first free span, with `dense` packing each item from the start of the grid. `grid-template-columns` or
+`grid-template-rows` may be `subgrid`: the item then adopts the tracks it spans in its parent for that axis — their
+sizes and the parent's gutter, with the subgrid's own `gap` where it sets one — and its items' line numbers count from
+the subgrid's first line. A subgrid's items contribute their content to the parent's auto track sizing through the
+subgrid (as a spanning item's contribution), and a subgrid's own margin, padding and border are not yet applied as the
+extra layer of margin the spec puts on its edge items. Line names written after `subgrid` are read and accepted but
+don't name lines yet. Not yet: an out-of-flow child placed by auto-placement taking the container's padding box as its
+containing block (it takes the content box).
+
+## Intrinsic sizing
+
+Min-content and max-content widths treat a percentage width as `auto`, as CSS Sizing does,
+except a table's own percentage width, which resolves against the space available to it. So a percentage-width child inside a flex item doesn't inflate the item's automatic minimum size. `width`,
+`height`, `min-width`, `max-width`, `min-height` and `max-height` take the `min-content`, `max-content` and `fit-content` keywords: a width keyword measures the content's own width (`fit-content` is max-content squeezed into the space available but never below min-content),
+and a height keyword lays the box out at the inline size it names and takes the height it reaches (`fit-content` on the block axis fits the height available to the box,
+and is max-content when it has none). The keywords count the box the way `box-sizing` says: a border-box box's keyword includes its padding and border. A child's percentage margin is cyclic while this box's width is what is being measured,
+so it resolves against zero in a min-content or max-content width, and an absolutely positioned box measuring its own shrink-to-fit width resolves its content's percentage heights against the height its offsets pin. A child's cyclic percentage `min-width` resolves against zero in a min-content or max-content contribution,
+and its cyclic percentage `max-width` counts as `none` there, as CSS Sizing says; where the containing block's width is already known the percentage resolves against it. A `fit-content` width in a contribution is the max-content width when contributing a max-content size and the min-content width when contributing a min-content one,
+since the space to fit into isn't known yet. Floats contribute their outer widths to a box's max-content width (with no line to break they all sit on one line) and the widest of them to its min-content width.
+
+## Aspect ratio
+
+`aspect-ratio` takes `auto`, a `<ratio>` such as `16 / 9` or `1.5`, or `auto <ratio>`. A bare ratio relates the box `box-sizing` sizes,
+while `auto <ratio>` relates the content box, as a replaced element's own image ratio does. With one axis specified the other follows the ratio,
+a definite height gives an auto width through it, and `auto <ratio>` makes the ratio's height a floor the content can grow past rather than a fixed size. A definite height transfers through the ratio into the box's intrinsic width,
+min-height and max-height transfer into the inline axis, and a specified height is clamped by min/max-height before it transfers. `<img>`, `<canvas>` and an inline `<svg>` have their image's ratio as their preferred ratio (an svg's is its `viewBox`): `auto <ratio>` keeps the image's and falls back to the given one,
+a bare ratio overrides it, and `box-sizing: border-box` on an image's own ratio still counts the content box. Absolutely positioned boxes follow the same rules against their offsets — the ratio decides the height when the width is pinned,
+and the width when only the height is. A `width` or `height` naming `min-content`, `max-content` or `fit-content` gives way to the ratio on its axis,
+and in the block axis those keywords behave as `auto`. A `min-height` or `max-height` naming an intrinsic keyword on a replaced box names the block size it takes at its inline size,
+given the box's own ratio, so that height transfers into the inline axis as a used height does, and an intrinsic-keyword width on a replaced box resolves a definite height first so the ratio can name the width. A minimum transferred from `min-height` is capped by a definite `max-width`,
+which the box can't exceed. A box whose height a preferred ratio makes definite closes its bottom edge to margin collapsing,
+so its last child's bottom margin stays inside it, as a browser does. A flex item's main size, and its automatic minimum size,
+come from the cross size it is given or stretches to, through its ratio.
+
+## Tables
+
+`display: table`, `inline-table`, `table-row-group`, `table-header-group`, `table-footer-group`,
+`table-row`, `table-cell`, `table-column`, `table-column-group` and `table-caption`, with automatic and fixed table layout,
+column widths from cells and `<col>`/`<colgroup>` (colspan and rowspan included), percentage widths,
+`border-spacing` in the separate borders model (a percentage is not a length, so the declaration is ignored,
+as a browser does), captions above or below the table (`caption-side`), `background-color` on a table's rows,
+row groups, columns and column groups (the table paints them beneath its cells, each part only in the areas its cells cover,
+so the border spacing between parts stays clear), `vertical-align` (baseline, top, middle, bottom) inside cells (baseline-aligned cells line up their first lines,
+and content in an anonymous cell counts too, so text directly inside a row gives the row a baseline;
+an inline-table sits on its line by its first row's baseline, or by its bottom edge when it has none),
+and the `<table>`, `<caption>`, `<colgroup>`, `<col>`, `<thead>`, `<tbody>`, `<tfoot>`, `<tr>`, `<td>` and `<th>` defaults in the UA sheet. A `<table>` is `border-box` and an auto-width table shrinks to its preferred width,
+and its `height` is a minimum, so it is never shorter than the rows it holds; a cell's `height` is a minimum too, so content taller than it stretches the row,
+though not when the content only overflowed because a child's percentage resolved against the cell itself (an intrinsic pass resolves it against nothing). The `cellspacing`, `cellpadding`,
+`border`, `width` and `height` attributes act as presentational hints that author CSS overrides (`width` on `<col>` sizes the column), and stray content inside a table row gets an anonymous cell. Table-related boxes outside a table (a lone `display: table-cell` in a `div`,
+say) are wrapped in anonymous table boxes (CSS 2.1 §17.2.1/17.2.2): a run of table-internal siblings becomes an anonymous table that shrinks to fit,
+missing rows, cells and row groups are supplied around stray content, and a block inside an anonymous cell splits it into the surrounding flow. A table box's own text is wrapped in an anonymous cell too,
+and white space between table parts generates nothing whatever `white-space` says; an anonymous cell's inline content breaks into lines like a block's,
+and the cell is as tall as all of them. A floated table part computes to `block` (CSS 2.1 §9.7), so a floated row group or row becomes a block whose cells the anonymous-table fixup wraps,
+and a float in an anonymous cell's content is laid out in the cell, which is a formatting context of its own. A replaced element can't be a table part,
+so an `<img>` with a table-internal `display` is inlined and an anonymous cell wraps it as it would inline content. `empty-cells: hide` draws no background or border for a cell with no content,
+a collapsed row, column, row group or column group (`visibility: collapse`) keeps no room at all — its cells, content and border spacing go with it, even when a row inside a collapsed group asks to stay visible — while `visibility: hidden` keeps the room, and under `border-collapse: collapse` the border spacing is removed, conflicting borders on a shared edge are resolved for each cell edge segment on its own (`hidden` wins outright,
+then the wider border, then the stronger style, then the source order), the winning border is split half to each side,
+and the table paints each stretch of a grid line at the width of its own segment, a cell's content inset by the halves of its own edges,
+a `box-sizing: border-box` width (or `min`/`max-width`) on a cell covering those halves so its border box is the size it names,
+and a row's specified `height` is its border box, counted from the centre of one grid line to the centre of the next, and a cell's `height` sets its row's in the same way.
+A table with a height taller than its rows gives the extra to the rows that name no height, in proportion to the height each needs (or equally when they need none),
+and shares it out in proportion to their heights when every row has one. A fixed-layout table's `width` decides how its space is shared,
+but its declared columns and the border spacing are a floor under it, and with no auto columns the extra goes to the columns that declared a length,
+in proportion to it, while a percentage column keeps its share. A percentage `padding` on a cell counts as zero while the table works out how wide its columns have to be. A row,
+row group or cell with `position: relative` moves by its offsets, its cells and content with it; a percentage offset in the block axis resolves against the height its containing block was given,
+since a table part grows past that height to hold its content. A positioned part that takes a share of the collapsed grid keeps painting with the table's cells,
+so the grid it shares stays above its background.
+
+## Floats and clearing
+
+`float` (`left`, `right`), `clear` (`left`, `right`, `both`), and clearance. A float is blockified — an inline-level one keeps its place in the inline content around it,
+going at the top of the line it appears on so that line is shortened by it, and never higher than the line the content before it ended on,
+and shrinks to fit its containing block's width; it has no effect on a flex item. Each float is pushed down until it fits beside the floats before it,
+then held to the content edge on its side, sliding below a float in its way; a block-level one that follows content goes below the line boxes that content made unless its own content still fits beside the last of them. Line boxes are shortened beside floats: a line box with no room for its first unbreakable run,
+or one the floats push into, moves below them, and a block formatting context root — `overflow` other than `visible` on either axis,
+a flex item, an inline-block, a table cell or a float — avoids the floats outside it, narrowing into the space they leave or dropping below them,
+and its `auto` height includes its own floats. `shape-outside` gives a float an outline for the lines and boxes beside it to clear:
+the same basic shapes `clip-path` takes (`inset()`, `circle()`, `ellipse()`, `polygon()`), against `margin-box` (the default for a float),
+`border-box`, `padding-box` or `content-box`, and `shape-margin` grows the outline outward (a `path()` or `url()` shape is
+more than the line fitting reads, so the float keeps its box). A float's box paints below the inline content beside it, as
+CSS 2.1 Appendix E orders them; its own contents still paint above the inline content around it.

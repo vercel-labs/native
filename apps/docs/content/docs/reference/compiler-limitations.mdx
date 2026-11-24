@@ -1,0 +1,72 @@
+---
+title: "Known compiler limitations"
+description: "Compiler gaps that can stop a Native SDK app from building, and the workaround for each."
+---
+
+# Known compiler limitations
+
+Native SDK compiles your app's TypeScript, and its own runtime, with [scriptc](https://scriptc.dev). scriptc supports a large part of TypeScript and Node.js, but it isn't yet at full parity. The CLI's `check` command reports the HTML, CSS and DOM an app uses that isn't supported; this page covers compiler gaps that can stop a build or change how an app behaves at runtime.
+
+Most gaps are in the internals of libraries rather than in app code. Each item below gives the workaround to use until the compiler handles the pattern. If one blocks you and no workaround fits, open an issue with a small repro.
+
+## Type checking
+
+Every file in a build is type-checked, including JavaScript files in your dependencies.
+
+- **Untyped JavaScript can be refused around typed values.** A value that reaches one of the SDK's typed objects can't be passed on untyped (`SC7005`). Add JSDoc types to the values at the boundary, or keep the untyped code behind a typed wrapper.
+- **JSDoc types must be complete.** A bare `{Array}`, `{Promise}` or `{Set}` is an error where `tsc` accepts it (`SC0001`); write `{Array<unknown>}`, `{Promise<void>}`, and so on. `@readonly` on a getter is also an error.
+- **JSDoc that names a DOM class is applied.** `@param {Image}` and similar annotations are checked against the class the build's type world uses for the name: the browser's when a dependency's declarations reference `lib.dom` (as Preact's do), otherwise the runtime's own. A name the file also uses as a value is the runtime's class.
+- **An `any` object literal keeps the shape it was written with.** A field assigned after the literal is refused (`SC1090`). Put the field in the literal or declare an interface for the object.
+
+## Classes
+
+- **A class can't extend a conditional expression, or a class returned from a helper that adds static members** (`SC1090`). Custom-element helpers built this way don't compile; define a plain class and extend it directly.
+- **Static members can't be read through a class value.** `constructor.observedAttributes` and `Reflect.get(SomeClass, "name")` answer `undefined` (`SC1090`). Keep the value in a side table, or pass the class value as `any`.
+- **`this` in a static block is refused** (`SC1090`). Move the initialization into a static method or module-level code.
+- **A constructor that returns an object only compiles at the top level** (`SC1090`). Call such a factory without `new`, or return `this`.
+- **Prototype reflection isn't supported.** `Object.create(SomeClass.prototype)`, `setPrototypeOf`, `getPrototypeOf` and `isPrototypeOf` don't reflect as they do in Node (`SC1090`). Avoid re-prototyping objects.
+- **A class value typed as an array can lose its methods** when it is reached through the array type (`SC0001`, or a runtime throw). Keep the class-typed reference and call the method on it.
+- **A class can't declare a numeric index signature** (`SC1090`). Extend `Array` if a class needs `list[0]`, as the DOM's list types do.
+- **Accessor types can't differ between a class and its subclass, or between a getter and its setter** (`SC1090`, `SC2004`). Give both halves the same type.
+
+## Functions and promises
+
+- **`arguments.length` can't be used with default, optional or rest parameters** (`SC1090`). Test the parameter itself: `if (value === undefined)`.
+- **A function that forwards `arguments` can't be called from typed TypeScript** (`SC1090`). Declare named parameters and forward those.
+- **Omitting an optional parameter throws at runtime** (`expected function at $[2]`). Pass `undefined` or a no-op in the slot.
+- **An unhandled promise rejection ends the program.** A browser reports the rejection and keeps running. Add a `.catch()` to every chain, or use `try`/`catch` in an `async` function.
+- **A `then` handler that returns `Promise.all` over a dynamically typed promise defers the rest of the chain** (`SC2020`). `await` the inner promise and return its value.
+
+## Objects, arrays and numbers
+
+- **A missing `Map` key read through `!` throws** where JavaScript passes `undefined` on. Use `map.get(key) ?? fallback`.
+- **`new WeakRef(x)` has no lowering** (`SC2020`). Keep a strong reference instead.
+- **Spreading a `Map` iterator into a rest call, as in `Math.max(...map.keys())`, throws at runtime** (`expected array ..., got Array Iterator`). Collect the values into an array with a loop first.
+- **A ragged tuple destructured in untyped JavaScript throws** when a missing element is read. Give every row the same length.
+- **Writing `.length` on an array-typed value that isn't a native array fails** (`SC1090`). Assign a new array instead: `items = []`.
+- **Assigning a number to a `string` property throws** instead of coercing as a browser does. Call `String(n)` first.
+- **A computed property write on a class instance can break unrelated conversions** (`SC1090`), with the error reported elsewhere in the program. Write known properties directly, or keep the values in a `Map`.
+- **`typeof document` in a library is refused** as a circular import (`SC1016`). Test `document !== undefined`.
+
+## Modules and packages
+
+- **CommonJS packages that assign `module.exports` inside a conditional can fail** (`SC1090`). React 19 and the packages around it ship builds this compiler handles, so React apps run; a package that breaks this way needs an ES module build.
+- **A package can compile but fail at run time.** A pattern scriptc has no lowering for compiles into a call that throws `scriptc: not compiled: … [SC1090]` when it runs, leaving the window blank where a browser would have run the code. The build warns about none of this, so run the app from a terminal once before shipping it; the message names the module and line.
+- **A library's own files are type-checked as part of the build.** A package whose JavaScript doesn't type-check stops the build. Patch the annotations, or use a build of the package that types.
+- **An inline `<script>` that imports a package is compiled on its own** and can fail where the same code in a module compiles (`SC8005`). Move the code into a module file.
+- **There is no per-module compile cache yet.** A large dependency is compiled again on each build, so the edit, build and run loop is slower with big libraries.
+
+## Frameworks
+
+React 19 and Preact both compile and run: `useState`, event handlers, effects and components from a UI library. What to expect:
+
+- **Some components reach a compiler gap.** A component whose code uses an unsupported pattern can stop the build (`SC3004`, "void type only allowed for function results") or compile and throw at run time (see the note above). `@ui-sdk/react`'s `Slider`, for example, hits the first and its `Tabs` the second.
+- **React builds are slow and large.** A page with one `useState` takes minutes and tens of megabytes more than a plain TypeScript app, which builds in about two minutes at around 22 MB. `SC6101`'s count of functions that use untyped values is inside `react-dom`, not your page.
+- **No cache is shared between apps.** A rebuild of the same app is much faster, but a second React app pays the full cold compile again.
+
+## Runtime notes
+
+- **`fetch()` accepts a `string` or `URL` only, and `RequestInit` has no `cache` member** (`SC0001`). Pass a URL and set caching headers on the request.
+- **`customElements.define` reports every attribute change to `attributeChangedCallback`**, because a class's static `observedAttributes` can't be read. Filter on the attribute name in the callback.
+- **A `for…of` loop needs its loop variable declared in the loop head** (`SC1090`, `SC1091`). Write `for (const item of items)`.
+- **A DOM member typed non-null can hold another value at runtime.** For example, `document.body` is the root element for a document that has no body, where a browser's is `null`. Don't rely on null checks for those members.

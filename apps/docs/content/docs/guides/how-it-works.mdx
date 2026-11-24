@@ -1,0 +1,54 @@
+---
+title: "How it works"
+description: "What the native CLI and scriptc do at build time and what the runtime does in the app."
+---
+
+```text
+index.html + style.css ──native──▶ .native/page.json (node table + pre-cascaded numeric rules, in the bundle)
+app.ts ─────────────────────────▶ .native/src/     (copied; `document` import injected)
+runtime/*.ts (DOM, style, layout, paint) ─┐
+                                          ├──scriptc──▶ native binary
+host/macos.m (window, events, CG/CoreText)┘   via FFI
+```
+
+## Build time
+
+`native` parses HTML and CSS, parses every value into numbers, matches tag and `#id` selectors, sorts them by specificity, merges unconditional rules per element, removes rules that no element can match, and reports unsupported features with hints.
+
+The page's tables are data rather than generated code, so an edit to the markup or styles changes nothing scriptc compiles: the build rewrites the tables file in the bundle and keeps the executable, in milliseconds. A change to the scripts, or to generated code the markup decides (an inline handler's element, a script's order), is a new program and still compiles.
+
+A rule is removed only when the page's scripts can't bring its selector to life. Once a script touches `classList`, `className`, an `id` or an attribute (`setAttribute`, `dataset`, and so on), class and id conditions are left to the runtime, an id condition becomes an `[id]` test, and every rule is kept.
+
+## Runtime
+
+scriptc compiles the TypeScript to machine code. At runtime the SDK handles class and `:hover`/`:active`/`:focus` checks for the remaining conditional rules, inline styles set from script, inheritance, block and flex layout, text wrapping, painting, hit testing, focus, text editing and event dispatch. Inline styles are parsed with the compiler's own value parser in `shared/css/`.
+
+Elements created with `document.createElement` never went through the build-time cascade, so `native` also emits a compact selector table: every rule a created tag could match, already in cascade order. At runtime a created element compares only its tag and id against that table. `native` emits the table when your scripts call `createElement`, and it finds the tags involved by scanning the scripts for `createElement("…")` calls. When a script may change an existing element's classes or id, the table holds every rule instead, so a selector the build couldn't match statically can still start matching later.
+
+## Bundles
+
+A build writes the app's own files next to the executable, so the app runs once it is moved and its source is gone. The compiler records every image, `@font-face` file, linked or imported style sheet, and the files scripts name with a literal `fetch()` or import. `compiler/bundle.ts` gives each a place in the bundle — the path it had relative to the app, so a page-relative URL still names it — and copies them into the `.app`'s Resources on macOS or a `<executable>.resources` directory elsewhere. The tables name bundle-relative paths, and the runtime asks the host for the bundle's directory at mount, prefixing every file it opens (`runtime/assets.ts`). The bundle also holds `.native/page.json`, the compiled page and style tables: the executable carries none, so the same executable serves every edit to the page, and the runtime reads the file at startup (`runtime/app/page.ts`). A dev build skips all of it, keeps the source paths, and writes the tables to `.native/gen.ts` and `.native/dev.json` instead.
+
+## Host
+
+The host is about 300 lines of Objective-C. It provides the window and event pump, a retained display list replayed with CoreGraphics and CoreText, and text measurement.
+
+## Frontend frameworks
+
+A framework ships as an npm dependency and builds the app's markup itself. `examples/preact-todo` is the reference: it uses Preact with hooks and no JSX, renders the page, takes typing and clicks, and updates its list. `tests/preact.ts` drives it through `NATIVE_STEPS` in `pnpm test`.
+
+- Dependencies are vendored. `native` resolves each bare import the way Node does (`import.meta.resolve`), copies the package's shipped source into `.native/src/deps/`, and rewrites the specifiers between copies. A copy is how a dependency's bare `document` and other globals get bound to the runtime: the same global imports `native` adds to app sources are prepended to each copied file. Type-only imports keep resolving from `node_modules`, so their declarations still typecheck.
+- The DOM is the framework's interface. Nodes are real `Node`, `Element`, `Text`, `Comment` and `DocumentFragment` objects with the node API. Every element carries the `on<event>` handler properties, which a framework checks with `"onclick" in el` to pick the listener name it registers, and attribute values may be booleans, as a renderer passes `disabled: true` through.
+- Updates land between frames. A batched renderer commits from a resolved promise, so a step's effect is on screen before the next step reads it. Work scheduled for the next animation frame, such as Preact's `useEffect`, runs on a `frame` step.
+- The DOM queries with the style sheets' selectors. `querySelector`, `querySelectorAll`, `matches` and `closest` use the same selector engine as the cascade, so combinators, selector lists, `:not()`, `:is()`, `:where()`, attribute selectors and `:scope` select what a browser would, and an invalid selector throws a `SyntaxError`. `getBoundingClientRect` and `getClientRects` answer in viewport coordinates, and an inline box reports the runs of its fragments rather than a box of its own.
+
+## Source layout
+
+Large areas are split into small modules, so separate changes rarely touch the same file. The top-level file in each area re-exports its public API, so imports elsewhere don't change.
+
+- `shared/css/`: the declaration and value parser, used by the compiler and by the runtime for inline styles. `declarations.ts` handles declaration blocks, lengths and keywords, and the directory also holds `colors.ts`, `borders.ts`, `fonts.ts`, `properties.ts` and `properties/`, with one module per area of CSS (`box`, `flex`, `borders`, `backgrounds`, `text`, `misc`). To support a property, add a case to its area's module.
+- `compiler/css/`: `parse.ts` handles style sheets and error recovery, `selectors.ts` and `types.ts` handle selectors, `declarations.ts` holds declarations and diagnostics, and `fonts.ts` scans `@font-face`.
+- `runtime/layout/`: `box-model.ts` handles lengths and box sums, `text.ts` handles text, `box.ts` holds `layoutBox` dispatch and the root, `block.ts` handles block flow and margin collapsing, `inline.ts` handles inline layout, `flex.ts` handles flex layout, `geometry.ts` handles offsets and scrolling into view, and `positioned.ts` handles absolute and fixed boxes.
+- `runtime/cssom.ts`: `el.style` (a `CSSStyleDeclaration` subset), the `style=""` attribute, the computed-style object and `getComputedStyle`.
+- `compiler/bundle.ts`: collects the files a build copies beside the executable and names each in the bundle; `runtime/assets.ts` finds that directory at startup and resolves the paths the build wrote.
+- `runtime/app/`: `mount.ts` handles compiled tables and the frame pipeline, `page.ts` reads a release build's tables from its bundle and mounts them, `dev.ts` and `dev-watch.ts` handle a dev build's in-place table reloads and the files they read, `pointer.ts`, `scroll.ts` and `keyboard.ts` handle input, `loop.ts` runs the native event loop, and `headless.ts` implements `NATIVE_STEPS`, `NATIVE_SNAPSHOT` and `run()`.

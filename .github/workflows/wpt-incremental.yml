@@ -1,0 +1,49 @@
+# Checks that incremental layout lays every WPT page out the way a full layout does: each
+# directory runs under NATIVE_VERIFY_INCREMENTAL=1, which lays every frame out a second time from
+# scratch and reports any box the reused layout got wrong (packages/cli/scripts/
+# wpt-verify-incremental.ts). It takes hours over the whole list, so it runs nightly and on
+# demand rather than on every pull request, one job per directory.
+name: wpt-incremental
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        dir:
+          - css/css-position
+          - css/cssom-view
+          - css/css-display
+          - css/css-tables
+          - css/css-flexbox
+          - css/css-grid
+          - css/CSS2/normal-flow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install the host's build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld pkg-config \
+            libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
+            libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
+            libegl-dev libgl-dev libgl1-mesa-dri fonts-dejavu-core
+      - run: pnpm install --frozen-lockfile
+      - name: Fetch WPT
+        working-directory: packages/cli
+        run: node compiler/cli.ts wpt fetch
+      - name: Verify incremental layout
+        working-directory: packages/cli
+        run: node scripts/wpt-verify-incremental.ts --jobs 2 ${{ matrix.dir }}

@@ -1,0 +1,109 @@
+---
+title: "Supported HTML"
+description: "The HTML, selectors, generated content, lists and document modes that the native CLI compiles."
+---
+
+## HTML
+
+Native SDK supports block, inline and inline-block elements, mixed text and inline content (`<b>`, `<em>`, `<a>`,
+`<code>`, `<mark>`, `<s>`, `<u>`, `<br>`, …), `<input>` (text and password, with `checkbox`, `radio` and `range`
+drawn as widgets: a ticked box, a chosen radio dot and a slider whose thumb a click, a drag or the arrow keys
+move, `appearance: none` handing the box to the author, and `hidden` taking no space), `<img src>` (decoded with ImageIO,
+so PNG, JPEG, GIF and the other formats it reads, with the EXIF orientation applied unless `image-orientation: none` says otherwise;
+the file is resolved at build time, next to the page or against the site root for a URL starting with `/`,
+and copied into the app's bundle at the place the page names it), `<link rel=stylesheet>` (a sheet is read from a local file at build time;
+a remote or `data:` URL is a warning and the sheet is skipped, as a browser does when it can't fetch one,
+so any font family it defines falls back like any unavailable font), `<style>`, `<script>` (external `src` and inline classic scripts,
+run in document order; each script is its own module, so they don't share globals), `<canvas>` (sized by its width and height attributes,
+300 by 150 by default, or by CSS), `<svg>` (inline SVG; see [Graphics](/reference/graphics)), `style=""`, `<meta name="native-window" content="width=…, height=…">`
+
+## Selectors
+
+Selectors support compounds of `tag`, `#id`, `.class`, attribute selectors (`[attr]`, `[attr=v]`, `[attr~=v]`,
+`[attr|=v]`, `[attr^=v]`, `[attr$=v]`, `[attr*=v]`, with the optional `i` flag), `:hover`, `:active`,
+`:focus`, `:focus-visible`, `:focus-within`, `:popover-open`, the form states `:checked`, `:indeterminate`,
+`:default`, `:disabled`, `:enabled`, `:required`, `:optional`, `:read-only`, `:read-write`, `:placeholder-shown`,
+`:valid`, `:invalid`, `:in-range`, `:out-of-range`, the structural `:first-child`, `:last-child`, `:only-child`, `:empty`, `:nth-child(An+B)`/`:nth-last-child()` and their `*-of-type` forms,
+`:not()`, `:is()`, `:where()`, `:has()`, `:root` and `*`, joined by descendant (` `), child (`>`), adjacent-sibling (`+`) and general-sibling (`~`) combinators,
+plus comma lists. `:not()` takes one or more compounds (`:not(.a, .b)`), `:is()`/`:where()` take compounds too and are expanded at build time,
+`:has()` takes relative selectors with any of the four combinators (`.card:has(> img)`, `:has(+ p)`, `:has(.a .b)`) and is matched at runtime, and may sit inside `:not()` (`:not(:has(> svg))`),
+so a class a script adds inside one starts it matching,
+and specificity follows the spec (`:is()`/`:not()`/`:has()` use their most specific argument, `:where()` counts zero). Combinators whose ancestor parts are only tags and ids are resolved against the static tree at build time,
+unless a script restructures the tree. The rest are matched right to left at runtime, and attribute changes restyle. A rule's subject may end in `::before`,
+`::after`, `::marker` (or the legacy `:before`/`:after`) or `::placeholder`, which styles the element's generated box
+(`::placeholder` styles the text a text field draws while it is empty);
+pseudo-elements count for one extra unit of specificity and aren't allowed anywhere else in a selector. `::file-selector-button` is valid and styles nothing (there is no file input to draw one). `:host` in a document's sheet is valid too, and matches nothing: only a shadow tree's own sheet has a host to style.
+`::first-line` and `::first-letter` paint the block's own first formatted line and its first glyph in
+their own `color` and `background-color` (the line's background fills the line box). A `::first-line`
+that changes the line's metrics — font, letter-spacing, word-spacing, line-height — lays the first
+line out again in them: it holds the characters that fit in the new font and takes that font's line
+height, while the rest of the block keeps its own. A nested inline's own run inside the first line
+still isn't restyled. A
+`::first-letter` whose rule floats it makes a drop cap: the letter gets a floated box of its own at the
+letter's font size and colour, and the rest of the text wraps beside it and under it. The letter stays in
+the element's `textContent`, selection points and painting count it, and a drag from the paragraph's
+first text copies it too.
+
+## State
+
+`:hover` and `:active` follow the pointer, and `:focus` follows focus. `:focus-visible` matches the focus a UA shows a ring for:
+Tab (or any keyboard-initiated `focus()`) gives it, a text field always has it while focused, and a pointer press doesn't.
+The form states come from the control's attributes, value and validity, and are re-derived whenever a rule or a DOM query asks
+about them, so `input:checked + label`, `fieldset:disabled input` and a `querySelector(":invalid")` see the control as it is now.
+`:indeterminate` covers a checkbox a script put in that state, `:default` the checked attribute and a form's first submit button,
+and `:in-range`/`:out-of-range` an `input[type=number]` or `[type=range]` against its `min`/`max` (a range field with no value
+sits at the midpoint). Any element that isn't `:read-write` is `:read-only`; only an `input` of a text-like type (which includes `number` and the date types)
+and a `textarea` are writable, and a contenteditable element is not.
+
+## Generated content
+
+`::before` and `::after` rules with `content` taking string literals (`content: "*"`),
+several items in a row (`content: "(" attr(data-kind) ")"`) and `attr(name)`, which is read from the originating element,
+so changing the attribute changes the text. `none` and `normal` generate no box. The generated box is a box of its own: it can be `inline`,
+`inline-block` or `block`, sized and painted like any other box, and `getComputedStyle(el, "::before")` (or `":before"`,
+`"::after"`, `":after"`) returns its computed style. It stays out of the page's markup: not in `textContent`,
+`childElementCount`, `firstElementChild`, the sibling accessors, `querySelector(All)`, `closest` or `matches`,
+and a click on it targets the originating element. `content` outside a `::before`/`::after`/`::marker` rule doesn't generate anything and is reported at build time.
+
+## Lists
+
+The UA sheet makes `<ul>` and `<ol>` blocks with a 1em vertical margin and 40px of left padding and `<li>` a `list-item` (nested `<ul>`s switch their markers to `circle` and then `square`). Every list item has a marker box: `list-style-type` (`disc`,
+`circle`, `square`, `decimal`, `decimal-leading-zero`, `lower-alpha`/`lower-latin`, `upper-alpha`/`upper-latin`,
+`lower-roman`, `upper-roman`, `none`) and `list-style-position` (`outside`, the default, right-aligns the marker against the content edge;
+`inside` makes it the item's first inline content) are inherited and also set by the `list-style` shorthand
+(which takes an `@counter-style` name wherever the longhand does),
+and a `::marker` rule can restyle the marker or replace its text with `content` (an inside marker keeps the space a
+browser's default `::marker` content puts after the number). Items number from the implicit `list-item` counter: an `<ol>`'s `start`
+attribute sets where its first item lands (1 by default), a `<li>`'s `value` attribute sets that item's number, and a `reversed` list counts down to 1.
+Counters themselves work as in CSS Lists: `counter-reset` starts a counter in the element's own scope, `counter-increment` adds to the innermost one,
+`counter-set` replaces it, and `counter()`/`counters(name, separator)` in a generated box's `content` read them (an `ol`, `ul` or `menu` implicitly
+resets `list-item`, and each list item increments it). `counter-reset: reversed(name)` starts a counter that counts down: with no value it
+takes the start its scope adds up to (the increments on its element, its descendants and its following siblings, CSS Lists 3 §4.4.2), and it
+stays in scope for those following siblings, where `counter()` reads it; list items in a reversed `list-item` counter count down by one. An `@counter-style` rule defines a style of its own — the `cyclic`, `fixed`, `numeric`,
+`alphabetic`, `symbolic`, `additive` and `extends` systems, with `symbols`, `additive-symbols`, `range`, `pad`, `fallback`, `prefix`, `suffix` and
+`negative` — and `list-style-type` and `counter()` take its name; the predefined styles beyond the ten keywords (`lower-greek`, `armenian`,
+`georgian`, `hiragana`, `katakana`, `cjk-decimal`, `cjk-earthly-branch`, `cjk-heavenly-stem`, `disclosure-open` and `disclosure-closed` among them)
+are built in by name. The marker is a box of its own but not part of the markup: it stays out of `textContent`,
+`childElementCount` and the element queries, and `getComputedStyle(el, "::marker")` returns its computed style. A marker box is made for any element that computes as `display: list-item`,
+including one a script creates or restyles.
+
+## Inline formatting
+
+Inline formatting includes line boxes with baseline alignment, word wrapping across elements, whitespace collapsing across runs,
+across inline box edges and at line edges, hanging preserved spaces at the end of a line (an ideographic space among them),
+`white-space` (`normal`, `nowrap`, `pre`, `pre-wrap`, `pre-line`, `break-spaces`), inline backgrounds,
+borders and horizontal padding (one box per line, with a box broken by a block keeping its left border on its first piece and its right border on its last),
+atomic inline-blocks such as buttons and inputs on the baseline, block-level boxes inside an inline box (the inline is broken around them and the block joins the surrounding block flow,
+margins included, like CSS's anonymous block boxes), and clicks that target the innermost inline element under the pointer. A collapsible space is dropped at the start or end of a line whatever inline box edges sit around it,
+so it neither takes room nor starts a line; a line box holding only an inline box's edges keeps its height when that box has a margin,
+padding or border, and a piece an inline box is split into that holds nothing draws none of its edges
+
+## Document modes
+
+The doctype selects the mode as HTML's algorithm does — no doctype, a non-`html`
+doctype, or an old/transitional one without a system identifier is quirks mode; the XHTML 1.0 and
+HTML 4.01 transitional/frameset doctypes are limited-quirks; everything else is standards. In quirks
+mode a percentage `height`, `min-height` or `max-height` with no containing block height resolves against
+the nearest ancestor whose height is a length, and against the viewport when there is none, so
+`height: 100%` inside auto-height boxes fills the window. Other quirks (the body's viewport fill, the
+line-height and table quirks) aren't implemented yet.

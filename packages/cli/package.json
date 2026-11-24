@@ -1,0 +1,62 @@
+{
+  "name": "@native-sdk/cli",
+  "version": "0.20.0",
+  "description": "Native apps from HTML, CSS and TypeScript, compiled ahead of time to machine code",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "native": "dist/native.js"
+  },
+  "files": [
+    "dist",
+    "runtime",
+    "shared",
+    "host",
+    "README.md",
+    "LICENSE"
+  ],
+  "scriptc": {
+    "source": true
+  },
+  "scripts": {
+    "build": "node scripts/build.ts",
+    "typecheck": "tsc -p .",
+    "test": "node tests/scratch.ts node tests/suite.ts",
+    "test:examples": "node tests/scratch.ts node tests/examples.ts",
+    "wpt": "node compiler/cli.ts wpt run",
+    "wpt:verify-incremental": "node scripts/wpt-verify-incremental.ts",
+    "prepack": "node scripts/build.ts"
+  },
+  "dependencies": {
+    "@scriptc/experimental": "^0.4.16",
+    "@scriptc/node": "^0.4.16",
+    "@scriptc/types": "^0.4.16",
+    "esbuild": "^0.27.7",
+    "scriptc": "^0.4.16"
+  },
+  "optionalDependencies": {
+    "@native-sdk/angle-win32-x64": "workspace:*",
+    "@native-sdk/dev-host-darwin-arm64": "workspace:*",
+    "@native-sdk/dev-host-darwin-x64": "workspace:*",
+    "@native-sdk/dev-host-linux-arm64": "workspace:*",
+    "@native-sdk/dev-host-linux-x64": "workspace:*",
+    "@native-sdk/dev-host-win32-x64": "workspace:*",
+    "@scriptc/libnode-darwin-arm64": "^0.4.16",
+    "@scriptc/libnode-darwin-x64": "^0.4.16",
+    "@scriptc/libnode-linux-arm64-gnu": "^0.4.16",
+    "@scriptc/libnode-linux-x64-gnu": "^0.4.16"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/native.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/vercel-labs/native/tree/next/packages/cli"
+}

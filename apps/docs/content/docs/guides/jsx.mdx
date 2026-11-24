@@ -1,0 +1,26 @@
+---
+title: "JSX"
+description: "Build .tsx and .jsx sources with the app's tsconfig settings."
+---
+
+An app's sources may be `.tsx` or `.jsx`, named by the page's `<script type="module" src="app.tsx">` or imported from another of the app's files. `native` builds them like `.ts` ones.
+
+## JSX mode
+
+The JSX mode comes from the app's own `tsconfig.json`:
+
+- `jsx`: `react-jsx` (the default when there's no tsconfig) or `react` for the classic factory.
+- `jsxImportSource`: `react` by default.
+- `jsxFactory` and `jsxFragmentFactory`: used by the classic runtime.
+
+## Runtime package
+
+The runtime's package has to be installed in the app's `node_modules`, next to any other dependency. `native` compiles it with the app, so the imports its transform writes into each JSX file and the app's own imports reach one copy of the runtime. Preact's `preact/jsx-runtime` works. A second copy would have its own fragments and hooks.
+
+A dev build asks for `jsx-dev-runtime` when the package ships one, so a debugger sees `jsxDEV` calls.
+
+## Classic runtime
+
+With the classic runtime the JSX types come from the package the app imports `jsxFactory` from, the way TypeScript finds them. A Preact app written with `h()` needs no extra setting.
+
+A per-file `@jsxImportSource` pragma isn't honored. Put the setting in the tsconfig.

@@ -1,0 +1,20 @@
+node_modules
+.turbo/
+build/
+.native/
+*.app/
+*.resources/
+
+# The FFmpeg build the Linux host loads (packages/cli/host/ffmpeg/build.sh)
+packages/cli/host/ffmpeg/prefix/
+packages/cli/host/ffmpeg/build/
+packages/cli/host/ffmpeg/src/
+packages/cli/.wpt-work/
+packages/cli/wpt/results-linux.json
+dist/
+
+# The prebuilt dev host binaries: the release workflow builds them into these packages
+packages/dev-host-*/host
+packages/dev-host-*/host.exe
+packages/dev-host-*/host.json
+packages/dev-host-*/LICENSE
