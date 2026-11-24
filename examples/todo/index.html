@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=460, height=560">
+    <title>Todos</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="app">
+      <h1>Todos</h1>
+      <div class="composer">
+        <input id="new" class="field" placeholder="What needs doing?" autofocus>
+        <button id="add" class="add">Add</button>
+      </div>
+      <div id="list" class="list"></div>
+      <p id="empty" class="empty">Nothing yet. Type above and press Enter.</p>
+      <footer class="footer">
+        <span id="left" class="left">0 items left</span>
+        <button id="clear" class="link">Clear completed</button>
+      </footer>
+    </main>
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>

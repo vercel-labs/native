@@ -1,0 +1,16 @@
+@import "tailwindcss";
+@source "./index.html";
+@source "./app.tsx";
+@source "./icons.tsx";
+@source "./data.ts";
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #f4f2ee;
+}

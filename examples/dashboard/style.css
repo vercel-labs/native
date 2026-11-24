@@ -1,0 +1,33 @@
+* { box-sizing: border-box; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: #f8fafc; color: #0f172a; font-size: 14px; font-family: system-ui; }
+.top { display: flex; align-items: center; gap: 16px; height: 52px; padding: 0 20px; background: #0f172a; color: #e2e8f0; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; width: 196px; }
+.logo { width: 26px; height: 26px; border-radius: 7px; background: #6366f1; color: #fff; text-align: center; line-height: 26px; font-size: 14px; }
+.search { flex: 1; max-width: 360px; height: 32px; line-height: 32px; padding: 0 12px; border-radius: 8px; background: #1e293b; color: #64748b; }
+.me { margin-left: auto; display: flex; align-items: center; gap: 8px; position: relative; }
+.avatar { border-radius: 50%; vertical-align: middle; }
+.dot { position: absolute; left: 20px; top: 0; width: 9px; height: 9px; border-radius: 5px; background: #22c55e; border: 2px solid #0f172a; }
+.main { flex: 1; display: flex; min-height: 0; }
+.side { width: 216px; padding: 16px 12px; border-right: 1px solid #e2e8f0; background: #fff; display: flex; flex-direction: column; gap: 2px; }
+.nav { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 6px; color: #475569; text-decoration: none; cursor: pointer; }
+.nav:hover { background: #f1f5f9; }
+.nav.on { background: #eef2ff; color: #4338ca; font-weight: 600; }
+.count { padding: 1px 7px; border-radius: 999px; background: #e2e8f0; font-size: 11px; color: #475569; }
+.content { flex: 1; padding: 24px 28px; overflow-y: auto; }
+h1 { margin: 0 0 6px; font-size: 22px; }
+.lede { margin: 0 0 18px; color: #475569; line-height: 1.5; }
+.lede a { color: #4f46e5; }
+.cards { display: flex; gap: 14px; margin-bottom: 20px; }
+.card { flex: 1; padding: 14px 16px; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; }
+.label { color: #64748b; font-size: 12px; }
+.value { margin-top: 4px; font-size: 24px; font-weight: 700; }
+.delta { margin-top: 2px; font-size: 12px; color: #64748b; }
+.delta.up { color: #16a34a; } .delta.down { color: #dc2626; }
+.members { width: 100%; border-collapse: separate; border-spacing: 0; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; }
+.members th { text-align: left; padding: 10px 14px; font-size: 12px; color: #64748b; font-weight: 600; border-bottom: 1px solid #e2e8f0; }
+.members td { padding: 9px 14px; border-bottom: 1px solid #f1f5f9; }
+.act { text-align: right; color: #94a3b8; }
+.pill { padding: 2px 8px; border-radius: 999px; background: #f1f5f9; color: #334155; font-size: 12px; }
+.pill.owner { background: #eef2ff; color: #4338ca; }
+.pill.invited { background: #fef3c7; color: #92400e; }
+.btn { margin-top: 14px; height: 34px; padding: 0 14px; border: none; border-radius: 8px; background: #4f46e5; color: #fff; font-weight: 600; cursor: pointer; }

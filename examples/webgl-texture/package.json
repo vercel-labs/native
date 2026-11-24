@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-webgl-texture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/webgl-texture"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

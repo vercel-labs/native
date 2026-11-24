@@ -1,0 +1,74 @@
+@import "tailwindcss";
+@source "./index.html";
+@source "./app.tsx";
+@source "./icons.tsx";
+
+@theme {
+  --font-display: "Avenir Next", "Futura", "Helvetica Neue", Arial, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+  background-color: #0b0910;
+  color: #f5f0e9;
+}
+
+body {
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.cover-shadow {
+  box-shadow: 0 20px 44px -20px rgba(0, 0, 0, 0.9), 0 4px 14px -6px rgba(0, 0, 0, 0.6);
+}
+
+/* The record view and the library both arrive from just below. */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.view-enter {
+  animation: rise-in 460ms cubic-bezier(0.22, 0.9, 0.25, 1) both;
+}
+
+/* Bars that bounce on a playing track. */
+@keyframes equalize {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.eq-bar {
+  transform-origin: 50% 100%;
+  animation: equalize 880ms ease-in-out infinite;
+}
+
+/* A slow turn for decorative rings. */
+@keyframes turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.turn-slow {
+  animation: turn 18s linear infinite;
+}
+
+/* The two player sliders are native range fields; the accent color is what their track and
+   thumb take. */
+.player-range {
+  accent-color: #fcd34d;
+  height: 18px;
+}

@@ -1,0 +1,116 @@
+* { box-sizing: border-box; }
+
+body {
+
+  font-family: system-ui;
+  margin: 0;
+  height: 100vh;
+  background: #fafafa;
+  color: #171717;
+  font-size: 15px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 28px 28px 20px;
+}
+
+h1 { margin: 0 0 16px; font-size: 28px; font-weight: 700; }
+
+.composer { display: flex; gap: 8px; margin-bottom: 16px; }
+
+.field {
+  flex: 1;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #d4d4d4;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 15px;
+}
+.field:focus { border: 2px solid #2563eb; padding: 0 11px; }
+
+.add {
+  height: 40px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.add:hover { background: #1d4ed8; }
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  overflow-y: auto;
+  margin: 0 -4px;
+  padding: 0 4px;
+}
+
+.item {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 44px;
+  padding: 0 8px 0 12px;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+}
+.item:hover { border-color: #d4d4d4; }
+
+.check {
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid #a3a3a3;
+  border-radius: 9px;
+}
+.item.done .check { background: #16a34a; border-color: #16a34a; }
+
+.label { flex: 1; }
+.item.done .label { color: #a3a3a3; text-decoration: line-through; }
+.item:hover .remove { color: #737373; }
+
+.remove {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #a3a3a3;
+  font-size: 18px;
+  line-height: 28px;
+  cursor: pointer;
+}
+.remove:hover { background: #fee2e2; color: #dc2626; }
+
+.empty { margin: 0; color: #a3a3a3; text-align: center; }
+
+.footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 12px;
+  color: #737373;
+  font-size: 13px;
+}
+
+.link {
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: #737373;
+  font-size: 13px;
+  cursor: pointer;
+}
+.link:hover { color: #171717; }

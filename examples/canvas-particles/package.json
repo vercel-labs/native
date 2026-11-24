@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-canvas-particles",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/canvas-particles"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

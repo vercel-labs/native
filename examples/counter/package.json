@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-counter",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/counter"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

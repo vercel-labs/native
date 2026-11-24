@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/dashboard"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

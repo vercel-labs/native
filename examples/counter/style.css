@@ -1,0 +1,86 @@
+* { box-sizing: border-box; }
+
+body {
+
+  font-family: system-ui;
+  margin: 0;
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f4f4f5;
+  color: #18181b;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 340px;
+  padding: 32px 28px;
+  background: #ffffff;
+  border: 1px solid #e4e4e7;
+  border-radius: 16px;
+}
+
+.badge {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+h1 { margin: 12px 0 4px; font-size: 26px; }
+
+.subtitle {
+  margin: 0 0 20px;
+  color: #71717a;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: center;
+}
+
+.count {
+  font-size: 72px;
+  font-weight: 700;
+  line-height: 1;
+  margin-bottom: 24px;
+}
+.count.negative { color: #dc2626; }
+.count.big { color: #16a34a; }
+
+.row { display: flex; gap: 12px; align-items: center; }
+
+button {
+  height: 44px;
+  padding: 0 18px;
+  border: none;
+  border-radius: 10px;
+  background: #18181b;
+  color: #fafafa;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 44px;
+  cursor: pointer;
+}
+button:hover { background: #3f3f46; }
+button:active { background: #52525b; }
+
+button.round { width: 44px; padding: 0; font-size: 22px; }
+
+button.secondary {
+  background: #ffffff;
+  color: #18181b;
+  border: 1px solid #d4d4d8;
+}
+button.secondary:hover { background: #f4f4f5; }
+
+.status { margin: 20px 0 0; font-size: 13px; color: #a1a1aa; }
+
+/* Not used anywhere: native removes it at build time. */
+.unused-rule { color: red; }
+
+/* Unsupported: native reports it with a hint. */
+.card { box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05); }

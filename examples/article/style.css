@@ -1,0 +1,41 @@
+body { margin: 0; background: #ffffff; color: #1f2328; font-size: 16px; line-height: 1.6; font-family: system-ui; }
+
+.post { padding: 36px 40px; }
+
+.kicker {
+  margin: 0;
+  color: #8250df;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+h1 { margin: 6px 0 18px; font-size: 30px; line-height: 1.2; }
+h1 em { color: #8250df; }
+
+p { margin: 0 0 14px; }
+
+code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #eff1f3;
+  font-size: 14px;
+}
+
+a { color: #0969da; }
+a:hover { color: #0550ae; }
+
+mark { background: #fff8c5; padding: 0 2px; }
+
+.chip {
+  padding: 2px 10px;
+  border: 1px solid #d0d7de;
+  border-radius: 999px;
+  background: #f6f8fa;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip:hover { background: #eaeef2; }
+
+.small { color: #59636e; font-size: 14px; }
+
+.status { color: #59636e; font-size: 13px; }

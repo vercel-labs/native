@@ -1,0 +1,15 @@
+{
+  "name": "@native-sdk/example-three-hero",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/three-hero"
+  },
+  "dependencies": {
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*",
+    "@types/three": "0.187.0"
+  }
+}

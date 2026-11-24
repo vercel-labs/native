@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-still-harbor" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#08131f"/>
+      <stop offset="1" stop-color="#123b52"/>
+    </linearGradient>
+    <radialGradient id="glow-still-harbor" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#e0945a" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#e0945a" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-still-harbor" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-still-harbor" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6e0ba" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#f6e0ba" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-still-harbor)"/>
+  
+    <rect width="640" height="460" fill="url(#glow-still-harbor)"/>
+    <circle cx="320" cy="300" r="118" fill="#e0945a" opacity="0.92"/>
+    <circle cx="320" cy="300" r="148" fill="none" stroke="#f6e0ba" stroke-width="1.5" opacity="0.5"/>
+    <rect x="30" y="400" width="580" height="2" fill="#f6e0ba" opacity="0.5"/><rect x="27" y="426" width="586" height="2" fill="#f6e0ba" opacity="0.445"/><rect x="24" y="452" width="592" height="2" fill="#f6e0ba" opacity="0.39"/><rect x="21" y="478" width="598" height="2" fill="#f6e0ba" opacity="0.33499999999999996"/><rect x="18" y="504" width="604" height="2" fill="#f6e0ba" opacity="0.28"/><rect x="15" y="530" width="610" height="2" fill="#f6e0ba" opacity="0.22499999999999998"/><rect x="12" y="556" width="616" height="2" fill="#f6e0ba" opacity="0.16999999999999998"/>
+    <rect x="245" y="436" width="150" height="3" rx="1.5" fill="#e0945a" opacity="0.55"/><rect x="251.5" y="451" width="137" height="3" rx="1.5" fill="#e0945a" opacity="0.5"/><rect x="258" y="466" width="124" height="3" rx="1.5" fill="#e0945a" opacity="0.45000000000000007"/><rect x="264.5" y="481" width="111" height="3" rx="1.5" fill="#e0945a" opacity="0.4"/><rect x="271" y="496" width="98" height="3" rx="1.5" fill="#e0945a" opacity="0.35000000000000003"/><rect x="277.5" y="511" width="85" height="3" rx="1.5" fill="#e0945a" opacity="0.30000000000000004"/><rect x="284" y="526" width="72" height="3" rx="1.5" fill="#e0945a" opacity="0.25"/><rect x="290.5" y="541" width="59" height="3" rx="1.5" fill="#e0945a" opacity="0.2"/><rect x="297" y="556" width="46" height="3" rx="1.5" fill="#e0945a" opacity="0.15000000000000002"/>
+    <path d="M0 470 C 120 440 210 452 320 470 C 430 488 520 448 640 466 L640 640 L0 640 Z" fill="#08131f" opacity="0.55"/>
+  
+  <rect width="640" height="640" fill="url(#vignette-still-harbor)"/>
+</svg>

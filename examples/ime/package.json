@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-ime",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/ime"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

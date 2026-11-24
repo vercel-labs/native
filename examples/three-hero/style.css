@@ -1,0 +1,7 @@
+html, body { margin: 0; padding: 0; height: 100%; background: #0a0e17; overflow: hidden; }
+#stage { display: block; width: 100%; height: 100%; }
+#hud {
+  position: absolute; left: 24px; top: 20px;
+  font: 600 12px/1.4 sans-serif; letter-spacing: 1.6px;
+  color: rgba(255, 255, 255, 0.82);
+}

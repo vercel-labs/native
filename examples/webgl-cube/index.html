@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="native-window" content="width=880, height=560">
+<title>Cube</title>
+<style>
+html, body { margin: 0; height: 100%; background: #0b1022; color: #e8eefc; overflow: hidden; }
+#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#hud {
+  position: fixed; inset: auto auto 18px 18px;
+  font: 13px/1.4 system-ui, sans-serif; opacity: 0.6;
+}
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<div id="hud">WEBGL2 · SPINNING LIT CUBE</div>
+<script src="app.ts"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-article",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/article"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=560, height=600">
+    <title>Article</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <article class="post">
+      <p class="kicker">Field notes</p>
+      <h1>Compiling the web, <em>ahead of time</em></h1>
+      <p>
+        Most of what a browser does at startup — parsing <code>HTML</code>, matching
+        <strong>selectors</strong>, resolving the <em>cascade</em> — can happen once, at
+        build time. <a id="link" href="#">Read how native does it</a>, or keep reading.
+      </p>
+      <p>
+        What's left for runtime is small: <mark>layout, paint, and events</mark>. Text like
+        this wraps across lines, and inline boxes such as
+        <button id="inline-btn" class="chip">this button</button>
+        sit on the baseline with the words around them.
+      </p>
+      <p class="small">
+        Line one of a short address,<br>
+        line two after a <code>&lt;br&gt;</code>.<br>
+        <s>Struck</s> and <u>underlined</u> text work too.
+      </p>
+      <p id="status" class="status">No clicks yet.</p>
+    </article>
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-webgl-cube",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/webgl-cube"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

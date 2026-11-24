@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-night-bus" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#060915"/>
+      <stop offset="1" stop-color="#182050"/>
+    </linearGradient>
+    <radialGradient id="glow-night-bus" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#6a7bff" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#6a7bff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-night-bus" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-night-bus" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb35c" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#ffb35c" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-night-bus)"/>
+  
+    <rect width="640" height="640" fill="url(#bg-night-bus)"/>
+    <rect y="360" width="640" height="280" fill="url(#glow-night-bus)" opacity="0.5"/>
+    <rect x="43.3" y="398.7" width="11.1" height="241.3" fill="#6a7bff" opacity="0.11" rx="6"/><rect x="111.4" y="333.5" width="9.4" height="306.5" fill="#ffb35c" opacity="0.12" rx="6"/><rect x="181.2" y="336.3" width="8.3" height="303.7" fill="#ffb35c" opacity="0.15" rx="6"/><rect x="255.9" y="531.8" width="19.1" height="108.2" fill="#ffb35c" opacity="0.10" rx="6"/><rect x="329.6" y="335.2" width="14.9" height="304.8" fill="#6a7bff" opacity="0.11" rx="6"/><rect x="390.4" y="508.3" width="12.7" height="131.7" fill="#ffb35c" opacity="0.19" rx="6"/><rect x="468.8" y="520.1" width="15.0" height="119.9" fill="#ffb35c" opacity="0.15" rx="6"/><rect x="538.2" y="350.8" width="10.2" height="289.2" fill="#ffb35c" opacity="0.20" rx="6"/><rect x="604.5" y="500.2" width="15.3" height="139.8" fill="#6a7bff" opacity="0.15" rx="6"/>
+    <circle cx="535.9" cy="85.5" r="3.1" fill="#6a7bff" opacity="0.31"/><circle cx="488.2" cy="234.6" r="4.5" fill="#6a7bff" opacity="0.40"/><circle cx="345.8" cy="99.7" r="5.9" fill="#6a7bff" opacity="0.55"/><circle cx="383.3" cy="226.1" r="2.2" fill="#6a7bff" opacity="0.37"/><circle cx="325.1" cy="221.7" r="4.1" fill="#6a7bff" opacity="0.61"/><circle cx="149.6" cy="85.1" r="2.9" fill="#6a7bff" opacity="0.74"/><circle cx="291.9" cy="282.6" r="3.0" fill="#6a7bff" opacity="0.50"/><circle cx="500.5" cy="239.1" r="5.7" fill="#6a7bff" opacity="0.76"/><circle cx="250.1" cy="278.5" r="3.7" fill="#6a7bff" opacity="0.33"/><circle cx="262.6" cy="150.2" r="5.3" fill="#6a7bff" opacity="0.45"/><circle cx="478.2" cy="89.5" r="3.2" fill="#6a7bff" opacity="0.64"/><circle cx="163.2" cy="131.7" r="2.9" fill="#6a7bff" opacity="0.70"/>
+    <path d="M-20 420 L 660 330" stroke="#6a7bff" stroke-width="2" opacity="0.5"/>
+    <path d="M-20 470 L 660 392" stroke="#ffb35c" stroke-width="1.4" opacity="0.35"/>
+    <rect x="88" y="120" width="464" height="130" rx="18" fill="#060915" opacity="0.72"/>
+    <rect x="104" y="136" width="432" height="98" rx="10" fill="none" stroke="#ffb35c" stroke-width="1.5" opacity="0.25"/>
+  
+  <rect width="640" height="640" fill="url(#vignette-night-bus)"/>
+</svg>

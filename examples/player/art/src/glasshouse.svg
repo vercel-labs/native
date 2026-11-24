@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-glasshouse" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#0d1115"/>
+      <stop offset="1" stop-color="#26323c"/>
+    </linearGradient>
+    <radialGradient id="glow-glasshouse" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#c9dae7" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#c9dae7" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-glasshouse" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-glasshouse" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#82b3d8" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#82b3d8" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-glasshouse)"/>
+  
+    <rect width="640" height="640" fill="url(#glow-glasshouse)" opacity="0.8"/>
+    <g transform="rotate(-18 320 320)">
+      <rect x="60" y="60" width="520" height="520" fill="none" stroke="#82b3d8" stroke-width="2" opacity="0.5"/>
+      <path d="M84 110 l 100 0 l 0 100 l -100 0 Z" fill="#c9dae7" opacity="0.05"/><path d="M84 110 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M208 110 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.10"/><path d="M208 110 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M332 110 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.14"/><path d="M332 110 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M456 110 l 100 0 l 0 100 l -100 0 Z" fill="#c9dae7" opacity="0.05"/><path d="M456 110 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M84 234 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.10"/><path d="M84 234 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M208 234 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.14"/><path d="M208 234 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M332 234 l 100 0 l 0 100 l -100 0 Z" fill="#c9dae7" opacity="0.19"/><path d="M332 234 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M456 234 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.10"/><path d="M456 234 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M84 358 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.14"/><path d="M84 358 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M208 358 l 100 0 l 0 100 l -100 0 Z" fill="#c9dae7" opacity="0.05"/><path d="M208 358 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M332 358 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.10"/><path d="M332 358 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M456 358 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.14"/><path d="M456 358 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M84 482 l 100 0 l 0 100 l -100 0 Z" fill="#c9dae7" opacity="0.05"/><path d="M84 482 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M208 482 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.10"/><path d="M208 482 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M332 482 l 100 0 l 0 100 l -100 0 Z" fill="#82b3d8" opacity="0.14"/><path d="M332 482 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/><path d="M456 482 l 100 0 l 0 100 l -100 0 Z" fill="#c9dae7" opacity="0.05"/><path d="M456 482 l 100 0 l 0 100 l -100 0 Z" fill="none" stroke="#82b3d8" stroke-width="1.4" opacity="0.35"/>
+    </g>
+    <path d="M120 640 L 420 120 L 500 120 L 220 640 Z" fill="#82b3d8" opacity="0.1"/>
+    <path d="M300 640 L 520 220 L 548 220 L 340 640 Z" fill="#c9dae7" opacity="0.14"/>
+  
+  <rect width="640" height="640" fill="url(#vignette-glasshouse)"/>
+</svg>

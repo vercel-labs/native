@@ -1,0 +1,413 @@
+:root {
+  --ink: #eaf0ff;
+  --muted: #8f9bb8;
+  --blue: #5b8cff;
+  --cyan: #64e6ff;
+  --amber: #ffb35c;
+  --bg: #06070c;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: sans-serif;
+  overflow: hidden;
+}
+
+#stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* --- Aurora -------------------------------------------------------------- */
+
+.aurora {
+  position: absolute;
+  border-radius: 50%;
+  opacity: 0.55;
+  animation: drift 16s ease-in-out infinite alternate;
+}
+.aurora-a {
+  left: -18%;
+  top: -28%;
+  width: 72%;
+  height: 110%;
+  background: radial-gradient(circle at 45% 45%, rgba(64, 108, 255, 0.55), rgba(24, 36, 96, 0) 66%);
+}
+.aurora-b {
+  right: -24%;
+  top: -12%;
+  width: 76%;
+  height: 96%;
+  background: radial-gradient(circle at 55% 50%, rgba(24, 196, 214, 0.32), rgba(10, 30, 50, 0) 64%);
+  animation-duration: 21s;
+  animation-delay: -6s;
+}
+.aurora-c {
+  left: 28%;
+  bottom: -46%;
+  width: 70%;
+  height: 90%;
+  background: radial-gradient(circle at 50% 50%, rgba(255, 140, 80, 0.16), rgba(40, 16, 10, 0) 62%);
+  animation-duration: 26s;
+  animation-delay: -12s;
+}
+
+/* --- Top bar ------------------------------------------------------------- */
+
+.bar {
+  position: absolute;
+  left: 56px;
+  right: 56px;
+  top: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  animation: fade 700ms ease-out both;
+}
+.brand {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 7px;
+  color: var(--ink);
+}
+.nav {
+  display: flex;
+  gap: 34px;
+  font-size: 12px;
+  letter-spacing: 2.2px;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.nav span {
+  transition: color 220ms ease;
+}
+.nav span:hover {
+  color: var(--ink);
+}
+
+/* --- Hero ---------------------------------------------------------------- */
+
+.hero {
+  position: absolute;
+  left: 56px;
+  right: 56px;
+  top: 50%;
+  height: 560px;
+  margin-top: -280px;
+  display: flex;
+  align-items: center;
+  gap: 40px;
+}
+
+.copy {
+  width: 46%;
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  letter-spacing: 2.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  animation: fade 700ms 120ms ease-out both;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  box-shadow: 0 0 12px var(--cyan);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+h1 {
+  margin: 20px 0 18px;
+  font-size: 92px;
+  line-height: 0.98;
+  letter-spacing: -3.5px;
+  font-weight: 700;
+}
+.word {
+  display: inline-block;
+  margin-right: 16px;
+  animation: rise 900ms cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+.w1 { animation-delay: 160ms; }
+.w2 {
+  color: var(--cyan);
+  text-shadow: 0 0 42px rgba(100, 230, 255, 0.45);
+  animation-delay: 300ms;
+}
+.w3 { animation-delay: 440ms; }
+
+.sub {
+  margin: 0;
+  width: 86%;
+  font-size: 17px;
+  line-height: 1.65;
+  color: var(--muted);
+  animation: fade 900ms 620ms ease-out both;
+}
+
+.ctas {
+  margin-top: 34px;
+  display: flex;
+  gap: 16px;
+  animation: fade 900ms 760ms ease-out both;
+}
+.cta {
+  border: 0;
+  border-radius: 999px;
+  padding: 15px 30px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  transition: transform 180ms cubic-bezier(0.2, 0.9, 0.2, 1), box-shadow 180ms ease,
+    background-color 180ms ease, color 180ms ease;
+}
+.primary {
+  color: #061018;
+  background: linear-gradient(120deg, var(--cyan), #9d8bff);
+  box-shadow: 0 14px 40px rgba(80, 160, 255, 0.32);
+}
+.primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 54px rgba(80, 180, 255, 0.46);
+}
+.primary:active {
+  transform: translateY(0) scale(0.97);
+}
+.primary.armed {
+  background: linear-gradient(120deg, var(--amber), #ff7a5c);
+}
+.ghost {
+  color: var(--ink);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.ghost:hover {
+  background-color: rgba(255, 255, 255, 0.13);
+  transform: translateY(-2px);
+}
+.ghost:active {
+  transform: translateY(0) scale(0.97);
+}
+
+.chips {
+  margin-top: 46px;
+  display: flex;
+  gap: 14px;
+  animation: fade 900ms 900ms ease-out both;
+}
+.chip {
+  padding: 14px 18px;
+  border-radius: 14px;
+  background-color: rgba(255, 255, 255, 0.045);
+  transition: background-color 260ms ease, transform 260ms ease, box-shadow 260ms ease;
+}
+.chip b {
+  display: block;
+  font-size: 18px;
+  margin-bottom: 3px;
+}
+.chip span {
+  font-size: 11px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.chip.on {
+  background-color: rgba(100, 230, 255, 0.13);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 34px rgba(60, 160, 220, 0.22);
+}
+
+/* --- Visual -------------------------------------------------------------- */
+
+.visual {
+  position: relative;
+  width: 54%;
+  height: 100%;
+}
+
+.halo {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 430px;
+  height: 430px;
+  margin-left: -215px;
+  margin-top: -215px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(86, 140, 255, 0.33), rgba(20, 30, 70, 0) 68%);
+  animation: breathe 6s ease-in-out infinite;
+}
+
+.core-aura {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 340px;
+  height: 340px;
+  margin-left: -170px;
+  margin-top: -170px;
+  border-radius: 170px;
+  opacity: 0.55;
+  animation: spin 14s linear infinite;
+  background: conic-gradient(from 0deg,
+    rgba(56, 217, 255, 0) 0deg,
+    rgba(56, 217, 255, 0.5) 64deg,
+    rgba(139, 108, 255, 0) 132deg,
+    rgba(255, 158, 61, 0.4) 224deg,
+    rgba(56, 217, 255, 0) 320deg);
+}
+
+.ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.05);
+}
+.ring-a {
+  width: 356px;
+  height: 356px;
+  margin-left: -178px;
+  margin-top: -178px;
+  border-top-color: rgba(100, 230, 255, 0.85);
+  animation: spin 7s linear infinite;
+}
+.ring-b {
+  width: 470px;
+  height: 470px;
+  margin-left: -235px;
+  margin-top: -235px;
+  border-bottom-color: rgba(157, 139, 255, 0.7);
+  animation: spin 13s linear infinite reverse;
+}
+
+.core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 250px;
+  height: 250px;
+  margin-left: -125px;
+  margin-top: -125px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 28%, #2c3a68, #0c1226 58%, #05070f 100%);
+  box-shadow: 0 0 70px rgba(70, 130, 255, 0.28), inset 0 0 40px rgba(120, 180, 255, 0.16);
+  animation: breathe 5s ease-in-out infinite;
+}
+.core-face {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 132px;
+  height: 132px;
+  margin-left: -66px;
+  margin-top: -66px;
+  border-radius: 66px;
+  background: radial-gradient(circle at 36% 30%, #cfeaff 0%, #77adff 30%, #3a57c9 62%, #151d40 100%);
+  box-shadow: inset 0 0 26px rgba(190, 230, 255, 0.35);
+}
+.core-line {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin-left: -4px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: #eaf6ff;
+  box-shadow: 0 0 26px 8px rgba(140, 220, 255, 0.75);
+  animation: pulse 2.2s ease-in-out infinite;
+}
+
+.orbit {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 500px;
+  height: 500px;
+  margin-left: -250px;
+  margin-top: -250px;
+  animation: spin 11s linear infinite;
+}
+.satellite {
+  position: absolute;
+  left: 50%;
+  top: -4px;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 18px 4px rgba(255, 179, 92, 0.6);
+}
+
+/* --- Footer -------------------------------------------------------------- */
+
+.foot {
+  position: absolute;
+  left: 56px;
+  right: 56px;
+  bottom: 30px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  letter-spacing: 1.8px;
+  text-transform: uppercase;
+  color: rgba(140, 155, 185, 0.75);
+  animation: fade 900ms 1s ease-out both;
+}
+.mono {
+  font-family: monospace;
+  letter-spacing: 1.2px;
+}
+
+/* --- Motion -------------------------------------------------------------- */
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(34px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fade {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes drift {
+  from { transform: translate(0, 0) scale(1); }
+  to   { transform: translate(46px, 28px) scale(1.06); }
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes breathe {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.045); }
+  100% { transform: scale(1); }
+}
+@keyframes pulse {
+  0%   { opacity: 0.45; transform: scale(0.85); }
+  50%  { opacity: 1; transform: scale(1.15); }
+  100% { opacity: 0.45; transform: scale(0.85); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora, .halo, .core-aura, .ring, .core, .core-face, .core-line, .orbit, .satellite,
+  .dot, .word, .eyebrow, .sub, .ctas, .chips, .bar, .foot {
+    animation: none;
+  }
+}

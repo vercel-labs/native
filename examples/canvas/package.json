@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-canvas",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/canvas"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

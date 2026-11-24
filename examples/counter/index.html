@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=420, height=480">
+    <title>Counter</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <main class="card">
+      <span class="badge">native</span>
+      <h1>Counter</h1>
+      <p class="subtitle">HTML, CSS and TypeScript compiled to one native binary. No browser, no JS engine.</p>
+      <div id="count" class="count">0</div>
+      <div class="row">
+        <button id="dec" class="round">&minus;</button>
+        <button id="reset" class="secondary">Reset</button>
+        <button id="inc" class="round">+</button>
+      </div>
+      <p id="status" class="status">Click a button to start.</p>
+    </main>
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>

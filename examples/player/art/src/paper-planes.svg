@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-paper-planes" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#e8f0f7"/>
+      <stop offset="1" stop-color="#a9c8de"/>
+    </linearGradient>
+    <radialGradient id="glow-paper-planes" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#fbf6ec" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#fbf6ec" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-paper-planes" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-paper-planes" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d9694f" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#d9694f" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-paper-planes)"/>
+  
+    <rect width="640" height="640" fill="url(#glow-paper-planes)" opacity="0.7"/>
+    <circle cx="170" cy="170" r="86" fill="#fbf6ec" opacity="0.22"/>
+    <path d="M-40 620 C 200 480 420 380 700 250" stroke="#d9694f" stroke-width="1.5" fill="none" stroke-dasharray="7 11" opacity="0.5"/><path d="M20 580 C 200 450 420 360 700 220" stroke="#d9694f" stroke-width="1.5" fill="none" stroke-dasharray="7 11" opacity="0.5"/><path d="M80 540 C 200 420 420 340 700 190" stroke="#d9694f" stroke-width="1.5" fill="none" stroke-dasharray="7 11" opacity="0.5"/>
+    <g transform="translate(140 420) rotate(-8) scale(1.15)">
+      <path d="M0 0 L 120 -38 L 96 6 L 110 34 L 62 20 Z" fill="#d9694f" opacity="0.92"/>
+      <path d="M0 0 L 120 -38 L 104 2 Z" fill="#fbf6ec" opacity="0.35"/>
+    </g><g transform="translate(350 300) rotate(15) scale(0.8)">
+      <path d="M0 0 L 120 -38 L 96 6 L 110 34 L 62 20 Z" fill="#ffffff" opacity="0.78"/>
+      <path d="M0 0 L 120 -38 L 104 2 Z" fill="#fbf6ec" opacity="0.35"/>
+    </g><g transform="translate(470 480) rotate(4) scale(1.35)">
+      <path d="M0 0 L 120 -38 L 96 6 L 110 34 L 62 20 Z" fill="#d9694f" opacity="0.92"/>
+      <path d="M0 0 L 120 -38 L 104 2 Z" fill="#fbf6ec" opacity="0.35"/>
+    </g><g transform="translate(250 520) rotate(-20) scale(0.6)">
+      <path d="M0 0 L 120 -38 L 96 6 L 110 34 L 62 20 Z" fill="#ffffff" opacity="0.78"/>
+      <path d="M0 0 L 120 -38 L 104 2 Z" fill="#fbf6ec" opacity="0.35"/>
+    </g><g transform="translate(530 220) rotate(24) scale(0.55)">
+      <path d="M0 0 L 120 -38 L 96 6 L 110 34 L 62 20 Z" fill="#d9694f" opacity="0.92"/>
+      <path d="M0 0 L 120 -38 L 104 2 Z" fill="#fbf6ec" opacity="0.35"/>
+    </g>
+  
+  <rect width="640" height="640" fill="url(#vignette-paper-planes)"/>
+</svg>

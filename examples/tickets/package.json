@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-tickets",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/tickets"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

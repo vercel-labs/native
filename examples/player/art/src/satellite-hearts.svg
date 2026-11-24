@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-satellite-hearts" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#080d28"/>
+      <stop offset="1" stop-color="#232a63"/>
+    </linearGradient>
+    <radialGradient id="glow-satellite-hearts" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#9aa8ff" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#9aa8ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-satellite-hearts" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-satellite-hearts" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff8fa3" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#ff8fa3" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-satellite-hearts)"/>
+  
+    <rect width="640" height="640" fill="url(#glow-satellite-hearts)"/>
+    <ellipse cx="320" cy="330" rx="120" ry="36" transform="rotate(-18 320 330)" fill="none" stroke="#ff8fa3" stroke-width="1.4" opacity="0.42"/><ellipse cx="320" cy="330" rx="166" ry="54" transform="rotate(-11 320 330)" fill="none" stroke="#9aa8ff" stroke-width="1.4" opacity="0.37"/><ellipse cx="320" cy="330" rx="212" ry="72" transform="rotate(-4 320 330)" fill="none" stroke="#ff8fa3" stroke-width="1.4" opacity="0.31999999999999995"/><ellipse cx="320" cy="330" rx="258" ry="90" transform="rotate(3 320 330)" fill="none" stroke="#9aa8ff" stroke-width="1.4" opacity="0.26999999999999996"/><ellipse cx="320" cy="330" rx="304" ry="108" transform="rotate(10 320 330)" fill="none" stroke="#ff8fa3" stroke-width="1.4" opacity="0.21999999999999997"/>
+    <circle cx="320" cy="330" r="92" fill="#9aa8ff" opacity="0.9"/>
+    <path d="M228 330 A 92 92 0 0 1 412 330 A 92 46 0 0 0 228 330 Z" fill="#080d28" opacity="0.35"/>
+    <circle cx="320" cy="330" r="116" fill="none" stroke="#ff8fa3" stroke-width="1.2" opacity="0.5"/>
+    <circle cx="198.0" cy="327.5" r="3.1" fill="#9aa8ff" opacity="0.85"/><circle cx="313.5" cy="377.4" r="4.6" fill="#ff8fa3" opacity="0.85"/><circle cx="446.8" cy="403.0" r="7.4" fill="#ff8fa3" opacity="0.85"/><circle cx="97.7" cy="317.9" r="3.5" fill="#9aa8ff" opacity="0.85"/><circle cx="327.2" cy="385.8" r="8.0" fill="#ff8fa3" opacity="0.85"/><circle cx="485.7" cy="266.1" r="7.2" fill="#ff8fa3" opacity="0.85"/><circle cx="31.5" cy="344.3" r="5.4" fill="#9aa8ff" opacity="0.85"/>
+  
+  <rect width="640" height="640" fill="url(#vignette-satellite-hearts)"/>
+</svg>

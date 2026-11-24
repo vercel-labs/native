@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-css-motion",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/css-motion"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

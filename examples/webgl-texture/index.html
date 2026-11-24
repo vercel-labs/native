@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="native-window" content="width=880, height=560">
+<title>Texture</title>
+<style>
+html, body { margin: 0; height: 100%; background: #10131c; color: #e8eefc; overflow: hidden; }
+#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#hud {
+  position: fixed; inset: auto auto 18px 18px;
+  font: 13px/1.5 system-ui, sans-serif; opacity: 0.75;
+}
+#hud b { color: #8be9fd; font-weight: 600; }
+#picture { position: fixed; right: 18px; bottom: 18px; width: 72px; height: 72px; image-rendering: pixelated; opacity: 0.9; }
+</style>
+</head>
+<body>
+<canvas id="stage"></canvas>
+<img id="picture" src="chequer.png" alt="">
+<div id="hud">WEBGL2 · TEXTURE FROM A FILE<br><span id="sample">waiting for the picture</span></div>
+<script src="app.ts"></script>
+</body>
+</html>

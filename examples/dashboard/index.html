@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta name="native-window" content="width=900, height=600">
+  <title>Team</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">N</span> Acme Console</div>
+    <div class="search">Search…</div>
+    <div class="me"><img id="me-avatar" width="28" class="avatar"> Dana<span class="dot"></span></div>
+  </header>
+  <div class="main">
+    <nav class="side">
+      <a class="nav on">Overview</a>
+      <a class="nav">Members <span class="count">4</span></a>
+      <a class="nav">Billing</a>
+      <a class="nav">Settings</a>
+    </nav>
+    <section class="content">
+      <h1>Overview</h1>
+      <p class="lede">Usage for the <strong>Acme</strong> team this month. Builds are <em>up 12%</em>, and <a href="#">two invites</a> are pending.</p>
+      <div class="cards">
+        <div class="card"><div class="label">Builds</div><div class="value">1,284</div><div class="delta up">▲ 12%</div></div>
+        <div class="card"><div class="label">Bandwidth</div><div class="value">82 GB</div><div class="delta down">▼ 3%</div></div>
+        <div class="card"><div class="label">Members</div><div class="value">4</div><div class="delta">— 0</div></div>
+      </div>
+      <table class="members">
+        <thead><tr><th>Name</th><th>Role</th><th>Last active</th><th></th></tr></thead>
+        <tbody>
+          <tr><td><img id="avatar-0" width="24" class="avatar"> Dana Reyes</td><td><span class="pill owner">Owner</span></td><td>now</td><td class="act">⋯</td></tr>
+          <tr><td><img id="avatar-1" width="24" class="avatar"> Sam Okafor</td><td><span class="pill">Member</span></td><td>2h ago</td><td class="act">⋯</td></tr>
+          <tr><td><img id="avatar-2" width="24" class="avatar"> Lee Park</td><td><span class="pill">Member</span></td><td>yesterday</td><td class="act">⋯</td></tr>
+          <tr id="last"><td><img id="avatar-3" width="24" class="avatar"> Ari Cohen</td><td><span class="pill invited">Invited</span></td><td>—</td><td class="act">⋯</td></tr>
+        </tbody>
+      </table>
+      <button id="resend" class="btn">Resend invite</button>
+    </section>
+  </div>
+  <script type="module" src="app.ts"></script>
+</body>
+</html>

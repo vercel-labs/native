@@ -1,0 +1,54 @@
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #05070d;
+  color: #e8f2ff;
+  font-family: sans-serif;
+  overflow: hidden;
+}
+
+#field {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.veil {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background: radial-gradient(circle at 50% 50%, rgba(5, 7, 13, 0) 40%, rgba(5, 7, 13, 0.72) 100%);
+}
+
+.hud {
+  position: absolute;
+  left: 48px;
+  top: 40px;
+}
+.label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 6px;
+  color: rgba(232, 242, 255, 0.9);
+}
+.hint {
+  margin-top: 12px;
+  font-size: 12px;
+  letter-spacing: 1.2px;
+  color: rgba(140, 165, 205, 0.8);
+}
+
+.corner {
+  position: absolute;
+  left: 48px;
+  bottom: 34px;
+  font-family: monospace;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: rgba(120, 145, 185, 0.7);
+}

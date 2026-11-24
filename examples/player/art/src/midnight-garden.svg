@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-midnight-garden" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#0d0818"/>
+      <stop offset="1" stop-color="#271745"/>
+    </linearGradient>
+    <radialGradient id="glow-midnight-garden" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#8f6bff" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#8f6bff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-midnight-garden" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-midnight-garden" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7ee0c3" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#7ee0c3" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-midnight-garden)"/>
+  
+    <rect width="640" height="640" fill="url(#bg-midnight-garden)"/>
+    <circle cx="320" cy="250" r="128" fill="url(#glow-midnight-garden)"/>
+    <circle cx="320" cy="250" r="78" fill="#7ee0c3" opacity="0.85"/>
+    <path d="M242 250 A 78 78 0 0 0 398 250 A 78 42 0 0 1 242 250 Z" fill="#271745" opacity="0.5"/>
+    <circle cx="320" cy="250" r="104" fill="none" stroke="#8f6bff" stroke-width="1.4" opacity="0.45"/>
+    <path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(309.2 444.1) rotate(11) scale(1.18)" fill="#7ee0c3" opacity="0.60"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(556.6 351.7) rotate(143) scale(1.08)" fill="#1f4a3b" opacity="0.49"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(453.2 434.5) rotate(108) scale(1.12)" fill="#1f4a3b" opacity="0.48"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(504.3 453.7) rotate(223) scale(0.85)" fill="#7ee0c3" opacity="0.57"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(452.7 538.1) rotate(13) scale(0.71)" fill="#1f4a3b" opacity="0.46"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(503.9 410.3) rotate(50) scale(0.58)" fill="#1f4a3b" opacity="0.55"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(209.2 386.6) rotate(273) scale(1.03)" fill="#7ee0c3" opacity="0.63"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(74.8 351.7) rotate(63) scale(0.78)" fill="#1f4a3b" opacity="0.43"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(144.4 475.0) rotate(27) scale(1.26)" fill="#1f4a3b" opacity="0.44"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(566.0 419.3) rotate(217) scale(1.40)" fill="#7ee0c3" opacity="0.47"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(272.3 452.8) rotate(319) scale(0.79)" fill="#1f4a3b" opacity="0.57"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(337.6 526.8) rotate(199) scale(1.36)" fill="#1f4a3b" opacity="0.48"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(510.1 445.5) rotate(184) scale(0.99)" fill="#7ee0c3" opacity="0.60"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(557.3 496.6) rotate(149) scale(0.87)" fill="#1f4a3b" opacity="0.64"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(226.2 331.4) rotate(292) scale(1.19)" fill="#1f4a3b" opacity="0.46"/><path d="M0 0 C 34 -30 70 -28 96 0 C 70 28 34 30 0 0 Z" transform="translate(115.2 349.4) rotate(140) scale(1.19)" fill="#7ee0c3" opacity="0.45"/>
+    <rect y="560" width="640" height="80" fill="#0d0818" opacity="0.5"/>
+  
+  <rect width="640" height="640" fill="url(#vignette-midnight-garden)"/>
+</svg>

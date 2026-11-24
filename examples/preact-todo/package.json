@@ -1,0 +1,14 @@
+{
+  "name": "@native-sdk/example-preact-todo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/preact-todo"
+  },
+  "dependencies": {
+    "preact": "^10.27.2"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

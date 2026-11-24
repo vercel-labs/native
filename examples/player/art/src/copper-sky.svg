@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="640" viewBox="0 0 640 640">
+  <defs>
+    <linearGradient id="bg-copper-sky" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#241006"/>
+      <stop offset="1" stop-color="#7f3314"/>
+    </linearGradient>
+    <radialGradient id="glow-copper-sky" cx="50%" cy="38%" r="62%">
+      <stop offset="0" stop-color="#d4762c" stop-opacity="0.72"/>
+      <stop offset="1" stop-color="#d4762c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vignette-copper-sky" cx="50%" cy="50%" r="72%">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.36"/>
+    </radialGradient>
+    <linearGradient id="pale-copper-sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f5cf95" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#f5cf95" stop-opacity="0.35"/>
+    </linearGradient>
+  </defs>
+  <rect width="640" height="640" fill="url(#bg-copper-sky)"/>
+  
+    <rect width="640" height="640" fill="url(#glow-copper-sky)"/>
+    <circle cx="320" cy="330" r="150" fill="#d4762c" opacity="0.55"/>
+    <circle cx="320" cy="330" r="186" fill="none" stroke="#f5cf95" stroke-width="1.5" opacity="0.4"/>
+    <path d="M0 268.8 L 0 266.4 L 40 244.6 L 80 233.2 L 120 219.2 L 160 219.3 L 200 222.8 L 240 225.3 L 280 233.7 L 320 249.6 L 360 274.4 L 400 281.2 L 440 298.8 L 480 303.6 L 520 311.0 L 560 309.4 L 600 300.6 L 640 285.4 L640 640 L0 640 Z" fill="#4a180a" opacity="0.9"/><path d="M0 358.40000000000003 L 0 319.6 L 40 317.2 L 80 328.1 L 120 338.5 L 160 352.4 L 200 371.6 L 240 375.9 L 280 385.5 L 320 395.5 L 360 388.1 L 400 385.8 L 440 373.8 L 480 363.2 L 520 346.1 L 560 336.8 L 600 321.3 L 640 316.3 L640 640 L0 640 Z" fill="#66230d" opacity="0.9"/><path d="M0 448 L 0 451.1 L 40 464.5 L 80 466.7 L 120 468.4 L 160 471.1 L 200 467.0 L 240 463.0 L 280 450.0 L 320 437.4 L 360 428.7 L 400 421.8 L 440 416.8 L 480 409.9 L 520 413.8 L 560 422.2 L 600 422.1 L 640 434.5 L640 640 L0 640 Z" fill="#873516" opacity="0.9"/><path d="M0 537.6 L 0 550.6 L 40 548.0 L 80 542.3 L 120 536.4 L 160 529.6 L 200 519.2 L 240 509.7 L 280 508.7 L 320 511.4 L 360 511.1 L 400 520.5 L 440 522.8 L 480 531.4 L 520 545.9 L 560 546.6 L 600 555.5 L 640 550.1 L640 640 L0 640 Z" fill="#a94a1d" opacity="0.9"/>
+    <path d="M0 560 C 160 520 300 570 480 540 C 560 528 610 534 640 542" stroke="#f5cf95" stroke-width="2" fill="none" opacity="0.45"/>
+  
+  <rect width="640" height="640" fill="url(#vignette-copper-sky)"/>
+</svg>

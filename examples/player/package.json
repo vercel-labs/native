@@ -1,0 +1,22 @@
+{
+  "name": "@native-sdk/example-player",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/player",
+    "css": "tailwindcss -i input.css -o style.css --minify"
+  },
+  "dependencies": {
+    "@types/react": "19.2.10",
+    "@types/react-dom": "19.2.3",
+    "@ui-sdk/core": "0.1.0-beta.13",
+    "@ui-sdk/react": "0.1.0-beta.13",
+    "react": "19.2.0",
+    "react-dom": "19.2.0"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*",
+    "@tailwindcss/cli": "4.1.17",
+    "tailwindcss": "4.1.17"
+  }
+}
