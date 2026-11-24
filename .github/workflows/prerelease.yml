@@ -1,5 +1,6 @@
-# Publishes a prerelease of every publishable package from `next` under the `next` dist-tag. Run it
-# manually from `next` when a prerelease is wanted.
+# Publishes a prerelease of every publishable package from `next` under the `next` dist-tag. It runs
+# when a push to `next` changes .github/prerelease (edit that file to cut a prerelease), or by
+# manual dispatch once this workflow is on the default branch.
 # A run's version is the CLI's base version plus the run number (for example 0.20.0-next.42), and
 # the CLI's optional dependencies name the same prerelease of the platform packages, so an install
 # of the prerelease gets a matching dev host and ANGLE build. The publish job waits for a reviewer
@@ -8,6 +9,9 @@
 name: prerelease
 
 on:
+  push:
+    branches: [next]
+    paths: [.github/prerelease]
   workflow_dispatch:
 
 permissions:
