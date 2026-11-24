@@ -3636,11 +3636,17 @@ static void paint_shadow(const Cmd *c, int inset) {
   if (!g_d2d || !(c->w > 0) || !(c->h > 0)) return;
   double spread = c->line_width;
   double pad = fabs(c->dx) + fabs(c->dy) + c->blur * 3 + fabs(spread) + 2;
-  D2D1_RECT_F bounds;
-  if (!rect_bounds(D2D1::RectF((FLOAT)(c->x - pad), (FLOAT)(c->y - pad), (FLOAT)(c->x + c->w + pad),
-                               (FLOAT)(c->y + c->h + pad)),
-                   &bounds))
-    return;
+  // The box the shadow covers, in the page's own space, cut to the page. A shadow is the same
+  // picture wherever its element sits and however it is turned, so it is rastered and blurred
+  // here and laid down under the transform in effect: a shadow that moves or turns keeps the
+  // bitmap it was made with, and a turned one draws that silhouette turned.
+  D2D1_RECT_F bounds = D2D1::RectF((FLOAT)(c->x - pad), (FLOAT)(c->y - pad),
+                                   (FLOAT)(c->x + c->w + pad), (FLOAT)(c->y + c->h + pad));
+  if (bounds.left < 0) bounds.left = 0;
+  if (bounds.top < 0) bounds.top = 0;
+  if (bounds.right > (FLOAT)g_view_w) bounds.right = (FLOAT)g_view_w;
+  if (bounds.bottom > (FLOAT)g_view_h) bounds.bottom = (FLOAT)g_view_h;
+  if (!(bounds.right > bounds.left) || !(bounds.bottom > bounds.top)) return;
   int pw = (int)ceil((bounds.right - bounds.left) * g_scale);
   int ph = (int)ceil((bounds.bottom - bounds.top) * g_scale);
   if (pw < 1 || ph < 1 || (double)pw * ph > 64.0 * 1024 * 1024) return;
@@ -3666,10 +3672,9 @@ static void paint_shadow(const Cmd *c, int inset) {
   }
   // The silhouette: the border box grown by the spread for an outer shadow, and the ring the
   // offset leaves inside the box for an inset one.
-  D2D1_MATRIX_3X2_F m = shadow_page_transform();
   dc->BeginDraw();
   dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-  dc->SetTransform(matrix_product(D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top), m));
+  dc->SetTransform(D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top));
   ID2D1SolidColorBrush *white = solid_brush_on(dc, 0xffffffffu, 1);
   if (white) {
     if (!inset) {
