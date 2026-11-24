@@ -65,8 +65,10 @@ export function libnodePackageName(): string | null {
   if (process.platform !== "darwin" && process.platform !== "linux") return null;
   if (process.arch !== "arm64" && process.arch !== "x64") return null;
   if (process.platform === "darwin") return `@scriptc/libnode-darwin-${process.arch}`;
-  const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
-  return `@scriptc/libnode-linux-${process.arch}-${report?.header?.glibcVersionRuntime ? "gnu" : "musl"}`;
+  // musl's dynamic loader is /lib/ld-musl-<arch>.so.1; a glibc system has none. (Node's process
+  // report names the C library, but the compiled CLI has no process.report.)
+  const loader = `/lib/ld-musl-${process.arch === "arm64" ? "aarch64" : "x86_64"}.so.1`;
+  return `@scriptc/libnode-linux-${process.arch}-${existsSync(loader) ? "musl" : "gnu"}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -80,8 +82,12 @@ export const PREBUILT_SCHEMA = "native.dev-host.v1";
 /** The libc a Linux host is built against, or null on a platform that has no libc split. */
 export function devHostLibc(platform: NodeJS.Platform = process.platform): string | null {
   if (platform !== "linux") return null;
-  const report = process.report?.getReport() as { header?: { glibcVersionRuntime?: string } } | undefined;
-  return report?.header?.glibcVersionRuntime ? "glibc" : "musl";
+  // scriptc has no lowering for process.report, and the musl loader's name is the same fact:
+  // a Linux system with it is a musl system and every other one is glibc.
+  const musl = process.arch === "arm64" || process.arch === "arm"
+    ? "/lib/ld-musl-aarch64.so.1"
+    : "/lib/ld-musl-x86_64.so.1";
+  return existsSync(musl) ? "musl" : "glibc";
 }
 
 /** The optional package that ships this platform's prebuilt dev host, or null where there is
@@ -251,7 +257,7 @@ export function libnodeAbiIdentity(pack: LibnodePack | null = libnodePack()): st
 /** The scriptc executable's identity: its path, size and mtime. A different build of the
  *  compiler must not answer from a host it built. */
 function scriptcIdentity(): string {
-  const path = findScriptc();
+  const path = findScriptc().command;
   try {
     const st = statSync(path);
     return `${path}\0${st.size}\0${st.mtimeMs}`;

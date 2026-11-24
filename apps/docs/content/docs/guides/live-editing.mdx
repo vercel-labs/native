@@ -3,11 +3,13 @@ title: "Live editing"
 description: "Watch an app and apply edits to the open window as you save."
 ---
 
-`native dev` builds the app with scriptc's `dev` optimization and watches its directory.
+`native dev` builds the app with scriptc's `dev` optimization and watches its directory. Run it from the project's `dev` script (`"dev": "native dev"` in package.json):
 
 ```console
-$ node packages/cli/compiler/cli.ts dev hello
+$ npm run dev
 ```
+
+Without the script, `npx @native-sdk/cli dev` runs it once.
 
 ## HTML and CSS edits
 

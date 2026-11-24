@@ -8,8 +8,8 @@ import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { join } from "node:path";
-import { createContext, runInContext } from "node:vm";
 import { INSPECT_HTML } from "./inspect-ui.ts";
+import { evaluateExpression } from "./console-eval.ts";
 
 /** One console line the app printed, or an exception the runtime reported. */
 interface ConsoleLine {
@@ -403,19 +403,20 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
         warn: (...args: unknown[]) => { const t = args.map(String).join(" "); dom.addLog("warn", t); addLog("warn", t); return undefined; },
         error: (...args: unknown[]) => { const t = args.map(String).join(" "); dom.addLog("error", t); addLog("error", t); return undefined; },
       },
-      JSON: JSON,
-      Math: Math,
-      String: String,
-      Number: Number,
-      Boolean: Boolean,
-      Array: Array,
-      Object: Object,
-      Date: Date,
-      undefined: undefined,
+      JSON: {
+        stringify: (value: unknown) => JSON.stringify(value),
+        parse: (text: unknown) => JSON.parse(String(text)) as unknown,
+      },
+      Math: {
+        PI: Math.PI, E: Math.E,
+        abs: (x: unknown) => Math.abs(Number(x)), floor: (x: unknown) => Math.floor(Number(x)),
+        ceil: (x: unknown) => Math.ceil(Number(x)), round: (x: unknown) => Math.round(Number(x)),
+        sqrt: (x: unknown) => Math.sqrt(Number(x)), random: () => Math.random(),
+        min: (...xs: unknown[]) => Math.min(...xs.map(Number)), max: (...xs: unknown[]) => Math.max(...xs.map(Number)),
+      },
     };
-    const context = createContext(sandbox);
     try {
-      const value = runInContext(expression, context, { timeout: 1000, displayErrors: false });
+      const value = evaluateExpression(expression, sandbox);
       const described = describe(value);
       if (returnByValue) return { result: described };
       return { result: described };

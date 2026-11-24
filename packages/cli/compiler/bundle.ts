@@ -102,10 +102,15 @@ export class AssetBundle {
         .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       for (const entry of entries) {
         const source = join(at, entry.name);
-        const stat = entry.isSymbolicLink() ? statSync(source, { throwIfNoEntry: false }) : entry;
-        if (stat === undefined) continue;
-        if (stat.isDirectory()) walk(source);
-        else if (stat.isFile()) this.add(source);
+        // A directory symlink is followed, so ask the link's target what it is; a plain entry
+        // answers for itself. The two paths keep each stat call on one concrete type.
+        if (entry.isSymbolicLink()) {
+          const target = statSync(source, { throwIfNoEntry: false });
+          if (target === undefined) continue;
+          if (target.isDirectory()) walk(source);
+          else if (target.isFile()) this.add(source);
+        } else if (entry.isDirectory()) walk(source);
+        else if (entry.isFile()) this.add(source);
       }
     };
     walk(this.publicDir);

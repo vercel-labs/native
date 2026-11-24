@@ -3,21 +3,19 @@ title: "CLI reference"
 description: "Commands, options and environment variables for the native CLI."
 ---
 
-Run the CLI as `npx @native-sdk/cli <command>`, from a `package.json` script (the package installs the `native` command), or from a checkout of the repository as `node packages/cli/compiler/cli.ts <command>`.
+Install the CLI into your app's project with `npm install -D @native-sdk/cli`. It installs a `native` command that package.json scripts run (`"dev": "native dev"`, `"build": "native build"`, then `npm run dev` and `npm run build`). A one-off command runs the package by its name, as `npx @native-sdk/cli <command>`. The examples below use that form. `native --version` prints the installed version.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `build <dir> [-o out]` | Compile an app to a self-contained app bundle. |
-| `run <dir>` | Build the app, then run it. |
-| `dev <dir> [-o out]` | Watch the app and apply edits as they are saved. |
-| `check <dir>` | Report diagnostics without building. |
-| `wpt <fetch\|run>` | Fetch and run web-platform-tests. See [Web platform tests](/reference/web-platform-tests). |
+| `build [dir] [-o out]` | Compile an app to a self-contained app bundle. |
+| `run [dir]` | Build the app, then run it. |
+| `dev [dir] [-o out]` | Watch the app and apply edits as they are saved. |
+| `check [dir]` | Report diagnostics without building. |
+| `wpt <fetch\|run>` | Fetch and run web-platform-tests, from a clone of the repository. See [Web platform tests](/reference/web-platform-tests). |
 
-`build` compiles the app's TypeScript with scriptc, whose frontend gets a JavaScript heap sized to the machine (most of its memory, up to 8 GB, unless `NODE_OPTIONS` already names `--max-old-space-size`), so a large app compiles without one.
-
-`build` takes its output path from `-o`, or uses the app directory's name inside it (`hello/hello`) without one. On macOS the executable and the app's files go inside `<out>.app`; elsewhere the executable is written at that path with its files beside it in `<out>.resources`. `dev` writes the executable to the path directly, without a bundle.
+Each command works on the current directory when no directory is named. `build` compiles the app's TypeScript with scriptc, whose frontend gets a JavaScript heap sized to the machine (most of its memory, up to 8 GB, unless `NODE_OPTIONS` already names `--max-old-space-size`), so a large app compiles without one. `build` takes its output path from `-o`, or uses the app directory's name inside it (`hello/hello`) without one. On macOS the executable and the app's files go inside `<out>.app`; elsewhere the executable is written at that path with its files beside it in `<out>.resources`. `dev` writes the executable to the path directly, without a bundle.
 
 ```console
 $ npx @native-sdk/cli build hello -o build/hello

@@ -38,6 +38,7 @@ import { shadowRows } from "../shared/css/shadows.ts";
 import type { AppTables } from "../runtime/app/mount.ts";
 import { compileSvgImage } from "./svg-image.ts";
 import type { AssetBundle } from "./bundle.ts";
+import { NATIVE_BINARY, ROOT } from "./root.ts";
 
 /**
  * Every field of AppTables, with the name gen.ts exports it under. gen.ts and the dev data
@@ -800,7 +801,11 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
       // and its WebDriver plumbing has nothing to talk to here.
       if (options.testharness && /(^|\/)testdriver(-vendor|-actions)?\.js$/.test(src)) continue;
       if (options.testharness && /(^|\/)testharness\.js$/.test(src)) {
-        const shim = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "testharness.js"), "utf8");
+        const shim = readFileSync(NATIVE_BINARY
+          // The executable's import.meta.url is the file on the machine that compiled it; a
+          // checkout's executable finds the shim in the sources beside it (compiler/root.ts).
+          ? join(ROOT, "compiler", "testharness.js")
+          : join(dirname(fileURLToPath(import.meta.url)), "testharness.js"), "utf8");
         scripts.push({ path: null, text: shim, line: 1, col: 1, order: scriptOrder - 1, module: false });
         scriptText.push(shim);
         continue;
@@ -1654,7 +1659,10 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const at = pseudo === P.PE_NONE ? i : node.parent;
     if (at < 0) return;
     const origin = nodes[at];
-    const src = sourceEls[at]!;
+    // Null for a node the build made up (a generated wrapper), which has no source position.
+    const src = sourceEls[at];
+    const srcLine = src?.line ?? 1;
+    const srcCol = src?.col ?? 1;
     const cands: Candidate[] = [];
     for (const rule of rules) {
       const parts = partsOf(rule.decls);
@@ -1698,7 +1706,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const hintDecls = hints[at];
     if (pseudo === P.PE_NONE && hintDecls.length > 0) {
       const sel: Selector = { tag: null, id: null, root: false, classes: [], states: 0, nthStart: [], nthEnd: [], attrs: [], nots: [], has: [], chain: [], specificity: 0, pseudo: P.PE_NONE, pseudoName: "", text: "[attrs]" };
-      const hintRule: CssRule = { selectors: [], decls: hintDecls, order: -1, origin: "author", file: htmlFile, line: src.line, col: src.col, media: "", layer: -1, container: "", scope: "", starting: false };
+      const hintRule: CssRule = { selectors: [], decls: hintDecls, order: -1, origin: "author", file: htmlFile, line: srcLine, col: srcCol, media: "", layer: -1, container: "", scope: "", starting: false };
       cands.push({ sel, rule: hintRule, decls: hintDecls, important: false, rank: rankOf(hintRule, false, 0) });
     }
     // The slot an SVG element keeps for its presentation attributes: it sits where a hint does
@@ -1706,14 +1714,14 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     // own (the runtime fills them from the attributes the element carries at the time).
     if (pseudo === P.PE_NONE && hintSlots[at]) {
       const sel: Selector = { tag: null, id: null, root: false, classes: [], states: 0, nthStart: [], nthEnd: [], attrs: [], nots: [], has: [], chain: [], specificity: 0, pseudo: P.PE_NONE, pseudoName: "", text: "[attrs]" };
-      const slotRule: CssRule = { selectors: [], decls: [], order: -1, origin: "author", file: htmlFile, line: src.line, col: src.col, media: "", layer: -1, container: "", scope: "", starting: false };
+      const slotRule: CssRule = { selectors: [], decls: [], order: -1, origin: "author", file: htmlFile, line: srcLine, col: srcCol, media: "", layer: -1, container: "", scope: "", starting: false };
       cands.push({ sel, rule: slotRule, decls: [], important: false, rank: rankOf(slotRule, false, 0), hint: true });
     }
 
     // The style="" attribute is reported on here, then parsed again by the runtime, which owns
     // the inline declarations so that scripts can change them (see runtime/cssom.ts).
     if (pseudo === P.PE_NONE && node.style !== "") {
-      compileDeclarations(node.style, () => [src.line, src.col], htmlFile, diags, styleContext, contentContext);
+      compileDeclarations(node.style, () => [srcLine, srcCol], htmlFile, diags, styleContext, contentContext);
     }
     cands.sort((a, b) => a.rank - b.rank || a.rule.order - b.rule.order);
     if (cands.some((c) => c.rule.starting)) startingNodes[at] = true;

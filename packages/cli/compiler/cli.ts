@@ -1,17 +1,25 @@
 #!/usr/bin/env node
 // native: compile an HTML/CSS/TS app into a native executable via scriptc.
 //
-//   native build <app-dir | index.html> [-o out] [--release]
-//   native run   <app-dir | index.html> [--release]
-//   native dev   <app-dir | index.html> [-o out] [--compiled]
-//   native check <app-dir | index.html>
+//   native build [app-dir | index.html] [-o out] [--release]
+//   native run   [app-dir | index.html] [--release]
+//   native dev   [app-dir | index.html] [-o out] [--compiled]
+//   native check [app-dir | index.html]
+//
+// The app is the current directory when none is named, so a package.json script can be just
+// `native dev` or `native build`.
 
 import { build, color, compileFrontEnd, htmlPathOf } from "./build.ts";
 import { packageLinux } from "./package-linux.ts";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { ROOT } from "./root.ts";
 
 function usage(): never {
-  console.error("usage: native <build|run|dev|check> <app-dir | index.html> [-o out] [--release] [--inspect[=port]] [--compiled]");
+  console.error("usage: native <build|run|dev|check> [app-dir | index.html] [-o out] [--release] [--inspect[=port]] [--compiled]");
+  console.error("       native --version");
+  console.error("Run it from a package.json script (\"build\": \"native build\"), or once with npx @native-sdk/cli <command>.");
   process.exit(2);
 }
 
@@ -19,13 +27,19 @@ function usage(): never {
 
 const args = process.argv.slice(2);
 const cmd = args[0];
+if (cmd === "--version" || cmd === "-v") {
+  // The version of the package the sources (or the executable's runtime sources) came in.
+  console.log((JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { version: string }).version);
+  process.exit(0);
+}
 if (cmd === "wpt") {
   const { main } = await import("./wpt.ts");
   await main(args.slice(1));
   process.exit(process.exitCode ?? 0);
 }
-const input = args[1];
-if (!cmd || !input) usage();
+// The app named after the command, or the current directory when the next argument is an option.
+const input = args[1] === undefined || args[1].startsWith("-") ? "." : args[1];
+if (!cmd || !["build", "run", "dev", "check"].includes(cmd)) usage();
 const oi = args.indexOf("-o");
 const out = oi >= 0 ? args[oi + 1] ?? usage() : null;
 const release = args.includes("--release");
@@ -85,6 +99,8 @@ try {
 } catch (err) {
   // A failed build or a missing file is one line on stderr, not a stack trace. The dev command
   // catches its own build errors and keeps watching.
-  console.error(err instanceof Error ? err.message : String(err));
+  // NATIVE_DEBUG prints the stack, for a failure in native itself.
+  const debug = process.env.NATIVE_DEBUG !== undefined && process.env.NATIVE_DEBUG !== "";
+  console.error(err instanceof Error ? (debug && err.stack !== undefined ? err.stack : err.message) : String(err));
   process.exit(1);
 }

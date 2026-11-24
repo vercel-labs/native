@@ -123,8 +123,9 @@ export async function runCoverage(appDir: string, entry: string, env: NodeJS.Pro
       answer(report);
     };
     let child;
+    const scriptc = findScriptc();
     try {
-      child = spawn(findScriptc(), ["coverage", entry, "--print=diagnostics"], {
+      child = spawn(scriptc.command, [...scriptc.args, "coverage", entry, "--print=diagnostics"], {
         cwd: appDir,
         env,
         stdio: ["ignore", "pipe", "pipe"],

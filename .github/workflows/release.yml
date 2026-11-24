@@ -1,10 +1,7 @@
-# Builds the dev host the first `native dev` would otherwise compile (four to five minutes of
-# the SDK's runtime) once per platform, packs each into the optional package @native-sdk/cli
-# depends on, and — on a version tag, or a manual run with `publish` — publishes the packages.
-#
-# Each host records the SDK digest of the CLI package exactly as `pnpm pack` ships it (see
-# packages/cli/scripts/prebuilt-dev-host.ts), so an install only uses a host built from its own
-# SDK; anything else falls back to building the host on that machine.
+# Builds each platform's scriptc-compiled CLI executable and the npm packages around it, plus the
+# dev host the first `native dev` would otherwise compile, and — on a `v*` tag or a manual run with
+# `publish` — publishes them. Trusted publishing (GitHub OIDC, `--provenance`, no npm token) needs
+# the `Release` environment and each package's trusted publisher to name this workflow.
 name: release
 
 on:
@@ -13,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish @native-sdk/cli and the dev-host packages to npm"
+        description: "Publish @native-sdk/cli, its platform packages and the dev-host packages to npm"
         type: boolean
         default: false
 
@@ -25,11 +22,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The CLI is one package for every platform: pack it once, and let each dev-host job hash the
-  # CLI package it was built against. `pnpm pack` (not npm's) rewrites workspace:* to versions.
-  cli:
-    name: pack the CLI
+  version:
+    name: read the version
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: version
+        run: echo "version=$(node -p "require('./packages/cli/package.json').version")" >> "$GITHUB_OUTPUT"
+
+  # One executable per platform, packed with the launcher into @native-sdk/cli and
+  # @native-sdk/cli-<platform> (scripts/pack.ts). Linux is linked against a glibc 2.34 sysroot.
+  cli-executable:
+    name: CLI executable (${{ matrix.platform }})
+    needs: version
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-24.04, target: x86_64-linux-gnu.2.34 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.34 }
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: win32-x64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -37,25 +59,58 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - uses: vercel-labs/setup-zig@v1
+        if: ${{ matrix.platform == 'win32-x64' || matrix.target }}
+        with:
+          version: 0.17.1
+      - name: Install the Linux host's build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld pkg-config \
+            libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
+            libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
+            libegl-dev libgl-dev libgl1-mesa-dri libsqlite3-dev fonts-dejavu-core
       - run: pnpm install --frozen-lockfile
-      - run: mkdir -p "$RUNNER_TEMP/pack" && pnpm --filter @native-sdk/cli pack --pack-destination "$RUNNER_TEMP/pack"
+      - name: Build the executable
+        env:
+          SCRIPTC_TARGET: ${{ matrix.target }}
+        working-directory: packages/cli
+        run: node scripts/build-native.ts
+      - name: Pack the npm packages
+        env:
+          CI: true
+        working-directory: packages/cli
+        run: node scripts/pack.ts
       - uses: actions/upload-artifact@v4
         with:
-          name: cli-package
-          path: ${{ runner.temp }}/pack/*.tgz
+          name: cli-${{ matrix.platform }}
+          path: |
+            packages/cli/dist/npm/native-sdk-cli-${{ matrix.platform }}-*.tgz
+            packages/cli/dist/npm/native-sdk-cli-[0-9]*.tgz
+          if-no-files-found: error
+      - name: Pack ANGLE
+        if: matrix.platform == 'linux-x64'
+        run: |
+          mkdir -p "$RUNNER_TEMP/angle"
+          pnpm --filter @native-sdk/angle-win32-x64 pack --pack-destination "$RUNNER_TEMP/angle"
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'linux-x64'
+        with:
+          name: angle
+          path: ${{ runner.temp }}/angle/*.tgz
           if-no-files-found: error
 
   dev-host:
     name: dev host (${{ matrix.key }})
-    needs: cli
+    needs: cli-executable
     strategy:
       fail-fast: false
       matrix:
         include:
           - key: linux-x64
             os: ubuntu-22.04
-          # GitHub's hosted arm64 images are `ubuntu-*-arm`; a plan without them uses a
-          # self-hosted arm64 runner's label here instead.
           - key: linux-arm64
             os: ubuntu-22.04-arm
           - key: darwin-x64
@@ -63,8 +118,7 @@ jobs:
           - key: darwin-arm64
             os: macos-14
           # scriptc has no Windows libnode pack yet, so the dev host's Node island cannot be
-          # built there. The job packs the host when one lands; until then it records a notice
-          # and a release carries the four platforms that can run `native dev`'s island.
+          # built there; the job records a notice and the release carries the other four.
           - key: win32-x64
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -75,9 +129,6 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-
-      # The Linux host links cairo, freetype, fontconfig, harfbuzz, libpng, libjpeg, libgif,
-      # dbus, ALSA, EGL, GL and sqlite; these are the packages its headers and archives come from.
       - name: Install the Linux host's build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -87,8 +138,6 @@ jobs:
             libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
             libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
             libegl-dev libgl-dev libgl1-mesa-dri libsqlite3-dev
-
-      # scriptc links a Windows program with zig, so the host's objects are zig builds too.
       - name: Install zig
         if: runner.os == 'Windows'
         shell: pwsh
@@ -102,12 +151,7 @@ jobs:
           }
           "$root" | Out-File -Append -FilePath $env:GITHUB_PATH
           & "$root\zig.exe" version
-
       - run: pnpm install --frozen-lockfile
-
-      # The dev host embeds a Node island, and scriptc builds one only against a libnode pack.
-      # Windows has none, so there is nothing to build there yet; the package and the CLI's
-      # lookup are ready for the day a pack ships, and this job then packs a host for it too.
       - name: Check for this platform's libnode pack
         id: libnode
         shell: bash
@@ -116,32 +160,27 @@ jobs:
             echo "supported=true" >> "$GITHUB_OUTPUT"
           else
             echo "supported=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=win32-x64 dev host skipped::scriptc has no Windows libnode pack, so the dev host's Node island cannot be built; the package and the CLI lookup are ready for when one lands."
+            echo "::notice title=win32-x64 dev host skipped::scriptc has no Windows libnode pack, so the dev host's Node island cannot be built."
           fi
-
       - uses: actions/download-artifact@v4
         with:
-          name: cli-package
-          path: ${{ runner.temp }}/pack
-
-      # Unpack the CLI exactly as npm will install it, so the digest recorded in host.json is
-      # the one an install computes over its own files.
+          name: cli-linux-x64
+          path: ${{ runner.temp }}/cli-artifact
+      # The launcher package carries the runtime/shared/host sources; the dev host records its
+      # digest exactly as an install computes it.
       - name: Unpack the CLI package
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/cli-package"
-          tar -xzf "$RUNNER_TEMP"/pack/*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
-
+          tar -xzf "$RUNNER_TEMP"/cli-artifact/native-sdk-cli-[0-9]*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
       - name: Build the dev host into its package
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
         run: node packages/cli/scripts/prebuilt-dev-host.ts "packages/dev-host-${{ matrix.key }}" --force --sdk-root "$RUNNER_TEMP/cli-package"
-
       - name: Pack the dev-host package
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
         run: mkdir -p "$RUNNER_TEMP/packages" && (cd "packages/dev-host-${{ matrix.key }}" && pnpm pack --pack-destination "$RUNNER_TEMP/packages")
-
       - name: Check the package holds the host and its manifest
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
@@ -149,7 +188,6 @@ jobs:
           tarball=$(ls "$RUNNER_TEMP"/packages/*.tgz)
           tar -tzf "$tarball" | grep -q -x -e 'package/host' -e 'package/host.exe'
           tar -tzf "$tarball" | grep -q -x 'package/host.json'
-
       - uses: actions/upload-artifact@v4
         if: steps.libnode.outputs.supported == 'true'
         with:
@@ -159,16 +197,12 @@ jobs:
 
   publish:
     name: publish to npm
-    needs: [cli, dev-host]
-    # A version tag releases; a manual run can ask for one. Without either, this workflow only
-    # builds and packs, which is what a pull request check would run.
+    needs: [version, cli-executable, dev-host]
     if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
     runs-on: ubuntu-22.04
-    # Every publish waits for a reviewer on the repository's `npm-publish`
-    # environment (Settings -> Environments -> required reviewers).
-    environment: npm-publish
+    environment: Release
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
@@ -185,15 +219,39 @@ jobs:
         run: |
           npm install -g npm@^11.5.1
           npm --version
-      # Platform packages first: the CLI's optionalDependencies name them, so they must exist
-      # before the CLI that asks for them is published.
-      - name: Publish the dev-host packages
+      - name: Publish the platform packages
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          for tarball in $(ls "$RUNNER_TEMP"/dist/dev-host-*.tgz); do
-            npm publish "$tarball" --provenance --access public
+          publish() {
+            tarball="$1"
+            name=$(tar -xzOf "$tarball" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION already published, skipping"
+            else
+              npm publish "$tarball" --provenance --access public
+            fi
+          }
+          # CLI platform packages first, then ANGLE and the dev hosts the launcher names, and the
+          # launcher last.
+          for tarball in "$RUNNER_TEMP"/dist/native-sdk-cli-[a-z]*-"$VERSION".tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
           done
-      - name: Publish the CLI
+          for tarball in "$RUNNER_TEMP"/dist/native-sdk-angle-*.tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
+          done
+          for tarball in "$RUNNER_TEMP"/dist/dev-host-*.tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
+          done
+          for tarball in "$RUNNER_TEMP"/dist/native-sdk-cli-[0-9]*.tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
+          done
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          for tarball in $(ls "$RUNNER_TEMP"/dist/native-sdk-cli-*.tgz); do
-            npm publish "$tarball" --provenance --access public
-          done
+          TAG="cli-v$VERSION"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --notes "@native-sdk/cli $TAG" "$RUNNER_TEMP"/dist/*.tgz

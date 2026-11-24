@@ -1,10 +1,8 @@
 # Publishes a prerelease of every publishable package from `next` under the `next` dist-tag. Run it
-# manually from `next` when a prerelease is wanted.
-# A run's version is the CLI's base version plus the run number (for example 0.20.0-next.42), and
-# the CLI's optional dependencies name the same prerelease of the platform packages, so an install
-# of the prerelease gets a matching dev host and ANGLE build. The publish job waits for a reviewer
-# on the repository's `npm-publish` environment. Stable releases still come from a version tag
-# (release.yml); this workflow never moves the `latest` dist-tag.
+# manually from `next` when a prerelease is wanted. A run's version is the CLI's base version plus
+# the run number (for example 0.20.0-next.42): the scriptc-compiled CLI, its platform packages, the
+# dev hosts and ANGLE all carry it. Trusted publishing (GitHub OIDC, `--provenance`, no npm token)
+# needs the `Release` environment; this workflow never moves `latest`.
 name: prerelease
 
 on:
@@ -34,12 +32,20 @@ jobs:
           base=$(node -p "require('./packages/cli/package.json').version.split('-')[0]")
           echo "version=$base-next.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
 
-  # The CLI is one package for every platform, and ANGLE ships beside it for the Windows host.
-  # Pack both once; each dev-host job hashes the CLI package it was built against.
-  cli:
-    name: pack the CLI and ANGLE
+  cli-executable:
+    name: CLI executable (${{ matrix.platform }})
     needs: version
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-24.04, target: x86_64-linux-gnu.2.34 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.34 }
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: win32-x64, runner: windows-latest }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -47,23 +53,54 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - uses: vercel-labs/setup-zig@v1
+        if: ${{ matrix.platform == 'win32-x64' || matrix.target }}
+        with:
+          version: 0.17.1
+      - name: Install the Linux host's build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld pkg-config \
+            libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
+            libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
+            libegl-dev libgl-dev libgl1-mesa-dri libsqlite3-dev fonts-dejavu-core
       - run: pnpm install --frozen-lockfile
       - name: Stamp the prerelease version
         run: node scripts/prerelease-version.mjs "${{ needs.version.outputs.version }}"
-      - name: Pack the packages
-        run: |
-          mkdir -p "$RUNNER_TEMP/pack"
-          pnpm --filter @native-sdk/cli pack --pack-destination "$RUNNER_TEMP/pack"
-          pnpm --filter @native-sdk/angle-win32-x64 pack --pack-destination "$RUNNER_TEMP/pack"
+      - name: Build the executable
+        env:
+          SCRIPTC_TARGET: ${{ matrix.target }}
+        working-directory: packages/cli
+        run: node scripts/build-native.ts
+      - name: Pack the npm packages
+        env:
+          CI: true
+        working-directory: packages/cli
+        run: node scripts/pack.ts
       - uses: actions/upload-artifact@v4
         with:
-          name: cli-package
-          path: ${{ runner.temp }}/pack/*.tgz
+          name: cli-${{ matrix.platform }}
+          path: |
+            packages/cli/dist/npm/native-sdk-cli-${{ matrix.platform }}-*.tgz
+            packages/cli/dist/npm/native-sdk-cli-[0-9]*.tgz
+          if-no-files-found: error
+      - name: Pack ANGLE
+        if: matrix.platform == 'linux-x64'
+        run: |
+          mkdir -p "$RUNNER_TEMP/angle"
+          pnpm --filter @native-sdk/angle-win32-x64 pack --pack-destination "$RUNNER_TEMP/angle"
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'linux-x64'
+        with:
+          name: angle
+          path: ${{ runner.temp }}/angle/*.tgz
           if-no-files-found: error
 
   dev-host:
     name: dev host (${{ matrix.key }})
-    needs: [version, cli]
+    needs: [version, cli-executable]
     strategy:
       fail-fast: false
       matrix:
@@ -88,9 +125,6 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-
-      # The Linux host links cairo, freetype, fontconfig, harfbuzz, libpng, libjpeg, libgif,
-      # dbus, ALSA, EGL, GL and sqlite; these are the packages its headers and archives come from.
       - name: Install the Linux host's build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -100,8 +134,6 @@ jobs:
             libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
             libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
             libegl-dev libgl-dev libgl1-mesa-dri libsqlite3-dev
-
-      # scriptc links a Windows program with zig, so the host's objects are zig builds too.
       - name: Install zig
         if: runner.os == 'Windows'
         shell: pwsh
@@ -115,12 +147,9 @@ jobs:
           }
           "$root" | Out-File -Append -FilePath $env:GITHUB_PATH
           & "$root\zig.exe" version
-
       - run: pnpm install --frozen-lockfile
       - name: Stamp the prerelease version
         run: node scripts/prerelease-version.mjs "${{ needs.version.outputs.version }}"
-
-      # The dev host embeds a Node island, and scriptc builds one only against a libnode pack.
       - name: Check for this platform's libnode pack
         id: libnode
         shell: bash
@@ -131,28 +160,23 @@ jobs:
             echo "supported=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=win32-x64 dev host skipped::scriptc has no Windows libnode pack, so the dev host's Node island cannot be built."
           fi
-
       - uses: actions/download-artifact@v4
         with:
-          name: cli-package
-          path: ${{ runner.temp }}/pack
-
+          name: cli-linux-x64
+          path: ${{ runner.temp }}/cli-artifact
       - name: Unpack the CLI package
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/cli-package"
-          tar -xzf "$RUNNER_TEMP"/pack/*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
-
+          tar -xzf "$RUNNER_TEMP"/cli-artifact/native-sdk-cli-[0-9]*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
       - name: Build the dev host into its package
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
         run: node packages/cli/scripts/prebuilt-dev-host.ts "packages/dev-host-${{ matrix.key }}" --force --sdk-root "$RUNNER_TEMP/cli-package"
-
       - name: Pack the dev-host package
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
         run: mkdir -p "$RUNNER_TEMP/packages" && (cd "packages/dev-host-${{ matrix.key }}" && pnpm pack --pack-destination "$RUNNER_TEMP/packages")
-
       - name: Check the package holds the host and its manifest
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
@@ -160,7 +184,6 @@ jobs:
           tarball=$(ls "$RUNNER_TEMP"/packages/*.tgz)
           tar -tzf "$tarball" | grep -q -x -e 'package/host' -e 'package/host.exe'
           tar -tzf "$tarball" | grep -q -x 'package/host.json'
-
       - uses: actions/upload-artifact@v4
         if: steps.libnode.outputs.supported == 'true'
         with:
@@ -170,11 +193,9 @@ jobs:
 
   publish:
     name: publish the prerelease
-    needs: [version, cli, dev-host]
+    needs: [version, cli-executable, dev-host]
     runs-on: ubuntu-22.04
-    # Each publish waits for a reviewer on the repository's `npm-publish` environment
-    # (Settings -> Environments -> npm-publish -> Required reviewers).
-    environment: npm-publish
+    environment: Release
     permissions:
       contents: read
       id-token: write
@@ -193,33 +214,28 @@ jobs:
         run: |
           npm install -g npm@^11.5.1
           npm --version
-      # Platform packages first: the CLI's optional dependencies name them, so they exist before
-      # the CLI that asks for them is published. `--tag next` leaves `latest` alone, and
-      # `--provenance` attaches the run's signed build provenance to each tarball.
-      - name: Publish the platform packages
+      - name: Publish the packages
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          for tarball in "$RUNNER_TEMP"/dist/native-sdk-*.tgz; do
-            [ -e "$tarball" ] || continue
-            meta=$(tar -xzOf "$tarball" package/package.json)
-            name=$(printf '%s' "$meta" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
-            version=$(printf '%s' "$meta" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
-            if [ "$name" = "@native-sdk/cli" ]; then continue; fi
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "$name@$version already published, skipping"
-              continue
+          publish() {
+            tarball="$1"
+            name=$(tar -xzOf "$tarball" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+              echo "$name@$VERSION already published, skipping"
+            else
+              npm publish "$tarball" --tag next --provenance --access public
             fi
-            npm publish "$tarball" --tag next --provenance --access public
+          }
+          for tarball in "$RUNNER_TEMP"/dist/native-sdk-cli-[a-z]*-"$VERSION".tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
           done
-      - name: Publish the CLI
-        run: |
-          for tarball in "$RUNNER_TEMP"/dist/native-sdk-cli-*.tgz; do
-            [ -e "$tarball" ] || continue
-            meta=$(tar -xzOf "$tarball" package/package.json)
-            name=$(printf '%s' "$meta" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
-            version=$(printf '%s' "$meta" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "$name@$version already published, skipping"
-              continue
-            fi
-            npm publish "$tarball" --tag next --provenance --access public
+          for tarball in "$RUNNER_TEMP"/dist/native-sdk-angle-*.tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
+          done
+          for tarball in "$RUNNER_TEMP"/dist/dev-host-*.tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
+          done
+          for tarball in "$RUNNER_TEMP"/dist/native-sdk-cli-[0-9]*.tgz; do
+            [ -e "$tarball" ] && publish "$tarball"
           done

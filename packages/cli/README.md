@@ -7,24 +7,26 @@ machine code. The result is an app bundle that runs without a browser, webview o
 Native SDK is experimental and supports a subset of HTML, CSS and the DOM.
 
 ```console
-$ npm install --save-dev @native-sdk/cli
-$ npx @native-sdk/cli build . -o hello
-$ ./build/hello
+$ npm install -D @native-sdk/cli
 ```
 
-The package installs the `native` command, so a `package.json` script runs it without `npx`:
+Run it through your package.json scripts, with `npm run dev` and `npm run build`:
 
 ```json
 {
   "scripts": {
-    "build": "native build . -o build/hello",
-    "dev": "native dev .",
-    "check": "native check ."
+    "dev": "native dev",
+    "build": "native build"
   }
 }
 ```
 
-Don't write `npx native`: the package named `native` on npm is unrelated.
+Both work on the project directory. For a one-off command, run the package by its name:
+
+```console
+$ npx @native-sdk/cli check
+$ npx @native-sdk/cli run
+```
 
 Node.js 24 or later is required. On macOS the Xcode command line tools provide the compiler, on
 Linux the host libraries listed in the [CLI reference](https://github.com/vercel-labs/native/blob/next/packages/cli/docs/cli.md)
