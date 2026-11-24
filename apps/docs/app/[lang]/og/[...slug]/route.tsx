@@ -1,7 +1,10 @@
 import type { NextRequest } from "next/server";
+import { renderLabsOg } from "@/app/og/labs-og";
 import { config } from "@/lib/geistdocs/config";
-import { createOpenGraphImage } from "@/lib/geistdocs/og";
 import { getPageImage, source } from "@/lib/geistdocs/source";
+import { HOME_OG_TITLE } from "@/lib/page-titles";
+
+const product = "Native SDK";
 
 export const GET = async (
   _request: NextRequest,
@@ -14,10 +17,11 @@ export const GET = async (
     return new Response("Not found", { status: 404 });
   }
 
-  return createOpenGraphImage(
-    page.data.title ?? config.title,
-    page.data.description
-  );
+  const title = page.slugs.length
+    ? (page.data.title ?? config.title)
+    : HOME_OG_TITLE;
+
+  return renderLabsOg({ product, title });
 };
 
 export const generateStaticParams = async ({
