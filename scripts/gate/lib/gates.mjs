@@ -364,7 +364,7 @@ function reloadMs(line) {
   return m === null ? null : Number(m[1]);
 }
 
-/** One example in Chrome and in native, at frame 0, compared pixel by pixel. */
+/** One example in Chrome and in native, at the same point in the animation clock, compared. */
 export async function measureParity({ root, out, name, exe, chrome, delta, scale, work, virtualTimeMs }) {
   const dir = join(root, "examples", name);
   const html = readFileSync(join(dir, "index.html"), "utf8");
@@ -373,11 +373,22 @@ export async function measureParity({ root, out, name, exe, chrome, delta, scale
   const chromePng = join(out, "shots", `${name}-chrome.png`);
   const diffPng = join(out, "shots", `${name}-diff.png`);
   mkdirSync(join(out, "shots"), { recursive: true });
-  // Both engines are photographed at the same point in the animation clock, and native is stepped
-  // there in 16 ms frames like the 60 fps run Chrome makes: a single jump would let an app that
-  // caps its delta hand native a different animation time than the browser shows.
-  const steps = ["frame 0"];
-  for (let t = 16; t <= virtualTimeMs; t += 16) steps.push(`frame ${t}`);
+  if (chrome === null) return { name, ok: false, error: "no Chrome binary", size, nativePng, missingChrome: true };
+  // Chrome is photographed first: its page paints its first frame after the load, and the native
+  // run is stepped from that same time in 16 ms frames, so both engines show the same frame of the
+  // animation. Starting native at zero, or jumping to the end, hands a page that caps its delta a
+  // different frame than the browser draws.
+  const shot = await chromeShot(chrome, dir, { width: size.width, height: size.height, scale, outPng: chromePng, virtualTimeMs });
+  if (!shot.ok) return { name, ok: false, error: `chrome: ${shot.stderr}`, size, nativePng, gl: shot.gl ?? null };
+  const start = Number.isFinite(shot.t0) ? Math.round(shot.t0) : 0;
+  // Chrome's frames come at 60 Hz, so native is stepped at the same cadence from the same start.
+  const frameMs = 1000 / 60;
+  const steps = [`frame ${start}`];
+  for (let i = 1; ; i++) {
+    const t = Math.round(start + i * frameMs);
+    if (t > virtualTimeMs) break;
+    steps.push(`frame ${t}`);
+  }
   const run = sh(exe, [], {
     env: {
       NATIVE_STEPS: steps.join(" | "),
@@ -387,13 +398,8 @@ export async function measureParity({ root, out, name, exe, chrome, delta, scale
     timeout: 300_000,
   });
   if (run.status !== 0 || !existsSync(nativePng)) {
-    return { name, ok: false, error: trim(run.stderr), size, chrome: chrome === null ? "missing" : "ran" };
+    return { name, ok: false, error: trim(run.stderr), size, gl: shot.gl ?? null };
   }
-  if (chrome === null) {
-    return { name, ok: false, error: "no Chrome binary", size, nativePng, missingChrome: true };
-  }
-  const shot = await chromeShot(chrome, dir, { width: size.width, height: size.height, scale, outPng: chromePng, virtualTimeMs });
-  if (!shot.ok) return { name, ok: false, error: `chrome: ${shot.stderr}`, size, nativePng };
   const a = decodePng(nativePng);
   const b = decodePng(chromePng);
   const diff = diffImages(a, b, delta);
@@ -407,6 +413,8 @@ export async function measureParity({ root, out, name, exe, chrome, delta, scale
     nativeSize: [a.w, a.h],
     chromeSize: [b.w, b.h],
     browserMode: shot.mode,
+    browserGL: shot.gl ?? null,
+    browserFirstFrameMs: shot.t0 ?? null,
     browserError: shot.error ?? null,
     nativePng,
     chromePng,

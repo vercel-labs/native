@@ -32,6 +32,35 @@ const MIME = {
   ".wasm": "application/wasm",
 };
 
+/**
+ * Which GL path Chrome draws with here: its own when the machine has one, the software rasterizer
+ * only when it doesn't. A software-rendered cube is not the picture the machine's browser draws,
+ * and comparing native against it measures the rasterizer rather than the page.
+ */
+let glChoice = null;
+export function chromeGL(chrome) {
+  if (glChoice !== null) return glChoice;
+  const dir = mkdtempSync(join(tmpdir(), "gate-gl-"));
+  try {
+    const probe = require("node:child_process").spawnSync(chrome, [
+      "--headless=new",
+      "--no-sandbox",
+      "--no-first-run",
+      "--disable-dev-shm-usage",
+      `--user-data-dir=${join(dir, "profile")}`,
+      "--virtual-time-budget=1000",
+      "--dump-dom",
+      "data:text/html,<canvas id=c></canvas><script>document.title=document.getElementById('c').getContext('webgl2')?'WEBGL2':'NONE'</script>",
+    ], { encoding: "utf8", timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
+    glChoice = /WEBGL2/.test(probe.stdout ?? "")
+      ? { gl: "hardware", flags: [] }
+      : { gl: "swiftshader", flags: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"] };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return glChoice;
+}
+
 /** Chrome, from CHROME_BIN, the gate's own download directory, or an installed browser. */
 export function findChrome(out) {
   const fromDownload = findBinary(join(out, "browsers"));
@@ -164,13 +193,19 @@ async function buildForBrowser(entry, outfile) {
  * page is loaded from disk with its entry bundled as one classic script, so nothing depends on a
  * server: Chrome will not navigate to a loopback address in a sandbox without a network service.
  */
-export async function chromeShot(chrome, exampleDir, { width, height, scale, outPng, virtualTimeMs = 300 }) {
+export async function chromeShot(chrome, exampleDir, { width, height, scale, outPng, virtualTimeMs = 300, gl = null }) {
   const work = mkdtempSync(join(tmpdir(), "gate-chrome-"));
   try {
     // The whole app, assets and public files included, so the browser sees what the bundle holds.
     copyTree(resolve(exampleDir), work, new Set(["node_modules", ".native", ".git"]));
     const page = await preparePage(resolve(exampleDir), work);
-    writeFileSync(join(work, "index.html"), page.html);
+    // The page's animation clock starts at its first painted frame, which is after the load: record
+    // that time so the native run can be stepped from the same point rather than from zero.
+    const clock = `<script>requestAnimationFrame(function (t) { document.documentElement.setAttribute("data-gate-t0", String(t)); });</script>`;
+    const pageHtml = /<head[^>]*>/i.test(page.html)
+      ? page.html.replace(/<head[^>]*>/i, (head) => head + clock)
+      : clock + page.html;
+    writeFileSync(join(work, "index.html"), pageHtml);
     // Chrome will not make a window narrower than 500 CSS px: a narrower page is laid out 500
     // wide and the shot is still saved at the requested size, so the page is cropped and every
     // run of text lands where the 500-wide layout put it. The page gets the viewport it asks for
@@ -185,13 +220,10 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       );
       target = join(work, "wrapper.html");
     }
+    const glPath = gl ?? chromeGL(chrome);
     const r = require("node:child_process").spawnSync(chrome, [
       "--headless=new",
-      // Headless Chrome ships without a GPU; ask ANGLE for its software rasterizer so the page's
-      // WebGL 2 context exists, which is what the WebGL and three.js examples draw with.
-      "--use-gl=angle",
-      "--use-angle=swiftshader",
-      "--enable-unsafe-swiftshader",
+      ...glPath.flags,
       "--hide-scrollbars",
       "--no-first-run",
       "--no-default-browser-check",
@@ -204,9 +236,18 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       `--window-size=${width},${height}`,
       `--virtual-time-budget=${virtualTimeMs}`,
       `--screenshot=${resolve(outPng)}`,
+      "--dump-dom",
       `file://${target}`,
     ], { encoding: "utf8", timeout: 90_000, maxBuffer: 32 * 1024 * 1024 });
-    return { ok: existsSync(outPng), status: r.status, stderr: (r.stderr ?? "").slice(-2000), ...page };
+    const t0 = /data-gate-t0="([0-9.]+)"/.exec(r.stdout ?? "");
+    return {
+      ok: existsSync(outPng),
+      status: r.status,
+      stderr: (r.stderr ?? "").slice(-2000),
+      gl: glPath.gl,
+      t0: t0 === null ? null : Number(t0[1]),
+      ...page,
+    };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
