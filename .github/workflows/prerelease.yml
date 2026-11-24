@@ -3,7 +3,7 @@
 # A run's version is the CLI's base version plus the run number (for example 0.20.0-next.42), and
 # the CLI's optional dependencies name the same prerelease of the platform packages, so an install
 # of the prerelease gets a matching dev host and ANGLE build. The publish job waits for a reviewer
-# on the repository's `Release` environment. Stable releases still come from a version tag
+# on the repository's `npm-publish` environment. Stable releases still come from a version tag
 # (release.yml); this workflow never moves the `latest` dist-tag.
 name: prerelease
 
@@ -172,9 +172,9 @@ jobs:
     name: publish the prerelease
     needs: [version, cli, dev-host]
     runs-on: ubuntu-22.04
-    # Each publish waits for a reviewer on the repository's `Release` environment
-    # (Settings -> Environments -> Release -> Required reviewers).
-    environment: Release
+    # Each publish waits for a reviewer on the repository's `npm-publish` environment
+    # (Settings -> Environments -> npm-publish -> Required reviewers).
+    environment: npm-publish
     permissions:
       contents: read
       id-token: write
