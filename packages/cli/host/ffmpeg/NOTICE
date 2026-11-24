@@ -1,0 +1,14 @@
+FFmpeg
+======
+
+The Linux host can decode video through an FFmpeg build that this repository makes for itself
+(`host/ffmpeg/build.sh`): FFmpeg 8.0.1, LGPL version 2.1 or later, built as shared libraries with
+no GPL or nonfree parts, no programs and no network support.
+
+Only the decoders and demuxers for the royalty-free formats are built in: the MP4, WebM, Ogg, WAV,
+FLAC and MP3 containers, and VP8, VP9, AV1, Opus, Vorbis, FLAC, MP3 and PCM codecs. H.264 and AAC
+are not part of it.
+
+FFmpeg is Copyright (c) 2000-2025 the FFmpeg developers and is used under the GNU Lesser General
+Public License, version 2.1 or later. The license text is in the FFmpeg source this build script
+fetches; the libraries are linked dynamically.
