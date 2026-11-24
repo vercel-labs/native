@@ -474,17 +474,57 @@ function hasApplies(el: Element, list: readonly string[]): boolean {
   for (const raw of list) {
     const at = raw.indexOf("\u0003");
     const lead = at < 0 ? "" : raw.slice(0, at);
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    let body = at < 0 ? raw : raw.slice(at + 1);
+    // A leading \u0005 marks an argument whose leading combinator relates the :is() compound's
+    // own subject to the anchor (`:has(> :is(.a > .b))`).
+    const onSubject = body.charAt(0) === "\u0005";
+    if (onSubject) body = body.slice(1);
     const comb = lead === ">" ? COMB_CHILD : lead === "+" ? COMB_ADJACENT
       : lead === "~" ? COMB_GENERAL : COMB_DESCENDANT;
-    if (hasOne(el, comb, body)) return true;
+    if (hasOne(el, comb, body, onSubject)) return true;
   }
   return list.length === 0;
 }
 
-function hasOne(anchor: Element, comb: number, body: string): boolean {
+function hasOne(anchor: Element, comb: number, body: string, onSubject: boolean = false): boolean {
   const sels = parsedHas(body);
   if (sels === null) return false;
+  if (onSubject) {
+    // The related element is the argument's subject: `:has(> :is(.a > .b))` wants a child that
+    // matches `.b`, with `.a` above it. Its chain is a constraint on ancestors, not the anchor
+    // relation.
+    const at = (c: Element): boolean => {
+      for (const sel of sels) {
+        if (!compoundFits(c, sel)) continue;
+        if (!relatedTo(c, anchor, comb)) continue;
+        if (chainMatchesPlain(sel.chain, 0, c)) return true;
+      }
+      return false;
+    };
+    if (comb === COMB_ADJACENT) {
+      const s = anchor.nextElementSibling;
+      return s !== null && at(s);
+    }
+    if (comb === COMB_GENERAL) {
+      for (let s = anchor.nextElementSibling; s !== null; s = s.nextElementSibling) if (at(s)) return true;
+      return false;
+    }
+    if (comb === COMB_CHILD) {
+      for (const k of anchor.kids) if (k instanceof Element && at(k)) return true;
+      return false;
+    }
+    let found = false;
+    const walk = (n: Node): void => {
+      if (found) return;
+      for (const k of n.kids) {
+        if (!(k instanceof Element)) continue;
+        if (at(k)) { found = true; return; }
+        walk(k);
+      }
+    };
+    walk(anchor);
+    return found;
+  }
   const tryAt = (c: Element): boolean => {
     for (const sel of sels) {
       if (!compoundFits(c, sel)) continue;
@@ -523,6 +563,29 @@ function hasOne(anchor: Element, comb: number, body: string): boolean {
 function subtreeMatches(el: Element, f: (c: Element) => boolean): boolean {
   if (f(el)) return true;
   for (const kid of el.kids) if (kid instanceof Element && subtreeMatches(kid, f)) return true;
+  return false;
+}
+
+/** Does the element's ancestor/sibling chain match, with no relation to an anchor at its end? */
+function chainMatchesPlain(chain: ChainLink[], k: number, el: Element): boolean {
+  if (k === chain.length) return true;
+  const c = chain[k].comb;
+  if (c === COMB_ADJACENT) {
+    const s = el.previousElementSibling;
+    return s !== null && compoundFits(s, chain[k]) && chainMatchesPlain(chain, k + 1, s);
+  }
+  if (c === COMB_GENERAL) {
+    for (let s = el.previousElementSibling; s !== null; s = s.previousElementSibling) {
+      if (compoundFits(s, chain[k]) && chainMatchesPlain(chain, k + 1, s)) return true;
+    }
+    return false;
+  }
+  let a = el.parentElement;
+  while (a !== null) {
+    if (compoundFits(a, chain[k]) && chainMatchesPlain(chain, k + 1, a)) return true;
+    if (c === COMB_CHILD) return false;
+    a = a.parentElement;
+  }
   return false;
 }
 

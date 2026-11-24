@@ -409,8 +409,19 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
           // A relative selector starts with an optional combinator, then a complex selector.
           const lead = /^([>+~])?\s*([\s\S]*)$/.exec(a);
           const body = lead === null ? "" : lead[2].trim();
-          if (body === "" || scanFrag(body) === null) return null;
-          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + body);
+          const frag = body === "" ? null : scanFrag(body);
+          if (frag === null) return null;
+          // `:has(> :is(.a > .b))`: the leading combinator relates the compound's own subject to
+          // the anchor, while the :is() argument's chain sits above that subject. The marker tells
+          // the runtime matcher to test the relation on the subject rather than on the leftmost
+          // compound of the argument's chain.
+          const parts = splitComplex(body);
+          let onSubject = false;
+          if (parts !== null && parts.compounds.length === 1) {
+            const variants = expandScan(frag.subject);
+            onSubject = variants !== null && variants.some((v) => v.chain.length > 0);
+          }
+          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + (onSubject ? "\u0005" : "") + body);
         }
         i = j;
         continue;
