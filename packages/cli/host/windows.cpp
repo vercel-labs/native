@@ -5642,6 +5642,9 @@ double host_refresh_interval(void) {
  *  to read, so the loop paces itself by the period alone. */
 double host_until_refresh(void) { return 0; }
 
+/** No display link here: the runtime's timer paces frames. */
+int32_t host_gl_window(void) { return 0; }
+
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
