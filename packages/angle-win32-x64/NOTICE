@@ -1,0 +1,16 @@
+ANGLE
+=====
+
+The Windows host runs WebGL 2 on ANGLE, an implementation of OpenGL ES over Direct3D 11. This
+package carries the three libraries a Windows app loads at run time: libEGL.dll, libGLESv2.dll
+and d3dcompiler_47.dll.
+
+The ANGLE libraries are a build of ANGLE commit 99a746a6e378fcb2e57d89cf47a0310800d7411a, built
+on 2026-11-15 and published as angle-x64-2026-11-15.zip at
+https://github.com/mmozeiko/build-angle/releases/tag/2026-11-15. ANGLE is Copyright the ANGLE
+Project Authors and is used under the BSD 3-Clause license in LICENSE. The build is unmodified;
+only the three libraries the host loads are included, without their debug symbols, headers or
+the separate OpenGL ES 1.1 library.
+
+d3dcompiler_47.dll is Microsoft's HLSL compiler, redistributed with the DirectX runtime as its
+redistributable terms allow. ANGLE loads it to compile shaders on Direct3D 11.

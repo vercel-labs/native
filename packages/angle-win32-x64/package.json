@@ -1,0 +1,25 @@
+{
+  "name": "@native-sdk/angle-win32-x64",
+  "version": "0.20.0",
+  "description": "ANGLE for the Windows host: OpenGL ES over Direct3D 11, which Native SDK apps run WebGL 2 on",
+  "license": "BSD-3-Clause",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "libEGL.dll",
+    "libGLESv2.dll",
+    "d3dcompiler_47.dll",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vercel-labs/native.git",
+    "directory": "packages/angle-win32-x64"
+  }
+}
