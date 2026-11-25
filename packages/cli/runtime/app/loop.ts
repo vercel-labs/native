@@ -83,8 +83,9 @@ function deliverMessage(): void {
 
 const blink = { last: 0 };
 
-/** A rate asked for by hand, for a test or a display the host has not reported yet. */
-const forcedHz = Number(process.env.NATIVE_REFRESH_HZ);
+/** A rate asked for by hand, for a test or a display the host has not reported yet. Unset or
+ *  unreadable reads as none. */
+const forcedHz = Number(process.env.NATIVE_REFRESH_HZ) || 0;
 
 /** NATIVE_FRAME_TIMER keeps every window on the free-running timer, for a comparison or fallback. */
 const frameTimerOnly = process.env.NATIVE_FRAME_TIMER !== undefined &&

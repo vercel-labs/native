@@ -17,6 +17,10 @@ check("an auto-rate non-GL window waits for the display", usesDisplaySchedule(0,
 check("a GL window keeps the frame period", usesDisplaySchedule(0, false, 1) === false);
 check("NATIVE_FRAME_TIMER keeps the frame period", usesDisplaySchedule(0, true, 0) === false);
 check("a forced rate with the timer keeps the frame period", usesDisplaySchedule(30, true, 0) === false);
+// NATIVE_REFRESH_HZ unset parses to NaN, and NaN is not "a positive rate": the guard must not read
+// it as one and disable the display schedule.
+check("an unset rate keeps the display schedule", usesDisplaySchedule(Number(undefined), false, 0) === true);
+check("an unparsable rate keeps the display schedule", usesDisplaySchedule(Number("nope"), false, 0) === true);
 
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

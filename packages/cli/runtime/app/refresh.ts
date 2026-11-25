@@ -6,5 +6,7 @@
  * must win even when the display link reports a future refresh target.
  */
 export function usesDisplaySchedule(forced: number, frameTimer: boolean, glWindow: number): boolean {
-  return forced <= 0 && !frameTimer && glWindow === 0;
+  // An unset NATIVE_REFRESH_HZ is not a number, and a comparison against one is false either way
+  // round: `forced > 0` reads a missing rate as none, which is what an absent setting means.
+  return !(forced > 0) && !frameTimer && glWindow === 0;
 }
