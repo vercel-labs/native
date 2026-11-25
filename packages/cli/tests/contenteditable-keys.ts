@@ -31,13 +31,14 @@ if (build.status !== 0) throw new Error(`build failed\n${build.stderr}`);
 
 const env: NodeJS.ProcessEnv = {
   ...process.env,
-  NATIVE_STEPS: "frame 0 | frame 16 | clickat 18 22 | key Meta+a | key ArrowRight | type X | key Home | type Y | key End | type Z | key ArrowLeft | type W | key Shift+ArrowLeft | type Q | key Home | key Shift+End | type R | key Meta+a | type abcde | key ArrowRight | key Shift+ArrowLeft | key Shift+ArrowLeft | type Q | key Home | key Shift+ArrowRight | key Shift+ArrowRight | key End | type Z",
+  NATIVE_STEPS: "frame 0 | frame 16 | clickat 18 22 | key Meta+a | key ArrowRight | type X | key Home | type Y | key End | type Z | key ArrowLeft | type W | key Shift+ArrowLeft | type Q | key Home | key Shift+End | type R | key Meta+a | type abcde | key ArrowRight | key Shift+ArrowLeft | key Shift+ArrowLeft | type Q | key Home | key Shift+ArrowRight | key Shift+ArrowRight | key End | type Z | key Shift+Home | key Home | type T | key Shift+End | key End | type V",
 };
 delete env.NATIVE_SNAPSHOT;
 const r = spawnSync(exe, [], { encoding: "utf8", env });
 if (r.status !== 0) throw new Error(`run failed\n${r.stderr}`);
 
-const EXPECTED = ["start=hello", "text=helloX", "text=YhelloX", "text=YhelloXZ", "text=YhelloXWZ", "text=YhelloXQZ", "text=R", "text=abcde", "text=abcQ", "text=abcQZ"];
+const EXPECTED = ["start=hello", "text=helloX", "text=YhelloX", "text=YhelloXZ", "text=YhelloXWZ", "text=YhelloXQZ", "text=R",
+  "text=a", "text=ab", "text=abc", "text=abcd", "text=abcde", "text=abcQ", "text=abcQZ", "text=TabcQZ", "text=TabcQZV"];
 const got = r.stdout.split("\n").slice(0, -1);
 for (const line of got) console.log(`     got ${JSON.stringify(line)}`);
 let failed = 0;

@@ -259,6 +259,17 @@ export function moveCaretIn(host: Element, where: CaretMove, extend: boolean): b
     const text = textNodes(host).map((t: Text) => t.data).join("");
     to = where === "left" ? previousChar(text, focusAt) : nextChar(text, focusAt);
   }
+  // A plain Home or End collapses a nonempty selection to the host's start or end even when the
+  // selection's focus already sits there (Shift+Home and Shift+End leave it there). Left as a
+  // selection, the next typed text would replace it instead of being inserted at the boundary.
+  if (!extend && (where === "home" || where === "end")) {
+    const point = pointAtOffset(host, to);
+    if (point === null) return false;
+    const changed = !range.collapsed || focusAt !== to;
+    selectPoint(point);
+    if (changed) invalidatePaint();
+    return changed;
+  }
   if (to === focusAt) return false;
   const point = pointAtOffset(host, to);
   if (point === null) return false;
