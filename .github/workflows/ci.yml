@@ -148,3 +148,35 @@ jobs:
       - name: Check the accessibility tree over UI Automation
         working-directory: packages/cli
         run: node tests/uia.ts
+
+  # A full post-merge run that passes moves the green-next tag to its commit: the newest next commit
+  # whose whole suite passed. A prerelease or baseline may cut from it instead of a moving branch.
+  # The job writes that one tag and nothing else. It never writes a branch, and in particular never
+  # next; the token is GitHub Actions' own, and the job holds `contents: write` only for the tag.
+  green-next:
+    name: tag green-next
+    needs: [checks, linux-examples, windows-examples]
+    if: >-
+      github.event_name == 'push' && needs.checks.result == 'success' &&
+      needs.linux-examples.result == 'success' && needs.windows-examples.result == 'success'
+    # Two pushes can finish their runs out of order. One tag job at a time lets each read the tag the
+    # one before wrote, so the forward-only check below sees the truth rather than a stale read.
+    concurrency:
+      group: green-next
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A rerun of an older push needs the newer commits to tell whether the tag already names
+          # one.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Move the green-next tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: node scripts/green-next.mjs "$SHA"
