@@ -8,6 +8,7 @@ import { hostEventPhase, hostGlWindow, hostRefreshInterval, hostPoll, hostUntilR
 import { pumpImages } from "../images.ts";
 import { messageDelivered, openedWindowClosed, pollSystemSettings, reportUncaughtError, requestQuit, runFrameCallbacks, windowBlurred, windowFocused, windowMoved, windowResized } from "../window.ts";
 import { setClock } from "../animation.ts";
+import { usesDisplaySchedule } from "./refresh.ts";
 import { hostComposition, hostKey, hostKeyUp } from "./keyboard.ts";
 import { config, frame } from "./mount.ts";
 import { publishTitlebarArea } from "./titlebar.ts";
@@ -159,7 +160,7 @@ function tickOnce(): void {
   // display every frame eventually presents just after a refresh and misses it, which shows up as
   // an occasional double-length interval. A GL window keeps the old schedule: its present already
   // waits for the display, and adding a wait after that block costs a whole period.
-  const untilNext = !frameTimerOnly && hostGlWindow() === 0 ? hostUntilRefresh() : 0;
+  const untilNext = usesDisplaySchedule(forcedHz, frameTimerOnly, hostGlWindow()) ? hostUntilRefresh() : 0;
   if (untilNext > 0) {
     nextFrameAt = performance.now() + untilNext;
   } else {
