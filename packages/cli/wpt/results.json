@@ -148366,14 +148366,14 @@
   {
    "path": "dom/collections/HTMLCollection-delete.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Loose id: delete on this checked-native receiver is not supported yet (+3 more)"
+   "status": "skip",
+   "reason": "script: SC0001 Duplicate identifier 'expected'."
   },
   {
    "path": "dom/collections/HTMLCollection-detached-root-gc.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Loose id: delete on this checked-native receiver is not supported yet (+3 more)"
+   "status": "error",
+   "reason": "script threw: the testharness produced no result"
   },
   {
    "path": "dom/collections/HTMLCollection-empty-name.html",
@@ -148390,20 +148390,19 @@
   {
    "path": "dom/collections/HTMLCollection-live-item-removal.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "getElementsByClassName collection should update live when removing item(0): collection.item is not a function (+1 more)"
+   "status": "pass"
   },
   {
    "path": "dom/collections/HTMLCollection-own-props.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "Setting non-array index while named property exists (loose): assert_equals: expected [object Object], got undefined (+7 more)"
+   "reason": "Setting non-array index while named property exists (loose): assert_equals: expected [object HTMLAnchorElement], got undefined (+7 more)"
   },
   {
    "path": "dom/collections/HTMLCollection-supported-property-indices.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "Handling of property names that look like negative integers: 'number' values where 'string' is expected is not supported yet [SC1090 at ./.wpt-work/batch-270/sp33930.js:391] (+6 more)"
+   "reason": "Handling of property names that look like negative integers: 'number' values where 'string' is expected is not supported yet [SC1090 at /Users/cloudos/native-edited/packages/cli/.wpt-work/batch-0/sp7.js:498] (+6 more)"
   },
   {
    "path": "dom/collections/HTMLCollection-supported-property-names.html",
@@ -149951,7 +149950,7 @@
    "path": "dom/nodes/Document-getElementsByTagNameNS.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "test: assert_true: HTMLCollection: expected true, got false (+11 more)"
+   "reason": "getElementsByTagNameNS('*', 'body'): assert_array_equals: expected [], got [object HTMLBodyElement],[object HTMLBodyElement] (+10 more)"
   },
   {
    "path": "dom/nodes/Document-implementation.html",
@@ -150169,7 +150168,7 @@
    "path": "dom/nodes/Element-getElementsByTagNameNS.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "test: assert_true: HTMLCollection: expected true, got false (+11 more)"
+   "reason": "getElementsByTagNameNS('*', 'body'): assert_array_equals: expected [], got [object HTMLBodyElement] (+10 more)"
   },
   {
    "path": "dom/nodes/Element-hasAttribute.html",
@@ -150325,14 +150324,12 @@
   {
    "path": "dom/nodes/getElementsByClassName-01.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: assert_array_equals: expected [object Object],[object Object], got []"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-02.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: assert_array_equals: expected [object Object],[object Object], got []"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-03.htm",
@@ -150342,8 +150339,7 @@
   {
    "path": "dom/nodes/getElementsByClassName-04.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: assert_array_equals: expected [object Object],[object Object], got [object Object]"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-05.htm",
@@ -150358,14 +150354,12 @@
   {
    "path": "dom/nodes/getElementsByClassName-07.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: assert_array_equals: expected [object Object], got []"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-08.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: assert_array_equals: expected [object Object], got []"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-09.htm",
@@ -150385,32 +150379,27 @@
   {
    "path": "dom/nodes/getElementsByClassName-14.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: assert_array_equals: expected [object Object],[object Object], got [object Object]"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-15.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: expected string at $, got array"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-16.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: expected string at $, got array"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-17.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: expected string at $, got array"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-18.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: expected string at $, got array"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-19.htm",
@@ -150420,20 +150409,17 @@
   {
    "path": "dom/nodes/getElementsByClassName-20.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "get elements in document then add element to collection: Cannot read properties of undefined (reading '0')"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-21.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "delete element from collection: document.getElementsByTagName(...)[0].deleteRow is not a function"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-22.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "move item in collection order: Cannot read properties of undefined (reading '0')"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-23.htm",
@@ -150448,8 +150434,7 @@
   {
    "path": "dom/nodes/getElementsByClassName-25.htm",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "verify spacing is handled correctly: Cannot read properties of undefined (reading '0')"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-26.htm",
@@ -150480,7 +150465,8 @@
   {
    "path": "dom/nodes/getElementsByClassName-31.htm",
    "kind": "testharness",
-   "status": "pass"
+   "status": "error",
+   "reason": "script threw: the testharness produced no result"
   },
   {
    "path": "dom/nodes/getElementsByClassName-32.html",
@@ -150490,8 +150476,7 @@
   {
    "path": "dom/nodes/getElementsByClassName-empty-set.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Passing an empty string to getElementsByClassName should return an empty HTMLCollection: assert_array_equals: expected [], got [object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object] (+2 more)"
+   "status": "pass"
   },
   {
    "path": "dom/nodes/getElementsByClassName-whitespace-class-names.html",
@@ -153038,8 +153023,7 @@
   {
    "path": "html/dom/documents/dom-tree-accessors/Document.getElementsByClassName-null-undef.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: undefined is not representable in a 'string' slot (a value narrowed or asserted past the type still held it)"
+   "status": "pass"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByClassName-same.html",
@@ -153076,7 +153060,7 @@
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-liveness.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "Document.getElementsByName() should be a live collection: 'm3182664765.HTMLElement' values where 'm3182664765.HTMLInputElement' is expected is not supported yet [SC1090 at ./.wpt-work/batch-2770102/sp34723.js:388]"
+   "reason": "Document.getElementsByName() should be a live collection: 'm3182664765.HTMLElement' values where 'm3182664765.HTMLInputElement' is expected is not supported yet [SC1090 at /Users/cloudos/native-edited/packages/cli/.wpt-work/batch-0/sp7.js:497]"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-namespace-xhtml.xhtml",
@@ -153093,26 +153077,22 @@
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-newelements-xhtml.xhtml",
    "kind": "testharness",
-   "status": "skip",
-   "reason": "html: <video>"
+   "status": "pass"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-newelements.html",
    "kind": "testharness",
-   "status": "skip",
-   "reason": "html: <video>"
+   "status": "pass"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-null-undef-xhtml.xhtml",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "getElementsByName(null): null is not representable in a 'string' slot (a value narrowed or asserted past the type still held it) (+1 more)"
+   "status": "pass"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-null-undef.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "getElementsByName(null): null is not representable in a 'string' slot (a value narrowed or asserted past the type still held it) (+1 more)"
+   "status": "pass"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/document.getElementsByName/document.getElementsByName-param-xhtml.xhtml",
@@ -153209,8 +153189,7 @@
   {
    "path": "html/dom/documents/dom-tree-accessors/Element.getElementsByClassName-null-undef.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "test: expected string at $, got undefined"
+   "status": "pass"
   },
   {
    "path": "html/dom/documents/dom-tree-accessors/nameditem-01.html",

@@ -799,6 +799,14 @@ export function dictStringOrNull(init: any, name: string): string | null {
   return String(v);
 }
 
+/** A DOMString argument, converted as WebIDL converts one: null and undefined become their
+ *  names, and anything else its string form (so an array argument joins with commas). */
+export function domStringArg(value: any): string {
+  if (value === null) return "null";
+  if (value === undefined) return "undefined";
+  return String(value);
+}
+
 /** One double member: WebIDL's ToNumber, which throws a TypeError for a non-finite result (NaN,
  *  an infinity, or a value that can't convert). */
 export function dictDouble(init: any, name: string, fallback: number): number {
@@ -1151,14 +1159,64 @@ export class EventTarget {
  *  the same class text on every frame, and the attribute is otherwise static. */
 const classNameLists: Map<string, string[]> = new Map();
 
+/** The ASCII whitespace a class name list separates its tokens with (HTML's space characters). */
+function isClassSpace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
+}
+
+/** Splits a class name list into its tokens, as the DOM's space-separated tokens do: only ASCII
+ *  whitespace separates them, so a tab or a form feed is as good as a space, while a non-breaking
+ *  space or a line separator is part of the name. */
 function classNamesOf(value: string): string[] {
   const hit = classNameLists.get(value);
   if (hit !== undefined) return hit;
   const names: string[] = [];
-  for (const n of value.split(" ")) if (n !== "" && names.indexOf(n) < 0) names.push(n);
+  let start = -1;
+  for (let i = 0; i <= value.length; i++) {
+    const space = i === value.length || isClassSpace(value.charCodeAt(i));
+    if (space) {
+      if (start >= 0) {
+        const n = value.slice(start, i);
+        if (names.indexOf(n) < 0) names.push(n);
+        start = -1;
+      }
+    } else if (start < 0) {
+      start = i;
+    }
+  }
   if (classNameLists.size > 512) classNameLists.clear();
   classNameLists.set(value, names);
   return names;
+}
+
+/** Whether two class names match under the quirks-mode rule, which folds ASCII letters only (the
+ *  Kelvin sign and other non-ASCII lookalikes stay distinct). */
+function sameClassName(a: string, b: string, fold: boolean): boolean {
+  if (a === b) return true;
+  if (!fold || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    let x = a.charCodeAt(i);
+    let y = b.charCodeAt(i);
+    if (x >= 65 && x <= 90) x += 32;
+    if (y >= 65 && y <= 90) y += 32;
+    if (x !== y) return false;
+  }
+  return true;
+}
+
+/** Whether an element carries every class a getElementsByClassName query names. */
+function elementHasClasses(el: Element, arg: string, fold: boolean): boolean {
+  const want = classNamesOf(arg);
+  // No class name in the query (an empty string, or only whitespace) matches nothing at all.
+  if (want.length === 0) return false;
+  const attr = el.getAttribute("class");
+  const have = attr === null ? classNamesOf("") : classNamesOf(attr);
+  for (const w of want) {
+    let found = false;
+    for (const h of have) if (sameClassName(h, w, fold)) { found = true; break; }
+    if (!found) return false;
+  }
+  return true;
 }
 
 export class DOMTokenList {
@@ -2065,11 +2123,28 @@ export class Node extends EventTarget {
   static readonly ATTRIBUTE_NODE = 2;
   static readonly TEXT_NODE = 3;
   static readonly CDATA_SECTION_NODE = 4;
+  static readonly ENTITY_REFERENCE_NODE = 5;
+  static readonly ENTITY_NODE = 6;
   static readonly PROCESSING_INSTRUCTION_NODE = 7;
   static readonly COMMENT_NODE = 8;
   static readonly DOCUMENT_NODE = 9;
   static readonly DOCUMENT_TYPE_NODE = 10;
   static readonly DOCUMENT_FRAGMENT_NODE = 11;
+  static readonly NOTATION_NODE = 12;
+  // WebIDL puts an interface's constants on its prototype as well as its interface object, and
+  // pages read them off a node (`child.ELEMENT_NODE`).
+  get ELEMENT_NODE(): number { return 1; }
+  get ATTRIBUTE_NODE(): number { return 2; }
+  get TEXT_NODE(): number { return 3; }
+  get CDATA_SECTION_NODE(): number { return 4; }
+  get ENTITY_REFERENCE_NODE(): number { return 5; }
+  get ENTITY_NODE(): number { return 6; }
+  get PROCESSING_INSTRUCTION_NODE(): number { return 7; }
+  get COMMENT_NODE(): number { return 8; }
+  get DOCUMENT_NODE(): number { return 9; }
+  get DOCUMENT_TYPE_NODE(): number { return 10; }
+  get DOCUMENT_FRAGMENT_NODE(): number { return 11; }
+  get NOTATION_NODE(): number { return 12; }
 
   nodeType: number = 0;
   /**
@@ -3844,6 +3919,8 @@ const COLL_TABLE_ROWS = 10;
 const COLL_SECTION_ROWS = 11;
 const COLL_ROW_CELLS = 12;
 const COLL_TABLE_SECTIONS = 13;
+// getElementsByTagNameNS: the argument holds the namespace, then "\0", then the local name.
+const COLL_NS = 14;
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 
@@ -3962,11 +4039,25 @@ function collectionMatches(el: Element, kind: number, arg: string, root: Node): 
   if (kind === COLL_SCRIPT) return el.localName === "script";
   if (kind === COLL_APPLET) return el.localName === "applet";
   if (kind === COLL_CLASS) {
-    // Every class in the list is required, however the argument space-separated them.
-    for (const n of arg.split(" ")) if (n !== "" && !el.classList.contains(n)) return false;
-    return true;
+    // Every class in the list is required, however the argument's ASCII whitespace separated
+    // them. In a quirks document the names compare ASCII case-insensitively.
+    return elementHasClasses(el, arg, isQuirks());
   }
-  return el.getAttribute("name") === arg;
+  if (kind === COLL_NS) {
+    const cut = arg.indexOf("\u0000");
+    const ns = arg.slice(0, cut);
+    const local = arg.slice(cut + 1);
+    // "*" is any namespace; the empty string is the null namespace, which HTML elements don't
+    // have (their namespace is the HTML one).
+    if (ns !== "*" && (ns === "" ? el.namespaceURI !== null : el.namespaceURI !== ns)) return false;
+    if (local === "*") return true;
+    if (el.localName === local) return true;
+    // An HTML element's local name is lower case, and the query may name it either way.
+    return el.namespaceURI === HTML_NS && el.localName === local.toLowerCase();
+  }
+  // A name is an HTML attribute: an element in a foreign namespace (MathML, SVG) carrying the
+  // same attribute is not in the document's name list.
+  return el.namespaceURI === HTML_NS && el.getAttribute("name") === arg;
 }
 
 /** Adds every matching element under `node`, in document order. `root` stays the element the
@@ -5996,14 +6087,14 @@ export class Element extends Node {
     return new HTMLCollection(this, COLL_TAG, name.toLowerCase());
   }
   /** The descendants carrying every one of the space-separated class names. */
-  getElementsByClassName<T extends Element = Element>(names: string): HTMLCollectionOf<T> {
-    return new HTMLCollection(this, COLL_CLASS, names);
+  getElementsByClassName<T extends Element = Element>(names: string): HTMLCollectionOf<T>;
+  getElementsByClassName<T extends Element = Element>(names: any): HTMLCollectionOf<T>;
+  getElementsByClassName<T extends Element = Element>(names: any): HTMLCollectionOf<T> {
+    return new HTMLCollection(this, COLL_CLASS, domStringArg(names));
   }
   /** The descendants in the namespace and with the local name; "*" is a wildcard for either. */
-  getElementsByTagNameNS(namespace: string, localName: string): Element[] {
-    const out: Element[] = [];
-    for (const c of this.kids) collectByTag(c, namespace, localName, out);
-    return out;
+  getElementsByTagNameNS(namespace: string, localName: string): HTMLCollectionOf<Element> {
+    return new HTMLCollection(this, COLL_NS, namespace + "\u0000" + localName);
   }
 
   /**
@@ -10567,11 +10658,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -15276,10 +15363,8 @@ export class Document extends Node {
   }
 
   /** Every element in the namespace and with the local name ("*" wildcards either). */
-  getElementsByTagNameNS(namespace: string, localName: string): Element[] {
-    const out: Element[] = [];
-    collectByTag(this.documentElement, namespace, localName, out);
-    return out;
+  getElementsByTagNameNS(namespace: string, localName: string): HTMLCollectionOf<Element> {
+    return new HTMLCollection(this.documentElement, COLL_NS, namespace + "\u0000" + localName, true);
   }
 
   /**
@@ -15563,16 +15648,18 @@ export class Document extends Node {
     return new HTMLCollection(this.documentElement, COLL_TAG, name.toLowerCase(), true);
   }
   /** Every element carrying all of the space-separated class names. */
-  getElementsByClassName<T extends Element = Element>(names: string): HTMLCollectionOf<T> {
-    return new HTMLCollection(this.documentElement, COLL_CLASS, names, true);
+  getElementsByClassName<T extends Element = Element>(names: string): HTMLCollectionOf<T>;
+  getElementsByClassName<T extends Element = Element>(names: any): HTMLCollectionOf<T>;
+  getElementsByClassName<T extends Element = Element>(names: any): HTMLCollectionOf<T> {
+    return new HTMLCollection(this.documentElement, COLL_CLASS, domStringArg(names), true);
   }
   /**
    * Every element whose name attribute is exactly this, as a form's controls carry it. The
    * argument is a DOMString, so null and undefined convert to "null" and "undefined" rather than
    * failing the call, as a browser's WebIDL does.
    */
-  getElementsByName<T extends Element = Element>(name: string | null | undefined): HTMLCollectionOf<T> {
-    const text = name === null ? "null" : name === undefined ? "undefined" : name;
+  getElementsByName<T extends Element = Element>(name: any): HTMLCollectionOf<T> {
+    const text = domStringArg(name);
     return new HTMLCollection(this.documentElement, COLL_NAME, text, true);
   }
 
@@ -15619,17 +15706,6 @@ function collectByClass(el: Node, names: string, out: HTMLElement[]): void {
     if (all) out.push(el as HTMLElement);
   }
   for (const c of el.kids) collectByClass(c, names, out);
-}
-
-/** The element itself and its descendants, in tree order, matching namespace and local name. */
-function collectByTag(el: Node, namespace: string, localName: string, out: Element[]): void {
-  if (el instanceof Element && el.pseudoKind === P.PE_NONE) {
-    const ns = namespace === "*" || el.namespaceURI === namespace;
-    // HTML tag names match in any case; the parser lowercases them, so are the lookups.
-    const name = localName === "*" || el.localName.toLowerCase() === localName.toLowerCase();
-    if (ns && name) out.push(el);
-  }
-  for (const c of el.kids) collectByTag(c, namespace, localName, out);
 }
 
 function findById(el: Node, id: string): Element | null {
