@@ -45,12 +45,18 @@ export function compoundStates(c: Compound): number {
   return s;
 }
 
+/** The selector text of a `:has()` argument, without its combinator and subject markers. */
+function hasArgumentBody(raw: string): string {
+  const at = raw.indexOf("\u0003");
+  const body = at < 0 ? raw : raw.slice(at + 1);
+  return body.charAt(0) === "\u0005" ? body.slice(1) : body;
+}
+
 /** Every state bit the selectors of a :has() argument list mention. */
 export function hasStates(list: readonly string[]): number {
   let s = 0;
   for (const raw of list) {
-    const at = raw.indexOf("\u0003");
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    const body = hasArgumentBody(raw);
     const sels = parseSelector(body);
     if (sels === null) continue;
     for (const sel of sels) {
@@ -636,7 +642,7 @@ function scanSpec(scan: Scan): number {
     } else spec += 100;
   }
   for (const a of scan.has) {
-    const body = a.slice(a.indexOf("\u0003") + 1);
+    const body = hasArgumentBody(a);
     const frag = scanFrag(body);
     if (frag === null) continue;
     let argSpec = 0;
