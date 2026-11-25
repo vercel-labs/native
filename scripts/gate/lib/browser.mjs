@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { deflateSync } from "node:zlib";
 
 const require = createRequire(join(import.meta.dirname, "..", "..", "..", "packages", "cli", "package.json"));
@@ -59,7 +60,7 @@ function findBinary(dir, depth = 8) {
     } catch {
       continue;
     }
-    if (stat.isFile() && (entry === "chrome" || entry === "chrome-headless-shell" || entry === "Google Chrome for Testing")) return path;
+    if (stat.isFile() && ["chrome", "chrome.exe", "chrome-headless-shell", "chrome-headless-shell.exe", "Google Chrome for Testing", "Google Chrome for Testing.exe"].includes(entry)) return path;
     if (stat.isDirectory()) {
       const found = findBinary(path, depth - 1);
       if (found !== null) return found;
@@ -140,7 +141,9 @@ function describe(err) {
 }
 
 async function buildForBrowser(entry, outfile) {
-  const { build } = await import(require.resolve("esbuild"));
+  // The path is imported as a file URL: a bare Windows path (C:\...) is not a valid module
+  // specifier for the ESM loader.
+  const { build } = await import(pathToFileURL(require.resolve("esbuild")).href);
   entry = resolve(entry);
   outfile = resolve(outfile);
   await build({
@@ -204,7 +207,7 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       `--window-size=${width},${height}`,
       `--virtual-time-budget=${virtualTimeMs}`,
       `--screenshot=${resolve(outPng)}`,
-      `file://${target}`,
+      pathToFileURL(target).href,
     ], { encoding: "utf8", timeout: 90_000, maxBuffer: 32 * 1024 * 1024 });
     return { ok: existsSync(outPng), status: r.status, stderr: (r.stderr ?? "").slice(-2000), ...page };
   } finally {

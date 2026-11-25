@@ -131,7 +131,7 @@ if (merge && existsSync(join(out, "scorecard.json"))) {
 let builds = [];
 if (only.includes("compile") || only.includes("smoothness") || only.includes("uisdk") || only.includes("parity")) {
   const want = new Set([...names, ...(only.includes("uisdk") ? bars.uisdk.examples : [])]);
-  if (!reuse) {
+  if (!reuse && !has("no-prime")) {
     say("priming the compiler cache once, so each example pays for its own compile");
     const primed = primeCompiler({ cli, root, out, name: [...want].sort()[0], timeout, scriptc });
     if (!primed.ok) say(`  priming failed: ${(primed.error ?? "").split("\n").pop()}`);
@@ -342,7 +342,10 @@ function scorecardMarkdown(rep, ctx) {
   const pending = rep.pending ?? [];
   lines.push(`**${gatesPassed} of ${Object.keys(g).length} gates pass.**`, "");
   if (pending.length > 0) {
-    lines.push(`Pending: ${pending.map((p) => `${p.id} ${p.title}`).join("; ")}. Their numbers replace the pending rows below when this run finishes.`, "");
+    const pendingText = pending.filter((p) => !p.na).map((p) => `${p.id} ${p.title}`);
+    const naText = pending.filter((p) => p.na).map((p) => `${p.id} ${p.title} (${p.why})`);
+    if (pendingText.length > 0) lines.push(`Pending: ${pendingText.join("; ")}. Their numbers replace the pending rows below when this run finishes.`, "");
+    if (naText.length > 0) lines.push(`Not measured on this platform: ${naText.join("; ")}.`, "");
   }
   lines.push(`| | |`, `|---|---|`);
   lines.push(`| native | \`${rep.refs.native.slice(0, 12)}\` |`);
@@ -367,7 +370,7 @@ function scorecardMarkdown(rep, ctx) {
   if (g.compile) lines.push(`| 3 | Compile time | cold ≤ ${s(bars.compile.coldBuildMs)}, warm ≤ ${s(bars.compile.warmBuildMs)} | cold p95 ${s(g.compile.coldP95Ms)}, warm max ${s(g.compile.warmMaxMs)} | ${status(g.compile)} |`);
   if (g.reload) lines.push(`| 4 | Hot reload | ≤ ${bars.reload.editToFrameMs} ms | slowest edit ${ms(Math.max(...g.reload.examples.filter((e) => e.ok).flatMap((e) => e.edits), 0) || null)} | ${status(g.reload)} |`);
   for (const p of rep.pending ?? []) {
-    lines.push(`| ${p.id} | ${p.title} | ${p.bar} | pending | — |`);
+    lines.push(`| ${p.id} | ${p.title} | ${p.bar} | ${p.na ? `not measured: ${p.why}` : "pending"} | ${p.na ? "n/a" : "—"} |`);
   }
   if (g.uisdk) {
     const u = g.uisdk.screenReport;
