@@ -60,8 +60,10 @@ jobs:
             os: ubuntu-22.04-arm
           - key: darwin-x64
             os: macos-15-intel
+          # macos-14 jobs are cancelled before a runner is assigned; macos-15 is the current
+          # arm64 macOS image, and the ci workflow's macOS job runs on it.
           - key: darwin-arm64
-            os: macos-14
+            os: macos-15
           # scriptc has no Windows libnode pack yet, so the dev host's Node island cannot be
           # built there. The job packs the host when one lands; until then it records a notice
           # and a release carries the four platforms that can run `native dev`'s island.
@@ -130,16 +132,72 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/cli-package"
-          # Unpack from the pack directory with a relative name: a Windows runner's RUNNER_TEMP
-          # starts with a drive letter, which GNU tar reads as a remote host ("Cannot connect to
-          # D: resolve failed").
-          cd "$RUNNER_TEMP/pack"
-          tar -xzf native-sdk-cli-*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
+          # Everything tar sees is relative: a Windows runner's RUNNER_TEMP starts with a drive
+          # letter, which GNU tar reads as a remote host for the archive ("Cannot connect to D:")
+          # and refuses for -C ("Cannot open"). Run from RUNNER_TEMP so both are plain names.
+          cd "$RUNNER_TEMP"
+          tar -xzf pack/native-sdk-cli-*.tgz -C cli-package --strip-components=1
 
       - name: Build the dev host into its package
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
-        run: node packages/cli/scripts/prebuilt-dev-host.ts "packages/dev-host-${{ matrix.key }}" --force --sdk-root "$RUNNER_TEMP/cli-package"
+        run: |
+          log="$RUNNER_TEMP/devhost-build.log"
+          cores="$RUNNER_TEMP/cores"
+          backtrace="$RUNNER_TEMP/devhost-backtrace.txt"
+          build() {
+            node packages/cli/scripts/prebuilt-dev-host.ts "packages/dev-host-${{ matrix.key }}" --force --sdk-root "$RUNNER_TEMP/cli-package"
+          }
+          # Cheap on success: a directory and a sysctl on Linux, and nothing else runs unless the
+          # build dies. The core lands in the workspace, not the runner's own dump directory.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            mkdir -p "$cores"
+            ulimit -c unlimited
+            sudo sysctl -w "kernel.core_pattern=$cores/core.%e.%p.%t" >/dev/null
+          fi
+          if build 2>&1 | tee "$log"; then exit 0; fi
+          # The compiler's LLVM helper crashes now and then while it builds the dev host (a death
+          # with no exit status, as SIGSEGV or SIGBUS). A crash leaves nothing built: turn any core
+          # it left into a backtrace, then try once more in a fresh process. A real compile error
+          # is not retried.
+          grep -qE 'killed by SIG(SEGV|BUS|ILL)|exit null' "$log" || exit 1
+          if [ "$RUNNER_OS" = "Linux" ] && ls "$cores"/core.* >/dev/null 2>&1; then
+            echo "native: reading the core the compiler left"
+            sudo apt-get update -qq || true
+            sudo apt-get install -y -qq gdb || true
+            for core in "$cores"/core.*; do
+              # The core names the executable it came from; use it whole when it is still there,
+              # and otherwise look it up by name under the packages.
+              name=$(file -b "$core" | sed -n "s/.*execfn: '\([^']*\)'.*/\1/p")
+              exe=""
+              if [ -n "$name" ]; then
+                if [ -f "$name" ]; then exe="$name"; else
+                  exe=$(find packages/cli/node_modules node_modules -type f \( -name "$(basename "$name")" -o -name "$(basename "$name")*" \) 2>/dev/null | head -1)
+                fi
+              fi
+              {
+                echo "== $(basename "$core") from ${name:-unknown}"
+                if [ -n "$exe" ] && command -v gdb >/dev/null 2>&1; then
+                  gdb -batch -ex "thread apply all bt 40" "$exe" "$core" 2>&1 || true
+                else
+                  file "$core"
+                fi
+              } >> "$backtrace"
+            done
+          fi
+          echo "native: the dev host build crashed; retrying once in a new process"
+          build
+
+      - name: Upload the dev host crash dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-host-crash-${{ matrix.key }}
+          path: |
+            ${{ runner.temp }}/cores
+            ${{ runner.temp }}/devhost-backtrace.txt
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Pack the dev-host package
         if: steps.libnode.outputs.supported == 'true'
