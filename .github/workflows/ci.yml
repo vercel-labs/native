@@ -1,7 +1,7 @@
 # Type-checks the workspace and builds the docs site, then builds and launches every app under
 # examples/, headlessly, with a scripted interaction and a snapshot of the first frame: on Linux
-# against the headless host, and on Windows against the Win32 host, whose windows run there have a
-# desktop. The Linux apps need the host's development libraries and a C toolchain; see
+# against the headless host, on macOS against the windowed host, and on Windows against the Win32
+# host, whose windows run there have a desktop. The Linux apps need the host's development libraries and a C toolchain; see
 # packages/cli/host/linux.c, packages/cli/host/windows.cpp and packages/cli/docs/cli.md.
 name: ci
 
@@ -93,6 +93,21 @@ jobs:
         run: |
           echo "linux-examples: four shards -> $SHARDS"
           test "$SHARDS" = "success"
+
+  macos-examples:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # The runner's Xcode command line tools build the windowed host; the apps run headlessly
+      # here, as on Linux, and the macOS host is the one most users build on.
+      - run: pnpm install --frozen-lockfile
+      - name: Build and run every example
+        run: pnpm turbo run test:examples --filter=@native-sdk/cli
 
   windows-examples:
     runs-on: windows-latest
