@@ -418,7 +418,17 @@ function contentMaxWidthInner(el: Node, cbW: number, cbH: number = NaN, ownH: nu
     let columns = 0;
     for (const k of ordered) {
       const described = len(k, P.P_FLEX_BASIS, wrap);
-      const outerMain = (Number.isNaN(described) ? zeroIfNaN(specH(k, cbW, wrap)) : described) +
+      // A flex-basis is a content-box size; the others size the border box already.
+      const pad = k.sv[P.P_BOX_SIZING] === P.BS_BORDER ? 0 : padV(k, wrap);
+      let main = Number.isNaN(described) ? zeroIfNaN(specH(k, cbW, wrap)) : described + pad;
+      // A min-height or max-height holds the item's main size, so the packing counts the size the
+      // item really takes (CSS Flexbox 4.5: the hypothetical main size is the base held within
+      // them, and a minimum above the maximum wins).
+      const minMain = len(k, P.P_MIN_HEIGHT, wrap);
+      const maxMain = len(k, P.P_MAX_HEIGHT, wrap);
+      if (!Number.isNaN(maxMain)) main = Math.min(main, maxMain + pad);
+      if (!Number.isNaN(minMain)) main = Math.max(main, minMain + pad);
+      const outerMain = main +
         zeroIfNaN(len(k, P.P_MARGIN_TOP, wrap)) + zeroIfNaN(len(k, P.P_MARGIN_BOTTOM, wrap));
       // The gap before this item is part of what has to fit, and a finished column is followed by
       // the cross-axis (column) gap before the next one starts.
@@ -454,10 +464,14 @@ function contentMaxWidthInner(el: Node, cbW: number, cbH: number = NaN, ownH: nu
         const base = len(kids[i], P.P_FLEX_BASIS, cbW);
         if (!Number.isNaN(base)) {
           // A growable item still contributes its content's max-content size: growth can take it
-          // past the basis. One that cannot grow is held at max(min-content, basis).
-          outer = kids[i].sv[P.P_FLEX_GROW] > 0
-            ? Math.max(outer, base + marginH(kids[i], 0))
-            : Math.max(intrinsicMinWidth(kids[i], cbW, basis), base) + marginH(kids[i], 0);
+          // past the basis. One that cannot grow is held at max(min-content, basis). Either way
+          // the item's own min-width and max-width hold the size, which the basis can't lift it
+          // over (CSS Sizing 3 §5.2).
+          const mh = marginH(kids[i], 0);
+          const w = kids[i].sv[P.P_FLEX_GROW] > 0
+            ? Math.max(outer - mh, base)
+            : Math.max(intrinsicMinWidth(kids[i], cbW, basis), base);
+          outer = clampContributionW(kids[i], w, cbW) + mh;
         }
         content += outer + (i > 0 ? zeroIfNaN(len(el, P.P_COLUMN_GAP, cbW)) : 0);
       } else if (isFloat(kids[i])) {
