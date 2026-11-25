@@ -34,7 +34,7 @@ import { hostBackingScale, hostFontAscentDevice, hostFontDescentDevice, hostFont
 import { mediaMatches } from "./media.ts";
 import { containerMatches } from "./container.ts";
 import { hintDecls } from "./hints.ts";
-import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesReachBeyond, setCompiledSheetMediaSink, setCompiledSheetOffSink, setCounterStyleSink, setSheetContent } from "./sheets.ts";
+import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesReachBeyond, setCompiledSheetMediaSink, setCompiledSheetOffSink, setCounterStyleSink, setSheetContent, sheetLayerRank, sheetLayerTotal } from "./sheets.ts";
 import type { CSSStyleSheet, SheetRule } from "./sheets.ts";
 import { registrationCount, registeredProperty, registrations } from "./registered.ts";
 import { viewport } from "./viewport.ts";
@@ -2618,15 +2618,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     // in an anonymous table (CSS 2.1 9.7, 17.2.1).
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
-  // A text node is no box of its own: inheriting `display: contents` from the box it sits in
-  // would leave it with nothing to lay out or paint it, so its text is inline there.
-  if (el.isTextNode && sv[P.P_DISPLAY] === P.D_CONTENTS) sv[P.P_DISPLAY] = P.D_INLINE;
-  // Flex and grid items are blockified; whitespace-only text in one isn't rendered. A display:
-  // contents box generates no box, so what it holds are items of the container the contents boxes
-  // are flattened into — the item parent is the nearest ancestor that generates a box.
-  let itemParent = parent;
-  while (itemParent !== null && itemParent.sv[P.P_DISPLAY] === P.D_CONTENTS) itemParent = itemParent.parentElement;
-  if (itemParent !== null && (isFlexContainer(itemParent) || isGridContainer(itemParent) || isLanesContainer(itemParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
+  if (parent !== null && (isFlexContainer(parent) || isGridContainer(parent) || isLanesContainer(parent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
@@ -3770,6 +3763,8 @@ interface RuntimeMatch {
   rule: SheetRule;
   spec: number;
   order: number;
+  /** The rule's cascade layer rank; unlayered rules sort above every layer. */
+  layer: number;
 }
 
 /**
@@ -3836,14 +3831,17 @@ function runtimeMatches(test: Element, pseudo: number): RuntimeMatch[] {
         if (!selectorFitsSheet(test, sel, root)) continue;
         if (sel.specificity > spec) spec = sel.specificity;
       }
-      if (spec >= 0) out.push({ rule, spec, order });
+      if (spec >= 0) out.push({ rule, spec, order, layer: sheetLayerRank(rule.layer) });
     }
   }
-  // Insertion sort by (specificity, source order): the cascade wants the last applied to win.
+  // Insertion sort by (layer, specificity, source order): the cascade wants the last applied to
+  // win, and a later layer outranks an earlier one.
   for (let i = 1; i < out.length; i++) {
     const m = out[i];
     let k = i - 1;
-    while (k >= 0 && (out[k].spec > m.spec || (out[k].spec === m.spec && out[k].order > m.order))) {
+    while (k >= 0 && (out[k].layer > m.layer ||
+      (out[k].layer === m.layer && (out[k].spec > m.spec ||
+        (out[k].spec === m.spec && out[k].order > m.order))))) {
       out[k + 1] = out[k];
       k--;
     }
@@ -3960,7 +3958,14 @@ function runtimeChainFits(chain: ChainLink[], k: number, el: Element, scope: Ele
 function applyRuntime(el: Element, matched: RuntimeMatch[], important: boolean, parent: Node | null): void {
   const sv = el.sv;
   const su = el.su;
-  for (const m of matched) {
+  // Important declarations reverse the layer order: an earlier layer's !important beats a
+  // later one's, and an unlayered !important is the weakest of them.
+  let list = matched;
+  if (important && matched.length > 1) {
+    const total = sheetLayerTotal();
+    list = matched.slice().sort((a, b) => (total - a.layer) - (total - b.layer) || a.spec - b.spec || a.order - b.order);
+  }
+  for (const m of list) {
     for (const d of m.rule.decls) {
       if ((d.important === true) !== important) continue;
       if (d.prop !== undefined) {
