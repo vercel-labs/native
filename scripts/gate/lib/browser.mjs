@@ -43,17 +43,27 @@ export function chromeGL(chrome) {
   if (glChoice !== null) return glChoice;
   const dir = mkdtempSync(join(tmpdir(), "gate-gl-"));
   try {
+    // The probe is a page on disk, opened the way the examples are: a data: URL answered "WebGL 2"
+    // on a Windows machine where a file: page gets no context, which chose the hardware path for a
+    // browser that had none.
+    const probePath = join(dir, "gl.html");
+    writeFileSync(
+      probePath,
+      "<!doctype html><canvas id=c></canvas><script>document.documentElement.setAttribute('data-gate-gl',document.getElementById('c').getContext('webgl2')?'WEBGL2':'NONE')</script>",
+    );
     const probe = require("node:child_process").spawnSync(chrome, [
       "--headless=new",
       "--no-sandbox",
       "--no-first-run",
       "--disable-dev-shm-usage",
+      "--allow-file-access-from-files",
       `--user-data-dir=${join(dir, "profile")}`,
       "--virtual-time-budget=1000",
       "--dump-dom",
-      "data:text/html,<canvas id=c></canvas><script>document.title=document.getElementById('c').getContext('webgl2')?'WEBGL2':'NONE'</script>",
+      pathToFileURL(probePath).href,
     ], { encoding: "utf8", timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
-    glChoice = /WEBGL2/.test(probe.stdout ?? "")
+    // The attribute, not the literal: the page's own script source contains "WEBGL2" too.
+    glChoice = /data-gate-gl="WEBGL2"/.test(probe.stdout ?? "")
       ? { gl: "hardware", flags: [] }
       : { gl: "swiftshader", flags: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"] };
   } finally {
@@ -224,7 +234,7 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       target = join(work, "wrapper.html");
     }
     const glPath = gl ?? chromeGL(chrome);
-    const r = require("node:child_process").spawnSync(chrome, [
+    const args = [
       "--headless=new",
       ...glPath.flags,
       "--hide-scrollbars",
@@ -238,11 +248,21 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       `--force-device-scale-factor=${scale}`,
       `--window-size=${width},${height}`,
       `--virtual-time-budget=${virtualTimeMs}`,
-      `--screenshot=${resolve(outPng)}`,
-      "--dump-dom",
-      pathToFileURL(target).href,
-    ], { encoding: "utf8", timeout: 90_000, maxBuffer: 32 * 1024 * 1024 });
-    const t0 = /data-gate-t0="([0-9.]+)"/.exec(r.stdout ?? "");
+    ];
+    const run = (extra) => require("node:child_process").spawnSync(chrome, [...args, ...extra], {
+      encoding: "utf8",
+      timeout: 90_000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    // The first-frame time is read from the page itself. A wrapper's dumped DOM does not hold the
+    // framed document, so a narrow page gets a clock run of its own, unwrapped.
+    const clockPattern = /data-gate-t0="([0-9.]+)"/;
+    let clockMatch = null;
+    const framed = target !== join(work, "index.html");
+    if (framed) clockMatch = clockPattern.exec(run(["--dump-dom", pathToFileURL(join(work, "index.html")).href]).stdout ?? "");
+    const r = run([`--screenshot=${resolve(outPng)}`, ...(framed ? [] : ["--dump-dom"]), pathToFileURL(target).href]);
+    if (clockMatch === null && !framed) clockMatch = clockPattern.exec(r.stdout ?? "");
+    const t0 = clockMatch;
     return {
       ok: existsSync(outPng),
       status: r.status,

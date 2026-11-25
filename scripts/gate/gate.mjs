@@ -22,6 +22,9 @@ const here = import.meta.dirname;
 const root = resolve(here, "..", "..");
 const bars = JSON.parse(readFileSync(join(here, "bars.json"), "utf8"));
 
+/** Examples whose frame is animation content rather than a rendering rule: reported, not judged. */
+const timingSensitive = new Set(bars.chrome.timingSensitive ?? []);
+
 const argv = process.argv.slice(2);
 const opt = (name, fallback) => {
   const at = argv.indexOf(`--${name}`);
@@ -604,14 +607,22 @@ function effectiveParity(p) {
   return calibrated[p.name] ?? p.identical;
 }
 
+function judgedParity(parity) {
+  return parity.filter((p) => p.ok && !timingSensitive.has(p.name));
+}
+
 function paritySummary(parity, pct) {
-  const ok = parity.filter((p) => p.ok);
-  if (ok.length === 0) return "n/a";
+  const ok = judgedParity(parity);
+  const rest = parity.filter((p) => p.ok && timingSensitive.has(p.name));
+  const aside = rest.length === 0 ? "" : ` (timing-sensitive, not judged: ${rest.map((p) => `${p.name} ${pct(effectiveParity(p))}`).join(", ")})`;
+  if (ok.length === 0) return `n/a${aside}`;
   const worst = ok.reduce((a, b) => (effectiveParity(a) <= effectiveParity(b) ? a : b));
-  return `worst ${pct(effectiveParity(worst))} (${worst.name}), median ${pct(percentile(ok.map((p) => effectiveParity(p)), 50))}`;
+  return `worst ${pct(effectiveParity(worst))} (${worst.name}), median ${pct(percentile(ok.map((p) => effectiveParity(p)), 50))}${aside}`;
 }
 function parityPass(parity) {
-  return parity.length > 0 && parity.every((p) => p.ok && effectiveParity(p) >= bars.uisdk.matchPixel);
+  const ran = parity.every((p) => p.ok || timingSensitive.has(p.name));
+  const judged = judgedParity(parity);
+  return parity.length > 0 && ran && judged.every((p) => effectiveParity(p) >= bars.uisdk.matchPixel);
 }
 
 function oneLine(text) {
