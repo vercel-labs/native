@@ -400,13 +400,14 @@ async function snapshot(path: string): Promise<void> {
 export function run(): void {
   // The page's menu markup becomes the window's menu bar before anything is shown.
   installApplicationMenu();
-  // Vector content rasterizes at the scale the snapshot draws at, so it lands on whole device
-  // pixels instead of being upscaled with the rest of the frame.
-  setSnapshotScale(SNAPSHOT_SCALE);
   const snap = process.env.NATIVE_SNAPSHOT;
   const composited = process.env.NATIVE_SNAPSHOT_COMPOSITED;
   const wantsSnapshot = (snap !== undefined && snap !== "") || (composited !== undefined && composited !== "");
   const headless = wantsSnapshot || process.env.NATIVE_STEPS !== undefined;
+  // Vector content rasterizes at the scale the snapshot draws at, so it lands on whole device
+  // pixels instead of being upscaled with the rest of the frame. Only a headless run records it:
+  // an ordinary window keeps the display's own backing scale (and devicePixelRatio 1 at 1x).
+  if (headless) setSnapshotScale(SNAPSHOT_SCALE);
   if (headless) {
     publishTitlebarArea(config.windowOptions, config.width, false);
     // The run has no window to open: its frame is the page's size, at the screen's corner.

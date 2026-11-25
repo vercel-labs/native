@@ -7,9 +7,8 @@
 // boxes and snapped boxes stays as it was.
 
 import { hostBackingScale } from "./host.ts";
-
-/** The scale a headless run draws its snapshot at. */
-export const SNAPSHOT_SCALE = 2;
+import { SNAPSHOT_SCALE, chosenRasterScale } from "./device-scale.ts";
+export { SNAPSHOT_SCALE } from "./device-scale.ts";
 
 /** The scale a headless snapshot draws at, or 0 before one is known. */
 let snapshotScale = 0;
@@ -25,13 +24,9 @@ export function setSnapshotScale(scale: number): void {
  * own width and height in CSS px, as on the web, and the browser enlarges it too.
  */
 export function rasterScale(): number {
-  const backing = hostBackingScale();
-  if (backing > 1) return backing;
-  if (snapshotScale > 1) return snapshotScale;
   // A headless run draws at the snapshot scale, and the page's own code may run before the runner
   // has recorded it: the run's environment says so already.
   const headless = process.env.NATIVE_SNAPSHOT !== undefined || process.env.NATIVE_SNAPSHOT_COMPOSITED !== undefined ||
     process.env.NATIVE_STEPS !== undefined;
-  if (headless) return SNAPSHOT_SCALE;
-  return backing >= 1 ? backing : 1;
+  return chosenRasterScale(hostBackingScale(), snapshotScale, headless);
 }
