@@ -46,8 +46,8 @@ jobs:
     # job names and the aggregate check unchanged while capping the tier at one build. The four apps
     # sit in different shards so each job still adds no wall clock beyond its own build, and together
     # they exercise the runtime paths a pull request most often breaks: counter covers DOM events and
-    # text, dashboard React's state and rendering, canvas-particles Canvas 2D animation with pointer
-    # input, and webgl-cube WebGL 2 drawing through the GPU.
+    # text, ui-dashboard React's state and rendering, canvas-particles Canvas 2D animation with
+    # pointer input, and webgl-cube WebGL 2 drawing through the GPU.
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +55,7 @@ jobs:
           - shard: 1
             fast_example: webgl-cube
           - shard: 2
-            fast_example: dashboard
+            fast_example: ui-dashboard
           - shard: 3
             fast_example: canvas-particles
           - shard: 4
