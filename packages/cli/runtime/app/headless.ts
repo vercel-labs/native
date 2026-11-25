@@ -17,7 +17,7 @@ import { publishTitlebarArea } from "./titlebar.ts";
 import { pointer, pointerContext, pointerDown, pointerMove, pointerUp } from "./pointer.ts";
 import { dropFilesAt, fileFromPath } from "./dnd.ts";
 import { fadeScrollbars, wheel } from "./scroll.ts";
-import { setSnapshotScale } from "../device.ts";
+import { SNAPSHOT_SCALE, setSnapshotScale } from "../device.ts";
 import { compositorStats } from "../compositor.ts";
 
 // ---------------------------------------------------------------------------
@@ -360,9 +360,6 @@ async function runSteps(): Promise<void> {
     frame();
   }
 }
-
-/** The device scale a headless snapshot draws at: 2, as a Retina display's snapshot would. */
-const SNAPSHOT_SCALE = 2;
 
 /**
  * Waits for every image the page asked for to finish decoding, and for the loads that wait on

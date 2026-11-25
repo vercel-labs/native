@@ -8,6 +8,9 @@
 
 import { hostBackingScale } from "./host.ts";
 
+/** The scale a headless run draws its snapshot at. */
+export const SNAPSHOT_SCALE = 2;
+
 /** The scale a headless snapshot draws at, or 0 before one is known. */
 let snapshotScale = 0;
 
@@ -24,5 +27,11 @@ export function setSnapshotScale(scale: number): void {
 export function rasterScale(): number {
   const backing = hostBackingScale();
   if (backing > 1) return backing;
-  return snapshotScale > 1 ? snapshotScale : backing >= 1 ? backing : 1;
+  if (snapshotScale > 1) return snapshotScale;
+  // A headless run draws at the snapshot scale, and the page's own code may run before the runner
+  // has recorded it: the run's environment says so already.
+  const headless = process.env.NATIVE_SNAPSHOT !== undefined || process.env.NATIVE_SNAPSHOT_COMPOSITED !== undefined ||
+    process.env.NATIVE_STEPS !== undefined;
+  if (headless) return SNAPSHOT_SCALE;
+  return backing >= 1 ? backing : 1;
 }
