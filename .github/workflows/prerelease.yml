@@ -78,8 +78,10 @@ jobs:
             os: ubuntu-22.04-arm
           - key: darwin-x64
             os: macos-15-intel
+          # macos-14 jobs are cancelled before a runner is assigned; macos-15 is the current
+          # arm64 macOS image, and the ci workflow's macOS job runs on it.
           - key: darwin-arm64
-            os: macos-14
+            os: macos-15
           # scriptc has no Windows libnode pack yet, so the dev host's Node island cannot be
           # built there; the job records a notice and the release carries the other four.
           - key: win32-x64
@@ -145,16 +147,27 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/cli-package"
-          # Unpack from the pack directory with a relative name: a Windows runner's RUNNER_TEMP
-          # starts with a drive letter, which GNU tar reads as a remote host ("Cannot connect to
-          # D: resolve failed").
-          cd "$RUNNER_TEMP/pack"
-          tar -xzf native-sdk-cli-*.tgz -C "$RUNNER_TEMP/cli-package" --strip-components=1
+          # Everything tar sees is relative: a Windows runner's RUNNER_TEMP starts with a drive
+          # letter, which GNU tar reads as a remote host for the archive ("Cannot connect to D:")
+          # and refuses for -C ("Cannot open"). Run from RUNNER_TEMP so both are plain names.
+          cd "$RUNNER_TEMP"
+          tar -xzf pack/native-sdk-cli-*.tgz -C cli-package --strip-components=1
 
       - name: Build the dev host into its package
         if: steps.libnode.outputs.supported == 'true'
         shell: bash
-        run: node packages/cli/scripts/prebuilt-dev-host.ts "packages/dev-host-${{ matrix.key }}" --force --sdk-root "$RUNNER_TEMP/cli-package"
+        run: |
+          log="$RUNNER_TEMP/devhost-build.log"
+          build() {
+            node packages/cli/scripts/prebuilt-dev-host.ts "packages/dev-host-${{ matrix.key }}" --force --sdk-root "$RUNNER_TEMP/cli-package"
+          }
+          if build 2>&1 | tee "$log"; then exit 0; fi
+          # The compiler's LLVM helper crashes now and then while it builds the dev host (a death
+          # with no exit status, as SIGSEGV or SIGBUS). A crash leaves nothing built, so a fresh
+          # process tries once more; a real compile error is not retried.
+          grep -qE 'killed by SIG(SEGV|BUS|ILL)|exit null' "$log" || exit 1
+          echo "native: the dev host build crashed; retrying once in a new process"
+          build
 
       - name: Pack the dev-host package
         if: steps.libnode.outputs.supported == 'true'
