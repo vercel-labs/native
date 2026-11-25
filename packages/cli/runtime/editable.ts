@@ -237,16 +237,21 @@ export function moveCaretIn(host: Element, where: CaretMove, extend: boolean): b
   const range = selectionIn(host);
   if (range === null) return false;
   const total = textNodes(host).reduce((n: number, t: Text) => n + t.data.length, 0);
-  if (!extend && !range.collapsed) {
-    // A plain arrow collapses the selection to the edge it points at.
-    const at = where === "left" || where === "home" ? offsetOfPoint(host, range.startContainer, range.startOffset)
+  if (!extend && !range.collapsed && (where === "left" || where === "right")) {
+    // A plain arrow collapses the selection to the edge it points at. Home and End are not
+    // edge-relative: they go to the start or end of the host even when something is selected.
+    const at = where === "left" ? offsetOfPoint(host, range.startContainer, range.startOffset)
       : offsetOfPoint(host, range.endContainer, range.endOffset);
     const point = pointAtOffset(host, at);
     if (point !== null) selectPoint(point); else sel.collapse(host, 0);
     invalidatePaint();
     return true;
   }
-  const focusAt = offsetOfPoint(host, range.endContainer, range.endOffset);
+  // Extension moves from the selection's focus, not the ordered range's end: in a backward
+  // selection the focus is the start, and moving from the end would extend the wrong way.
+  const focusNode = sel.focusNode ?? range.endContainer;
+  const focusOffset = sel.focusNode === null ? range.endOffset : sel.focusOffset;
+  const focusAt = offsetOfPoint(host, focusNode, focusOffset);
   let to: number;
   if (where === "home") to = 0;
   else if (where === "end") to = total;
