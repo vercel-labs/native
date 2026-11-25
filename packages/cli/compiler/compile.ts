@@ -439,7 +439,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const target = join(dir, createHash("sha1").update(url).digest("hex").slice(0, 20) + ext);
     if (!existsSync(target)) {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(target, bytes);
+      writeTempBytes(target, bytes);
     }
     return target;
   };
@@ -462,12 +462,20 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const target = join(dir, createHash("sha1").update(url).digest("hex").slice(0, 20) + ext);
     if (!existsSync(target)) {
       mkdirSync(dir, { recursive: true });
-      writeFileSync(target, bytes);
+      writeTempBytes(target, bytes);
     }
     return target;
   };
 
-  // --- Images --------------------------------------------------------------
+  /** Writes a decoded data-URL payload into one of the shared temporary directories, owned by
+ *  the user alone. The options object also selects scriptc's fs-flags runtime build: scriptc
+ *  0.4.16 links scr_fs_bytes_write.o for a byte write but not scr_fs_flags.o, which that object
+ *  calls, so a plain two-argument write fails to link. */
+function writeTempBytes(target: string, bytes: Uint8Array): void {
+  writeFileSync(target, bytes, { mode: 0o600 });
+}
+
+// --- Images --------------------------------------------------------------
   // Like @font-face, a referenced file is resolved at build time, against the page (or the
   // site root when the URL starts with "/"); the runtime and host only ever see file paths.
   // Apps aren't bundled yet, so the path is the build-time location (see docs/supported.md).

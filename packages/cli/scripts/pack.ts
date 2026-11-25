@@ -23,6 +23,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // @ts-expect-error: the launcher's platform table is plain JavaScript, shared with bin/native.js.
 import { executableName, hostDescription, hostPlatform, packageName, platforms } from "../bin/platforms.js";
+import { publishedOptionalDependencies, workspacePackageSlug, workspaceRanges } from "./package-ranges.ts";
 
 interface Platform {
   name: string;
@@ -101,13 +102,21 @@ function packMain(): string {
     // runtime/ is TypeScript source that scriptc compiles into every app, not a prebuilt package.
     scriptc: { source: true },
     dependencies,
-    // The workspace's own optional packages (the dev island's per-platform libnode packs) keep
-    // their ranges, since only this host's is installed; each CLI platform package is this version.
-    optionalDependencies: {
-      ...manifest.optionalDependencies,
-      ...Object.fromEntries((platforms as Platform[]).map((p) => [packageName(p), manifest.version])),
-    },
+    // Every optional dependency is a registry range in the published package: the workspace's
+    // own (`workspace:*`: the dev hosts and ANGLE) become the versions this release publishes
+    // alongside the CLI, and each CLI platform package is this version. A `workspace:` range
+    // would make npm refuse the whole tarball with EUNSUPPORTEDPROTOCOL.
+    optionalDependencies: publishedOptionalDependencies(
+      manifest.optionalDependencies ?? {},
+      Object.fromEntries((platforms as Platform[]).map((p) => [packageName(p), manifest.version])),
+      workspaceVersion,
+    ),
   });
+  const leftovers = workspaceRanges(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+  });
+  if (leftovers.length > 0) fail(`the CLI package keeps ranges npm rejects outside a workspace: ${leftovers.join(", ")}`);
   return pack(dir);
 }
 
@@ -161,6 +170,16 @@ function repositoryOf(field: unknown, github: string | undefined): unknown {
   if (github === undefined || !/^[\w.-]+\/[\w.-]+$/.test(github)) return field;
   const url = `git+https://github.com/${github}.git`;
   return field !== null && typeof field === "object" ? { ...(field as object), url } : { type: "git", url, directory: "packages/cli" };
+}
+
+/** A workspace package's version, which the published CLI names for it. */
+function workspaceVersion(name: string): string | null {
+  const slug = workspacePackageSlug(name);
+  if (slug === null) return null;
+  const manifestPath = join(root, "..", slug, "package.json");
+  if (!existsSync(manifestPath)) return null;
+  const version = (JSON.parse(readFileSync(manifestPath, "utf8")) as { version: unknown }).version;
+  return typeof version === "string" ? version : null;
 }
 
 /** The exact version of a dependency the workspace installed, which the package pins. */
