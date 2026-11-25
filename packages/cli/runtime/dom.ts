@@ -3822,7 +3822,15 @@ export type NodeListOf<T extends Node = Node> = readonly T[];
  * The NodeList constructor, for the instanceof checks pages make. The lists this runtime hands
  * out are plain arrays (a querySelectorAll result is one), so none of them is a NodeList.
  */
-class NodeListCtor {
+/**
+ * The list a DOM property hands out for a NodeList: an array a script can test with
+ * `instanceof NodeList`, which is what the DOM's lists are. Its `item()` is the member the DOM
+ * gives a list besides its indices.
+ */
+class NodeListCtor extends Array<Node> {
+  item(index: number): Node | null {
+    return index >= 0 && index < this.length ? this[index] : null;
+  }
 }
 export const NodeList: any = NodeListCtor;
 
@@ -3854,6 +3862,7 @@ const HTML_NS = "http://www.w3.org/1999/xhtml";
 let liveHead: HTMLCollection | null = null;
 
 function refreshLiveCollections(): void {
+  refreshAllLabels();
   let c: HTMLCollection | null = liveHead;
   while (c !== null) {
     fillCollection(c);
@@ -5058,6 +5067,7 @@ export class Element extends Node {
         noteOtherIdentityChange(this);
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, text);
+        if (key === "for") refreshAllLabels();
       }
     }
   }
@@ -6601,7 +6611,7 @@ export class ElementInternals {
   }
 
   /** The labels that name the element. */
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this.host);
   }
 
@@ -6959,13 +6969,15 @@ function numberAttribute(el: Element, name: string, fallback: number): number {
 /** The elements a form lists and a label can name. */
 function isLabelable(el: Element): boolean {
   const n = el.localName;
-  return n === "button" || n === "input" || n === "meter" || n === "output"
+  // An input in the hidden state is listed but not labelable.
+  if (n === "input") return (el as HTMLInputElement).type.toLowerCase() !== "hidden";
+  return n === "button" || n === "meter" || n === "output"
     || n === "progress" || n === "select" || n === "textarea";
 }
 
 /** The elements a form lists, which is the same set plus fieldsets and objects. */
 function isListedElement(el: Element): boolean {
-  return isLabelable(el) || el.localName === "fieldset" || el.localName === "object";
+  return isLabelable(el) || el.localName === "input" || el.localName === "fieldset" || el.localName === "object";
 }
 
 /** The first labelable descendant of `root`, in document order. */
@@ -7017,15 +7029,37 @@ function formOwnerFor(el: HTMLElement): HTMLFormElement | null {
 }
 
 /** The labels that name `el`: the ones around it, and the ones whose for= gives its id. */
-function labelsFor(el: HTMLElement): HTMLLabelElement[] {
+/** The labels list each element was handed, which stays the same object and stays live. */
+const labelLists = new Map<HTMLElement, NodeListCtor>();
+
+function labelsFor(el: HTMLElement): NodeListCtor {
+  let list = labelLists.get(el);
+  if (list === undefined) {
+    list = new NodeListCtor();
+    labelLists.set(el, list);
+  }
+  fillLabels(el, list);
+  return list;
+}
+
+/** Re-reads the labels of an element that names it, or the label around it. */
+function fillLabels(el: HTMLElement, list: NodeListCtor): void {
+  list.length = 0;
+  if (!isLabelable(el)) return;
   const all: Element[] = [];
   collectElements(document.documentElement, all);
-  const out: HTMLLabelElement[] = [];
   for (const e of all) {
     if (!(e instanceof HTMLLabelElement)) continue;
-    if (e.control === el) out.push(e);
+    if (e.control === el) list.push(e);
   }
-  return out;
+}
+
+/** Brings every labels list already handed out up to date. */
+function refreshAllLabels(): void {
+  for (const el of labelLists.keys()) {
+    const list = labelLists.get(el);
+    if (list !== undefined) fillLabels(el, list);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -7128,7 +7162,7 @@ export class HTMLButtonElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   get name(): string {
@@ -8691,6 +8725,10 @@ export class HTMLMetaElement extends HTMLElement {
 
 export class HTMLMeterElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLMeterElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   constructor(id: string = "", text: string = "", rules: readonly number[] = [], states: number = 0, inline: boolean = true) {
     super();
     this.initEl("meter", id, text, rules, states, inline);
@@ -8872,6 +8910,10 @@ export class Option extends HTMLOptionElement {
 
 export class HTMLOutputElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLOutputElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   /** The message setCustomValidity() was given, which a failed check reports. */
   private customMessage = "";
   /** Whether a script set the value, which then stops following the element's text. */
@@ -8956,6 +8998,10 @@ export class HTMLPreElement extends HTMLElement {
 
 export class HTMLProgressElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLProgressElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   constructor(id: string = "", text: string = "", rules: readonly number[] = [], states: number = 0, inline: boolean = true) {
     super();
     this.initEl("progress", id, text, rules, states, inline);
@@ -9140,7 +9186,7 @@ export class HTMLSelectElement extends HTMLElement {
   set size(value: number) {
     this.setAttribute("size", String(value));
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   /** The option at `index`, or null past the end. */
@@ -9861,7 +9907,7 @@ export class HTMLTextAreaElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   /** Which end the selection is anchored at, and so which way a shift-click extends it. */
@@ -10567,11 +10613,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -12847,8 +12889,9 @@ export class HTMLInputElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
-    return labelsFor(this);
+  get labels(): NodeListCtor | null {
+    // An input in the hidden state has none; its retained list is emptied.
+    return this.type.toLowerCase() === "hidden" ? null : labelsFor(this);
   }
   get textLength(): number {
     return this.val.length;
@@ -12996,6 +13039,7 @@ export class HTMLInputElement extends HTMLElement {
         this.val = sanitizeNumberText(this.val);
         noteControlChange(this);
       }
+      refreshAllLabels();
     } else if (name === "checked") {
       super.setAttribute(name, value);
       this.checked = true;
