@@ -52,8 +52,19 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Stamp the prerelease version
-        run: node scripts/prerelease-version.mjs "${{ needs.version.outputs.version }}"
+      - name: Stamp the prerelease version and drop the arm64 dev host
+        run: |
+          node scripts/prerelease-version.mjs "${{ needs.version.outputs.version }}"
+          # This prerelease builds no linux-arm64 dev host (scriptc's codegen crashes on that
+          # runner), so the CLI must not ask for one: an arm64 Linux install builds the dev host
+          # on first run instead of resolving a package this version never publishes.
+          node - <<'JS'
+          const fs = require("node:fs");
+          const file = "packages/cli/package.json";
+          const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+          delete pkg.optionalDependencies["@native-sdk/dev-host-linux-arm64"];
+          fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+          JS
       - name: Pack the packages
         run: |
           mkdir -p "$RUNNER_TEMP/pack"
@@ -74,8 +85,9 @@ jobs:
         include:
           - key: linux-x64
             os: ubuntu-22.04
-          - key: linux-arm64
-            os: ubuntu-22.04-arm
+          # No linux-arm64 host in this prerelease: scriptc's LLVM codegen crashes on that runner
+          # (SIGSEGV, three attempts). Its build step's crash capture stays in place, and the
+          # release workflow still builds and captures it, so the fault can be debugged there.
           - key: darwin-x64
             os: macos-15-intel
           # macos-14 jobs are cancelled before a runner is assigned; macos-15 is the current
