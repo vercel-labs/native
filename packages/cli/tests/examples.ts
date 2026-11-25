@@ -273,7 +273,15 @@ function run(exe: string, name: string, steps: string): Run {
   // Each run starts from empty local storage, so an app that remembers a mode (the canvas does)
   // reads what the build wrote in, not what an earlier run of this test left behind.
   const storage = join(out, `${name}.storage.json`);
-  const env: NodeJS.ProcessEnv = { ...process.env, NATIVE_STEPS: steps, NATIVE_SNAPSHOT: png, NATIVE_STORAGE: storage };
+  // The settings a snapshot must not depend on. A macOS CI runner can report that it wants
+  // reduced motion, and the examples that animate through it (webgl-cube, three-hero) then hold
+  // still, so both runs draw the same picture and the interaction check fails on a machine whose
+  // only difference is that accessibility setting. Pin the preference off so the same steps draw
+  // the same pages here and on every host.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env, NATIVE_STEPS: steps, NATIVE_SNAPSHOT: png, NATIVE_STORAGE: storage,
+    NATIVE_REDUCED_MOTION: "0",
+  };
   const started = performance.now();
   const r = spawnSync(exe, [], { encoding: "utf8", env, timeout: 120_000 });
   const ms = performance.now() - started;

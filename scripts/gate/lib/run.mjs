@@ -35,6 +35,7 @@ export function percentile(values, p) {
 const FRAME = /^native: frame (\d+)(?: t=([\d.]+))? style=([\d.]+) anim=([\d.]+) layout=([\d.]+)(?: shape=([\d.]+))? paint=([\d.]+) layers=(\d+) total=([\d.]+)/;
 const COMPOSITE = /^native: composite ([\d.]+) ms$/;
 const PRESENT = /^native: present ([\d.]+) ms replay ([\d.]+) ms$/;
+const REPLAY = /^native: replay total=([\d.]+)/;
 
 /**
  * The frames a run painted, from its `NATIVE_FRAME_TIMES=1` stderr. A macOS host prints one
@@ -43,7 +44,7 @@ const PRESENT = /^native: present ([\d.]+) ms replay ([\d.]+) ms$/;
  * headless Linux host paints offscreen and prints its replay once, so on Linux the frame time is
  * the runtime's own stages.
  */
-export function parseFrames(stderr, { hostPerFrame = process.platform === "darwin" } = {}) {
+export function parseFrames(stderr, { hostPerFrame = process.platform === "darwin" || process.platform === "win32" } = {}) {
   const frames = [];
   let pending = null;
   for (const line of stderr.split("\n")) {
@@ -68,9 +69,10 @@ export function parseFrames(stderr, { hostPerFrame = process.platform === "darwi
     }
     const c = COMPOSITE.exec(line);
     const p = PRESENT.exec(line);
-    if (pending !== null && (c !== null || p !== null)) {
-      pending.host = Number((c ?? p)[1]);
-      pending.hostKind = c !== null ? "composite" : "present";
+    const rp = REPLAY.exec(line);
+    if (pending !== null && (c !== null || p !== null || rp !== null)) {
+      pending.host = Number((c ?? p ?? rp)[1]);
+      pending.hostKind = c !== null ? "composite" : p !== null ? "present" : "replay";
       pending = null;
     }
   }
