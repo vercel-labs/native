@@ -1,0 +1,2 @@
+# Edit this file on next to publish a prerelease (see .github/workflows/prerelease.yml).
+requested: 2026-11-25 third 0.20.0 prerelease (retry a crashed dev host build; macos-15 for arm64)

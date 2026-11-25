@@ -1796,6 +1796,8 @@ export function openApp(input: string, bundled = false): AppBuild {
 /** What a scriptc run printed and how it ended. */
 export interface ScriptcResult {
   status: number | null;
+  /** The signal that ended the compiler, when one did; `status` is null in that case. */
+  signal?: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
   error?: Error;
@@ -1831,15 +1833,15 @@ function runStreaming(command: string, args: string[], options: SpawnOptions,
       for (const line of lines) if (!take(line)) stderr += line + "\n";
     });
     let done = false;
-    const settle = (status: number | null, error?: Error): void => {
+    const settle = (status: number | null, signal: NodeJS.Signals | null, error?: Error): void => {
       if (done) return;
       done = true;
       if (partial !== "" && !take(partial)) stderr += partial;
-      resolve(error === undefined ? { status, stdout, stderr } : { status, stdout, stderr, error });
+      resolve(error === undefined ? { status, signal, stdout, stderr } : { status, signal, stdout, stderr, error });
     };
     // A command that couldn't start reports `error` and then closes with no status.
-    child.on("error", (error) => settle(null, error));
-    child.on("close", (status) => settle(status));
+    child.on("error", (error) => settle(null, null, error));
+    child.on("close", (status, signal) => settle(status, signal));
   });
 }
 

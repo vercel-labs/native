@@ -41,7 +41,8 @@ export function buildExample({ cli, root, out, name, timeout, reuse = false, scr
   const compilerEnv = scriptc === null ? {} : { NATIVE_SCRIPTC: scriptc };
   const dir = join(root, "examples", name);
   const cache = join(out, "builds", name, "cache");
-  const exe = join(out, "builds", name, name);
+  // A Windows build writes <name>.exe; elsewhere the output path is the executable itself.
+  const exe = join(out, "builds", name, process.platform === "win32" ? `${name}.exe` : name);
   const record = join(out, "builds", name, "build.json");
   mkdirSync(join(out, "builds", name), { recursive: true });
   if (reuse && existsSync(record) && existsSync(exe)) {

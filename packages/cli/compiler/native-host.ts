@@ -123,6 +123,29 @@ export const WINDOWS_HOST_LIBRARIES = [
 /** Packages the Linux host's headers come from, through pkg-config. */
 const LINUX_HOST_PACKAGES = ["cairo", "freetype2", "fontconfig", "harfbuzz", "libpng", "libjpeg", "libgif", "dbus-1", "alsa", "sqlite3", "egl", "gl"];
 
+/** What a build tells the user to install when pkg-config itself is missing. */
+const LINUX_HOST_INSTALL = "install build-essential (for cc), clang, pkg-config, libcairo2-dev, libfreetype-dev, libfontconfig-dev, libharfbuzz-dev, libpng-dev, libjpeg-dev, libgif-dev, libdbus-1-dev, libasound2-dev, libsqlite3-dev, libegl-dev and libgl-dev";
+
+/** The compile flags those packages name. A release can ship a package's headers without a .pc
+ *  file — Ubuntu 22.04's libgif-dev has no libgif.pc, while 24.04 and later ship one — and one
+ *  such package fails the query for all of them. Its header is in the compiler's default include
+ *  path, so the package contributes no flags; a dev package missing altogether then fails at its
+ *  first include, which names the header. */
+function linuxHostCflags(): string[] {
+  const all = spawnSync("pkg-config", ["--cflags", ...LINUX_HOST_PACKAGES], { encoding: "utf8" });
+  if (all.error !== undefined) throw new Error(`failed to run pkg-config; ${LINUX_HOST_INSTALL}`);
+  if (all.status === 0) return all.stdout.trim().split(/\s+/).filter(Boolean);
+  // The package without a .pc file fails the one query, so ask each on its own and take the flags
+  // of the ones pkg-config names.
+  const flags: string[] = [];
+  for (const name of LINUX_HOST_PACKAGES) {
+    const one = spawnSync("pkg-config", ["--cflags", name], { encoding: "utf8" });
+    if (one.error !== undefined) throw new Error(`failed to run pkg-config; ${LINUX_HOST_INSTALL}`);
+    if (one.status === 0) flags.push(...one.stdout.trim().split(/\s+/).filter(Boolean));
+  }
+  return [...new Set(flags)];
+}
+
 /** Whether a command is on the PATH, which decides how the Windows host is compiled. */
 function onPath(command: string): boolean {
   const probe = process.platform === "win32"
@@ -300,11 +323,7 @@ export function hostCompileCommand(hostSrc: string, outObj: string, platform: No
   const ffmpegHeader = join(ffmpeg, "include", "libavformat", "avformat.h");
   if (existsSync(ffmpegHeader)) flags.push("-I" + join(ffmpeg, "include"));
   else flags.push("-DNATIVE_NO_FFMPEG");
-  const pkg = spawnSync("pkg-config", ["--cflags", ...LINUX_HOST_PACKAGES], { encoding: "utf8" });
-  if (pkg.error || pkg.status !== 0) {
-    throw new Error("failed to read the Linux host's compile flags; install build-essential (for cc), clang, pkg-config, libcairo2-dev, libfreetype-dev, libfontconfig-dev, libharfbuzz-dev, libpng-dev, libjpeg-dev, libgif-dev, libdbus-1-dev, libasound2-dev, libsqlite3-dev, libegl-dev and libgl-dev");
-  }
-  flags.push(...pkg.stdout.trim().split(/\s+/).filter(Boolean));
+  flags.push(...linuxHostCflags());
   flags.push(hostSrc, "-o", outObj);
   return { cc: "cc", args: flags };
 }
