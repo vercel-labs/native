@@ -4,7 +4,7 @@
 
 import * as P from "../shared/props.ts";
 import { parseColor } from "../shared/css/colors.ts";
-import { HTMLInputElement, controlKind, inDisabledFormControl, rangeSpec, snapRange, CONTROL_NONE, CONTROL_COLOR, CONTROL_RADIO, CONTROL_RANGE } from "./dom.ts";
+import { HTMLInputElement, HTMLMeterElement, HTMLProgressElement, controlKind, inDisabledFormControl, rangeSpec, snapRange, CONTROL_NONE, CONTROL_COLOR, CONTROL_RADIO, CONTROL_RANGE } from "./dom.ts";
 import { hostFillPoly, hostFillRect, hostFillRing } from "./host.ts";
 import { absolutePosition } from "./layout/geometry.ts";
 
@@ -16,6 +16,10 @@ const TRACK = 0xefefefff;
 const TRACK_EDGE = 0xb2b2b2ff;
 const WHITE = 0xffffffff;
 const DISABLED = 0x999999ff;
+// A meter's bar, in the colours Chrome gives its good, suboptimal and even-less-good zones.
+const METER_GOOD = 0x0a8a0aff;
+const METER_SUBOPTIMAL = 0xd9a400ff;
+const METER_BAD = 0xcf3a2fff;
 
 /** The colour a control's lit parts take: its accent colour, or the UA's own. */
 function accentOf(el: HTMLInputElement): number {
@@ -137,6 +141,64 @@ export function paintControl(el: HTMLInputElement, x: number, y: number, opacity
     if (!el.faceDeclared) paintSwatch(el, cx, cy, opacity);
   } else if (kind === CONTROL_RANGE) paintRange(el, cx, cy, opacity);
   else paintTick(el, kind, cx, cy, opacity);
+}
+
+/** The box and bar a meter draws while its appearance is the UA's. */
+export function paintMeter(el: HTMLMeterElement, x: number, y: number, opacity: number): void {
+  if (el.sv[P.P_APPEARANCE] === P.AP_NONE) return;
+  const w = el.contentW;
+  const h = el.contentH;
+  if (w <= 0 || h <= 0) return;
+  const cx = x + el.contentX;
+  const cy = y + el.contentY;
+  const r = Math.min(3, h / 2);
+  hostFillRect(cx, cy, w, h, r, dim(TRACK, opacity));
+  hostFillRing(cx, cy, w, h, r, 1, dim(TRACK_EDGE, opacity));
+  const min = el.min;
+  const max = el.max;
+  const span = max > min ? max - min : 0;
+  const frac = span > 0 ? Math.min(1, Math.max(0, (el.value - min) / span)) : 0;
+  const innerW = Math.max(0, w - 4);
+  const innerH = Math.max(0, h - 4);
+  if (frac > 0 && innerW > 0 && innerH > 0) {
+    hostFillRect(cx + 2, cy + 2, innerW * frac, innerH, Math.max(0, Math.min(2, innerH / 2)), dim(meterBarColor(el), opacity));
+  }
+}
+
+/** The bar colour for a meter's value: green in the optimum's zone, red in the worst one. */
+function meterBarColor(el: HTMLMeterElement): number {
+  const low = el.low;
+  const high = el.high;
+  const optimum = el.optimum;
+  const value = el.value;
+  const zone = (v: number): number => v >= high ? 2 : v >= low ? 1 : 0;
+  const good = zone(optimum);
+  const at = zone(value);
+  if (at === good) return METER_GOOD;
+  // The middle zone is suboptimal; the far side from the optimum is the worst.
+  if (at === 1 || Math.abs(at - good) === 1) return METER_SUBOPTIMAL;
+  return METER_BAD;
+}
+
+/** The box and bar a progress element draws while its appearance is the UA's. */
+export function paintProgress(el: HTMLProgressElement, x: number, y: number, opacity: number): void {
+  if (el.sv[P.P_APPEARANCE] === P.AP_NONE) return;
+  const w = el.contentW;
+  const h = el.contentH;
+  if (w <= 0 || h <= 0) return;
+  const cx = x + el.contentX;
+  const cy = y + el.contentY;
+  const r = Math.min(3, h / 2);
+  hostFillRect(cx, cy, w, h, r, dim(TRACK, opacity));
+  hostFillRing(cx, cy, w, h, r, 1, dim(TRACK_EDGE, opacity));
+  const p = el.position;
+  if (p < 0) return;
+  const innerW = Math.max(0, w - 4);
+  const innerH = Math.max(0, h - 4);
+  if (p <= 0 || innerW <= 0 || innerH <= 0) return;
+  const declared = el.sv[P.P_ACCENT_COLOR];
+  const accent = declared < 0 ? ACCENT : declared;
+  hostFillRect(cx + 2, cy + 2, innerW * Math.min(1, p), innerH, Math.max(0, Math.min(2, innerH / 2)), dim(accent, opacity));
 }
 
 /** The radius of a range's thumb: as tall as the field allows, up to 8px. */
