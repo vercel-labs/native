@@ -6,7 +6,10 @@ import type {
 export const navbarBrand: GeistdocsNavbarBrand = "labs";
 
 export const Logo = () => (
-  <span className="font-semibold text-gray-1000 text-lg leading-none tracking-[-3%]">
+  <span
+    className="font-sans text-[24.4px] font-semibold leading-none tracking-[-0.05em] text-black dark:text-white"
+    style={{ transform: "translateY(-0.5px)" }}
+  >
     Native SDK
   </span>
 );
