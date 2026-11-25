@@ -620,7 +620,9 @@ function paritySummary(parity, pct) {
   return `worst ${pct(effectiveParity(worst))} (${worst.name}), median ${pct(percentile(ok.map((p) => effectiveParity(p)), 50))}${aside}`;
 }
 function parityPass(parity) {
-  const ran = parity.every((p) => p.ok || timingSensitive.has(p.name));
+  // Every capture has to have happened, timing-sensitive or not: a crash or a missing screenshot
+  // left the example unmeasured, and an unmeasured gate is not a pass.
+  const ran = parity.every((p) => p.ok);
   const judged = judgedParity(parity);
   return parity.length > 0 && ran && judged.every((p) => effectiveParity(p) >= bars.uisdk.matchPixel);
 }

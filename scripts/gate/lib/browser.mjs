@@ -214,7 +214,7 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
     const page = await preparePage(resolve(exampleDir), work);
     // The page's animation clock starts at its first painted frame, which is after the load: record
     // that time so the native run can be stepped from the same point rather than from zero.
-    const clock = `<script>requestAnimationFrame(function (t) { document.documentElement.setAttribute("data-gate-t0", String(t)); });</script>`;
+    const clock = `<script>requestAnimationFrame(function (t) { document.documentElement.setAttribute("data-gate-t0", String(t)); try { parent.postMessage({ "gate-t0": t }, "*"); } catch (e) {} });</script>`;
     const pageHtml = /<head[^>]*>/i.test(page.html)
       ? page.html.replace(/<head[^>]*>/i, (head) => head + clock)
       : clock + page.html;
@@ -227,7 +227,12 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
     if (width < 500) {
       writeFileSync(
         join(work, "wrapper.html"),
+        // The framed page writes its first-frame time on its own document and posts it up; the
+        // wrapper copies it either way, so the dumped DOM carries the captured page's time, from
+        // this launch, rather than a time read from another launch held to be the same.
         `<!doctype html><html><body style="margin:0;overflow:hidden;background:#000">` +
+          `<script>addEventListener("message", function (e) { try { var v = e && e.data && e.data["gate-t0"]; if (v !== undefined) document.documentElement.setAttribute("data-gate-t0", String(v)); } catch (err) {} });` +
+          `setInterval(function () { try { var f = document.querySelector("iframe"); var d = f && f.contentDocument; var v = d && d.documentElement.getAttribute("data-gate-t0"); if (v) document.documentElement.setAttribute("data-gate-t0", v); } catch (e) {} }, 16);</script>` +
           `<iframe src="index.html" scrolling="no" style="border:0;display:block;width:${width}px;height:${height}px"></iframe>` +
           `</body></html>`,
       );
@@ -254,15 +259,11 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       timeout: 90_000,
       maxBuffer: 32 * 1024 * 1024,
     });
-    // The first-frame time is read from the page itself. A wrapper's dumped DOM does not hold the
-    // framed document, so a narrow page gets a clock run of its own, unwrapped.
+    // One launch carries both: the screenshot and the clock marker come from the same page load,
+    // so native is stepped from the clock of the page that was captured.
     const clockPattern = /data-gate-t0="([0-9.]+)"/;
-    let clockMatch = null;
-    const framed = target !== join(work, "index.html");
-    if (framed) clockMatch = clockPattern.exec(run(["--dump-dom", pathToFileURL(join(work, "index.html")).href]).stdout ?? "");
-    const r = run([`--screenshot=${resolve(outPng)}`, ...(framed ? [] : ["--dump-dom"]), pathToFileURL(target).href]);
-    if (clockMatch === null && !framed) clockMatch = clockPattern.exec(r.stdout ?? "");
-    const t0 = clockMatch;
+    const r = run([`--screenshot=${resolve(outPng)}`, "--dump-dom", pathToFileURL(target).href]);
+    const t0 = clockPattern.exec(r.stdout ?? "");
     return {
       ok: existsSync(outPng),
       status: r.status,
