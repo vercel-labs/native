@@ -26,6 +26,10 @@ check("a :visited item keeps its weight", spec(":is(#x:visited, .a)") === 10100,
 // selector's :visited inside :not() is valid there, so the item is kept.
 const list = parseSelector(":is(#id:is(), .a)", true) ?? [];
 check("an empty nested list keeps the item's weight", list.length === 1 && list[0].specificity === 10000, JSON.stringify(list.map((x) => x.specificity)));
+// A valid item that can never match — contradictory ids, or an empty nested list inside a
+// complex argument — keeps its own weight, as a browser counts it.
+check("contradictory ids weigh their own", spec(":is(#a#b, .x)") === 20000, String(spec(":is(#a#b, .x)")));
+check("an empty list inside a complex argument weighs the argument", spec(":is(a b:is(), .x)") === 100, String(spec(":is(a b:is(), .x)")));
 const kept = parseSelector(":is(#id:not(:visited), .a)", true) ?? [];
 check(":not(:visited) stays valid in a DOM selector", kept.length === 2 && kept[0].specificity === 10100, JSON.stringify(kept.map((x) => x.specificity)));
 
