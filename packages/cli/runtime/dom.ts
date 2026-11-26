@@ -10568,9 +10568,15 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  const d = parent.sv[P.P_DISPLAY];
-  if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
-    d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
+  // A `display: contents` wrapper generates no box, so the text takes part in the formatting
+  // context of the nearest ancestor that does: that box decides whether whitespace renders.
+  let boxed: Node | null = parent;
+  while (boxed !== null && !boxed.isTextNode && boxed.sv[P.P_DISPLAY] === P.D_CONTENTS) boxed = boxed.parentNode;
+  if (boxed !== null) {
+    const d = boxed.sv[P.P_DISPLAY];
+    if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
+      d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
+  }
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
     if (a.firstLetterPseudo !== null || a.firstLetterFloat !== null) return true;
     // `dir=auto` (and a <bdi>) takes its direction from the text below it, and :dir() sees that.
@@ -12873,7 +12879,10 @@ export class HTMLInputElement extends HTMLElement {
   get list(): HTMLDataListElement | null {
     const id = this.getAttribute("list");
     if (id === null || id === "") return null;
-    const el = document.getElementById(id);
+    // The list is the one in the tree the field is in: a field inside a shadow tree finds the
+    // datalist beside it there rather than one in the page around the host.
+    const root = this.getRootNode();
+    const el = root instanceof ShadowRoot ? root.getElementById(id) : document.getElementById(id);
     return el instanceof HTMLDataListElement ? el : null;
   }
   /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
