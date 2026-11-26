@@ -13817,13 +13817,33 @@ export class HTMLTemplateElement extends HTMLElement {
  * has no DOMException class, so the error's message carries the name, as the other DOM errors
  * here do.
  */
+/** A selector a page wrote with its right tokens left off: the selector parser a browser runs
+ *  closes the blocks and strings that ran to the end of the text, and matches with them closed. */
+function closeSelectorAtEof(text: string): string {
+  const opens: string[] = [];
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") { i++; continue; }
+    if (quote !== "") { if (ch === quote) quote = ""; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "[") opens.push("]");
+    else if (ch === "(") opens.push(")");
+    else if (ch === "]" || ch === ")") opens.pop();
+  }
+  let out = text;
+  if (quote !== "") out += quote;
+  for (let k = opens.length - 1; k >= 0; k--) out += opens[k];
+  return out;
+}
+
 function parseSelectorArg(selector: string, method: string, owner: string): Selector[] {
   const where = `Failed to execute '${method}' on '${owner}': `;
   if (selector.trim() === "") {
     throw new Error("SyntaxError: " + where + "The provided selector is empty.");
   }
   const out: Selector[] = [];
-  for (const part of splitTopLevel(selector, ",")) {
+  for (const part of splitTopLevel(closeSelectorAtEof(selector), ",")) {
     const text = part.trim();
     // One selector of the list. A :is()/:where() expands into several selectors that mean the
     // same thing together, and a selector naming nothing parses to none of them.
