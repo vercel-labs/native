@@ -227,7 +227,13 @@ interface Simple {
 /** A complex selector inside :is()/:where(): its subject compound and the ancestors above it. */
 interface Frag { subject: Scan; chain: { scan: Scan; comb: number }[] }
 
-interface ScanGroup { where: boolean; args: Frag[] }
+interface ScanGroup {
+  where: boolean;
+  args: Frag[];
+  /** The most specific item the forgiving list dropped because it can match nothing here
+   *  (":visited"): it adds no alternative, but its weight still counts. */
+  dropped?: number;
+}
 
 /** A compound before :is()/:where() are expanded: its simple selectors, groups and :not()s. */
 interface Scan {
@@ -242,6 +248,10 @@ interface Scan {
   notSpec: number;
   /** :has() arguments, each a relative selector as it is stored on the compound. */
   has: string[];
+  /** The variants this compound expands to, remembered so a nested argument is expanded once
+   *  however often the scan is asked — the forgiving pass and the build both ask. */
+  expanded?: Variant[] | null;
+  expandedDom?: boolean;
   /** PE_NONE, or the pseudo-element the compound ends with. */
   pseudo: number;
   /** The name ::highlight(name) gives, or "" for the other pseudo-elements. */
@@ -283,8 +293,22 @@ function fragBuilds(frag: Frag, dom: boolean): boolean {
   return true;
 }
 
+/** Compounds scanned during the outer parse, so a nested argument is scanned once however many
+ *  passes ask about it (the forgiving pass, the specificity pass and the build). */
+const scanMemo = new Map<string, Scan | null>();
+
 /** Parses a compound (no combinators) into simple selectors, :is()/:where() and :not(). */
 function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false, dom: boolean = false, shadow: boolean = false): Scan | null {
+  const key = (inNot ? "n" : "") + (allowPseudo ? "p" : "") + (dom ? "d" : "") + (shadow ? "s" : "") + text;
+  const hit = scanMemo.get(key);
+  if (hit !== undefined) return hit;
+  if (scanMemo.size > 4096) scanMemo.clear();
+  const made = scanCompoundFresh(text, inNot, allowPseudo, dom, shadow);
+  scanMemo.set(key, made);
+  return made;
+}
+
+function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, dom: boolean, shadow: boolean): Scan | null {
   const simples: Simple[] = [];
   const groups: ScanGroup[] = [];
   const nots: Compound[] = [];
@@ -469,13 +493,19 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
           // The argument list is forgiving: an item this build can't match is dropped, as a
           // browser drops an item it can't parse, and a list left with nothing matches nothing.
           const frags: Frag[] = [];
+          let dropped = 0;
           for (const a of args) {
             if (a === "") continue;
             const f = scanFrag(a);
-            if (f === null || !fragBuilds(f, dom)) continue;
+            if (f === null || !fragBuilds(f, dom)) {
+              // An item that can match nothing adds no alternative, but :is() still weighs the
+              // most specific thing it lists.
+              dropped = Math.max(dropped, textSpec(a));
+              continue;
+            }
             frags.push(f);
           }
-          groups.push({ where: name === "where", args: frags });
+          groups.push({ where: name === "where", args: frags, dropped });
         }
       } else {
         simples.push({ kind: "pseudo", name, arg });
@@ -503,6 +533,14 @@ interface Variant { simples: Simple[]; nots: Compound[]; notSels: string[]; has:
 
 /** Every way the compound's :is()/:where() arguments can apply, as simple-selector lists. */
 function expandScan(scan: Scan, dom: boolean = false): Variant[] | null {
+  if (scan.expanded !== undefined && scan.expandedDom === dom) return scan.expanded;
+  const out = expandScanFresh(scan, dom);
+  scan.expanded = out;
+  scan.expandedDom = dom;
+  return out;
+}
+
+function expandScanFresh(scan: Scan, dom: boolean): Variant[] | null {
   let acc: Variant[] = [{ simples: scan.simples.slice(), nots: scan.nots.slice(), notSels: scan.notSels.slice(), has: scan.has.slice(), chain: [] }];
   for (const g of scan.groups) {
     const variants: Variant[] = [];
@@ -610,6 +648,19 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
   };
 }
 
+/** The specificity of a selector's text as written, even one that can match nothing here. */
+function textSpec(text: string): number {
+  const parts = splitComplex(text);
+  if (parts === null) return 0;
+  let spec = 0;
+  for (const c of parts.compounds) {
+    const s = scanCompound(c, false);
+    if (s === null) return 0;
+    spec += scanSpec(s);
+  }
+  return spec;
+}
+
 /** The selector's specificity: a*10000 + b*100 + c, with :is()/:not() taking their max argument. */
 function scanSpec(scan: Scan): number {
   // A pseudo-element counts as a type selector.
@@ -650,7 +701,7 @@ function scanSpec(scan: Scan): number {
   spec += hasSpec;
   for (const g of scan.groups) {
     if (g.where) continue;
-    let max = 0;
+    let max = g.dropped ?? 0;
     for (const a of g.args) {
       let s = scanSpec(a.subject);
       for (const c of a.chain) s += scanSpec(c.scan);
