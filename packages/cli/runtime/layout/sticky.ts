@@ -6,6 +6,7 @@ import { Node, document } from "../dom.ts";
 import { setStickyShiftHook } from "../sticky-hook.ts";
 import { display, len } from "./box-model.ts";
 import { isScrollContainer } from "./flex.ts";
+import { isTableInternal } from "./table.ts";
 
 /**
  * The scroller a sticky box sticks to — its nearest scrolling ancestor, or the root element, whose
@@ -22,8 +23,22 @@ function scrollerOf(el: Node): [Node | null, boolean] {
   return [null, false];
 }
 
-/** The box that constrains a sticky box: its nearest block container ancestor's content box. */
+/**
+ * The box that constrains a sticky box: its nearest block container ancestor's content box. A
+ * sticky table part — a row group, a row, a cell — is constrained by the table it belongs to
+ * instead: its row is only as tall as the cell itself, so a cell bounded by its row could never
+ * stick (CSS Position 3, sticky positioning of table parts).
+ */
 function containingBox(el: Node): Node | null {
+  if (isTableInternal(display(el))) {
+    for (let a = el.parentElement; a !== null; a = a.parentElement) {
+      const d = display(a);
+      // A sticky ancestor already carries this part with it (a row that sticks takes its cells
+      // along), so the part is bounded by that ancestor rather than by the table as well.
+      if (a.sv[P.P_POSITION] === P.POS_STICKY) return a;
+      if (d === P.D_TABLE || d === P.D_INLINE_TABLE) return a;
+    }
+  }
   for (let a = el.parentElement; a !== null; a = a.parentElement) {
     const d = display(a);
     if (d !== P.D_INLINE && d !== P.D_NONE) return a;
