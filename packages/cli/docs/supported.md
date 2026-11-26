@@ -961,7 +961,12 @@ Native SDK supports a growing subset of the web platform. Anything outside it is
   take the event with `preventDefault()`. A cut clears the field's selection, and a paste puts the clipboard's text and
   markup in the payload and then inserts its text at a field's caret unless the handler took the event (an input takes
   it on one line, a textarea keeps its newlines). `document.execCommand("copy" | "cut" | "paste" | "selectAll" | "insertText")`
-  runs those commands, and `queryCommandSupported()` answers for them. The clipboard is the system's: the macOS host
+  runs those commands, and `queryCommandSupported()` answers for them. In a contenteditable host
+  it also runs `bold`, `italic`, `underline`, `formatBlock`, `createLink`, `removeFormat`, `undo`
+  and `redo`; `queryCommandState()` reports whether the caret is bold, italic, underlined, in a
+  link or in a list, and `queryCommandEnabled()` answers for a command. `undo` and `redo` walk
+  snapshots of the host's markup taken before each editing command and keystroke, not a browser's
+  own undo stack. The clipboard is the system's: the macOS host
   reads and writes NSPasteboard, and the headless Linux host keeps it in files, `NATIVE_PASTEBOARD` naming the text one.
 - **IndexedDB:** `indexedDB.open(name, version)`, `deleteDatabase(name)` and `databases()`, with `upgradeneeded` (and `blocked`) when a version is newer, `versionchange` on the open connections, and error/success requests. A database holds object stores with an inline or out-of-line key path and an optional key generator; `add`, `put`, `get`, `getKey`, `getAll`, `getAllKeys`, `count`, `delete` and `clear` run in a transaction (`readonly`, `readwrite`, or the upgrade's `versionchange`), which reports `complete`, `abort` or `error` and rolls its writes back when it aborts. `IDBKeyRange` bounds the multi-record reads, and keys of every kind — numbers, dates, strings, buffers and arrays — compare in the standard's order. Values are structured-cloned, dates, buffers and Blobs included. Each database is a SQLite file in the app's own data directory, beside its localStorage file. Indexes (`createIndex`, `index`, `deleteIndex`, `indexNames`) read a store's records by a second key in index-key order, and a cursor (`openCursor`, `openKeyCursor`) over a store or an index walks them in `next`, `nextunique`, `prev` or `prevunique` order through `continue()`, `continue(key)`, `advance()` and, on a value cursor, `update()` and `delete()`.
 - **Drag and drop:** a press that moves on an element that drags — `draggable="true"`, or a link or an image with no

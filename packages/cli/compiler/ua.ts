@@ -46,7 +46,7 @@ dialog:not([open]) { display: none; }
 dialog { display: block; }
 dialog { position: fixed; inset: 0; margin: auto; width: fit-content; height: fit-content;
   border: solid; padding: 1em; background-color: #ffffff; color: #000000; }
-dialog::backdrop { display: none; background-color: rgba(0, 0, 0, 0.1); }
+dialog::backdrop { display: block; position: fixed; inset: 0; background-color: rgba(0, 0, 0, 0.1); }
 /* Keyboard focus shows the system's focus ring, as Chrome's own UA sheet asks for with an auto
    outline; an author's outline wins over this like any other UA declaration. */
 :focus-visible { outline-style: auto; outline-width: 1px; }

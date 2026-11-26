@@ -3,8 +3,9 @@
 // can share them; the DOM reaches the window object through document.defaultView.
 
 import type { Element, EventListener, EventListenerOrEventListenerObject, ListenerOptions, ScrollToOptions, Selection, WindowEventMap } from "./dom.ts";
-import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, setCurrentEvent, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
+import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, hasTransientActivation, consumeUserActivation, setCurrentEvent, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
 import { CSS } from "./cssom.ts";
+import { rasterScale } from "./device.ts";
 import * as domIface from "./dom.ts";
 import * as highlightIface from "./highlights.ts";
 import * as intersectIface from "./intersection.ts";
@@ -20,7 +21,7 @@ import { localStorage, sessionStorage } from "./storage.ts";
 import { ServiceWorkerContainer } from "./updates.ts";
 import { invalidatePaint, invalidateStyle, layoutEpoch, markFullPaint } from "./invalidation.ts";
 import { viewport } from "./viewport.ts";
-import { hostBackingScale, hostQuit, hostPostMessage, hostWindowBlur, hostWindowClose, hostWindowFocus, hostWindowFrame, hostWindowId, hostWindowOpen, hostWindowSetFrame } from "./host.ts";
+import { hostQuit, hostPostMessage, hostWindowBlur, hostWindowClose, hostWindowFocus, hostWindowFrame, hostWindowId, hostWindowOpen, hostWindowSetFrame } from "./host.ts";
 import { mediaMatches, refreshSystemSettings } from "./media.ts";
 import { setTargetText } from "./target-text.ts";
 import { Clipboard } from "./clipboard.ts";
@@ -482,7 +483,10 @@ export class Window {
     return viewport.h;
   }
   get devicePixelRatio(): number {
-    const scale = hostBackingScale();
+    // The scale the picture is drawn at, not just the window's: a headless run rasterises its
+    // snapshot at 2x, and a canvas sized from a devicePixelRatio of 1 would be drawn at half that
+    // resolution and enlarged — soft, where the browser's own canvas is crisp.
+    const scale = rasterScale();
     return scale >= 1 ? scale : 1;
   }
 
@@ -566,9 +570,30 @@ export class Window {
       if (href !== "") this.location.href = href;
       return proxyFor(hostWindowId(), this.name);
     }
+    // A window this page already has open under that name is focused and handed back: reusing a
+    // named context is not a popup, so it needs no gesture, as in a browser.
+    if (target !== "" && target !== "_blank") {
+      const existing = namedWindows.get(target);
+      if (existing !== undefined) {
+        const proxy = proxies.get(existing);
+        if (proxy !== undefined && !proxy.closed) {
+          hostWindowFocus(existing);
+          return proxy;
+        }
+        namedWindows.delete(target);
+      }
+    }
+    // A page opens a new window only while a user gesture counts, as a browser's popup blocker
+    // has it: outside one the call does nothing and answers null.
+    if (!hasTransientActivation()) return null;
     const id = hostWindowOpen(route, target === "_blank" ? "" : target, features === undefined ? "" : features);
     if (id < 0) return null;
-    return proxyFor(id, target === "_blank" ? "" : target);
+    // The gesture that opened this window is spent, as a browser spends a transient activation on
+    // one popup.
+    consumeUserActivation();
+    const openedName = target === "_blank" ? "" : target;
+    if (openedName !== "") namedWindows.set(openedName, id);
+    return proxyFor(id, openedName);
   }
 
   /**
@@ -871,6 +896,8 @@ setWindowEventHost(window);
 
 /** The handles this page has on other windows, by id: the ones it opened, and its opener. */
 const proxies: Map<number, WindowProxy> = new Map();
+/** The windows this page has open by name, so a named open reuses one instead of opening again. */
+const namedWindows: Map<string, number> = new Map();
 
 /** The handle for a window id, made once and shared: two handles on one window are the same. */
 function proxyFor(id: number, name: string): WindowProxy {
