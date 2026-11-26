@@ -7,7 +7,7 @@
   <a href="https://www.npmjs.com/package/@native-sdk/cli"><img alt="npm downloads per month: @native-sdk/cli" src="https://img.shields.io/npm/dm/%40native-sdk%2Fcli.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
 </p>
 
-Native SDK builds native apps from HTML, CSS and TypeScript. Its compiler, the `native` CLI, compiles the HTML and CSS ahead of time, and [scriptc](https://scriptc.dev) compiles the TypeScript, both your app's and the SDK's runtime, to machine code. The result is a small native app bundle — an executable with the images, fonts and other files it reads — that runs without a browser, webview or JavaScript engine.
+HTML, CSS and TypeScript compiled into native apps, without Node.js. Native SDK's compiler, the `native` CLI, compiles the HTML and CSS ahead of time, and [scriptc](https://scriptc.dev) compiles the TypeScript, both your app's and the SDK's runtime, to machine code. The result is a small native app bundle — an executable with the images, fonts and other files it reads — that runs without a browser, webview or JavaScript engine.
 
 Native SDK is experimental and supports a subset of HTML, CSS and the DOM. Run `native check` on an app to see what it uses that isn't supported, and see [supported features](packages/cli/docs/supported.md) for details. It builds on macOS, Linux and Windows: the windowed host on macOS, the Win32 host on Windows, and the same pages run headlessly on Linux for the web-platform tests.
 

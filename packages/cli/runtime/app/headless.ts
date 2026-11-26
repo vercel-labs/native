@@ -17,7 +17,7 @@ import { publishTitlebarArea } from "./titlebar.ts";
 import { pointer, pointerContext, pointerDown, pointerMove, pointerUp } from "./pointer.ts";
 import { dropFilesAt, fileFromPath } from "./dnd.ts";
 import { fadeScrollbars, wheel } from "./scroll.ts";
-import { setSnapshotScale } from "../device.ts";
+import { SNAPSHOT_SCALE, setSnapshotScale } from "../device.ts";
 import { compositorStats } from "../compositor.ts";
 
 // ---------------------------------------------------------------------------
@@ -361,9 +361,6 @@ async function runSteps(): Promise<void> {
   }
 }
 
-/** The device scale a headless snapshot draws at: 2, as a Retina display's snapshot would. */
-const SNAPSHOT_SCALE = 2;
-
 /**
  * Waits for every image the page asked for to finish decoding, and for the loads that wait on
  * them: the host makes the pixels on its own threads, and a snapshot is the page as it settles,
@@ -403,13 +400,14 @@ async function snapshot(path: string): Promise<void> {
 export function run(): void {
   // The page's menu markup becomes the window's menu bar before anything is shown.
   installApplicationMenu();
-  // Vector content rasterizes at the scale the snapshot draws at, so it lands on whole device
-  // pixels instead of being upscaled with the rest of the frame.
-  setSnapshotScale(SNAPSHOT_SCALE);
   const snap = process.env.NATIVE_SNAPSHOT;
   const composited = process.env.NATIVE_SNAPSHOT_COMPOSITED;
   const wantsSnapshot = (snap !== undefined && snap !== "") || (composited !== undefined && composited !== "");
   const headless = wantsSnapshot || process.env.NATIVE_STEPS !== undefined;
+  // Vector content rasterizes at the scale the snapshot draws at, so it lands on whole device
+  // pixels instead of being upscaled with the rest of the frame. Only a headless run records it:
+  // an ordinary window keeps the display's own backing scale (and devicePixelRatio 1 at 1x).
+  if (headless) setSnapshotScale(SNAPSHOT_SCALE);
   if (headless) {
     publishTitlebarArea(config.windowOptions, config.width, false);
     // The run has no window to open: its frame is the page's size, at the screen's corner.

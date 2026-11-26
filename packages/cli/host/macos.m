@@ -7683,12 +7683,26 @@ static NSArray *ax_children(void) {
 // The display's period in milliseconds, and how long until its next refresh, both read from the
 // display link; zero until a window with a screen exists.
 static double g_refresh_ms = 0;
-static double g_next_refresh_ms = 0;
+// The display's next target refresh, on CACurrentMediaTime's clock. A window that doesn't present
+// through GL starts its frames on this cadence; a GL window's own swap already waits for it.
+static double g_next_target = 0;
 // The display link itself, kept for as long as the window: it fires on the main run loop.
 static id g_display_link = nil;
 
 double host_refresh_interval(void) { return g_refresh_ms; }
-double host_until_refresh(void) { return g_next_refresh_ms; }
+double host_until_refresh(void) {
+  double until = g_next_target - CACurrentMediaTime();
+  return until > 0 ? until * 1000.0 : 0;
+}
+
+/** Whether a canvas in the window presents through GL, whose swap waits for the display itself. */
+int32_t host_gl_window(void) {
+  for (int i = 0; i < g_canvas_count; i++) {
+    Canvas *c = g_canvases[i];
+    if (c != NULL && c->gl != NULL) return 1;
+  }
+  return 0;
+}
 
 @implementation NativeView
 - (void)refreshTick:(id)link {
@@ -7698,9 +7712,7 @@ double host_until_refresh(void) { return g_next_refresh_ms; }
     CADisplayLink *dl = (CADisplayLink *)link;
     double period = dl.targetTimestamp - dl.timestamp;
     if (period > 0 && period < 0.1) g_refresh_ms = period * 1000.0;
-    double now = CACurrentMediaTime();
-    double until = dl.targetTimestamp - now;
-    g_next_refresh_ms = until > 0 ? until * 1000.0 : 0;
+    g_next_target = dl.targetTimestamp;
   }
 }
 - (BOOL)isFlipped { return YES; }
@@ -8288,7 +8300,7 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
       NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
       if (screen != nil && screen.maximumFramesPerSecond > 0) {
         g_refresh_ms = 1000.0 / (double)screen.maximumFramesPerSecond;
-        g_next_refresh_ms = 0;
+        g_next_target = 0;
       }
       if (@available(macOS 14.0, *)) {
         CADisplayLink *link = [g_view displayLinkWithTarget:g_view selector:@selector(refreshTick:)];

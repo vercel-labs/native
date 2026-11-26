@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { deflateSync } from "node:zlib";
 
 const require = createRequire(join(import.meta.dirname, "..", "..", "..", "packages", "cli", "package.json"));
@@ -31,6 +32,45 @@ const MIME = {
   ".webm": "video/webm",
   ".wasm": "application/wasm",
 };
+
+/**
+ * Which GL path Chrome draws with here: its own when the machine has one, the software rasterizer
+ * only when it doesn't. A software-rendered cube is not the picture the machine's browser draws,
+ * and comparing native against it measures the rasterizer rather than the page.
+ */
+let glChoice = null;
+export function chromeGL(chrome) {
+  if (glChoice !== null) return glChoice;
+  const dir = mkdtempSync(join(tmpdir(), "gate-gl-"));
+  try {
+    // The probe is a page on disk, opened the way the examples are: a data: URL answered "WebGL 2"
+    // on a Windows machine where a file: page gets no context, which chose the hardware path for a
+    // browser that had none.
+    const probePath = join(dir, "gl.html");
+    writeFileSync(
+      probePath,
+      "<!doctype html><canvas id=c></canvas><script>document.documentElement.setAttribute('data-gate-gl',document.getElementById('c').getContext('webgl2')?'WEBGL2':'NONE')</script>",
+    );
+    const probe = require("node:child_process").spawnSync(chrome, [
+      "--headless=new",
+      "--no-sandbox",
+      "--no-first-run",
+      "--disable-dev-shm-usage",
+      "--allow-file-access-from-files",
+      `--user-data-dir=${join(dir, "profile")}`,
+      "--virtual-time-budget=1000",
+      "--dump-dom",
+      pathToFileURL(probePath).href,
+    ], { encoding: "utf8", timeout: 60_000, maxBuffer: 8 * 1024 * 1024 });
+    // The attribute, not the literal: the page's own script source contains "WEBGL2" too.
+    glChoice = /data-gate-gl="WEBGL2"/.test(probe.stdout ?? "")
+      ? { gl: "hardware", flags: [] }
+      : { gl: "swiftshader", flags: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"] };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  return glChoice;
+}
 
 /** Chrome, from CHROME_BIN, the gate's own download directory, or an installed browser. */
 export function findChrome(out) {
@@ -59,7 +99,7 @@ function findBinary(dir, depth = 8) {
     } catch {
       continue;
     }
-    if (stat.isFile() && (entry === "chrome" || entry === "chrome-headless-shell" || entry === "Google Chrome for Testing")) return path;
+    if (stat.isFile() && ["chrome", "chrome.exe", "chrome-headless-shell", "chrome-headless-shell.exe", "Google Chrome for Testing", "Google Chrome for Testing.exe"].includes(entry)) return path;
     if (stat.isDirectory()) {
       const found = findBinary(path, depth - 1);
       if (found !== null) return found;
@@ -140,7 +180,9 @@ function describe(err) {
 }
 
 async function buildForBrowser(entry, outfile) {
-  const { build } = await import(require.resolve("esbuild"));
+  // The path is imported as a file URL: a bare Windows path (C:\...) is not a valid module
+  // specifier for the ESM loader.
+  const { build } = await import(pathToFileURL(require.resolve("esbuild")).href);
   entry = resolve(entry);
   outfile = resolve(outfile);
   await build({
@@ -164,13 +206,19 @@ async function buildForBrowser(entry, outfile) {
  * page is loaded from disk with its entry bundled as one classic script, so nothing depends on a
  * server: Chrome will not navigate to a loopback address in a sandbox without a network service.
  */
-export async function chromeShot(chrome, exampleDir, { width, height, scale, outPng, virtualTimeMs = 300 }) {
+export async function chromeShot(chrome, exampleDir, { width, height, scale, outPng, virtualTimeMs = 300, gl = null }) {
   const work = mkdtempSync(join(tmpdir(), "gate-chrome-"));
   try {
     // The whole app, assets and public files included, so the browser sees what the bundle holds.
     copyTree(resolve(exampleDir), work, new Set(["node_modules", ".native", ".git"]));
     const page = await preparePage(resolve(exampleDir), work);
-    writeFileSync(join(work, "index.html"), page.html);
+    // The page's animation clock starts at its first painted frame, which is after the load: record
+    // that time so the native run can be stepped from the same point rather than from zero.
+    const clock = `<script>requestAnimationFrame(function (t) { document.documentElement.setAttribute("data-gate-t0", String(t)); try { parent.postMessage({ "gate-t0": t }, "*"); } catch (e) {} });</script>`;
+    const pageHtml = /<head[^>]*>/i.test(page.html)
+      ? page.html.replace(/<head[^>]*>/i, (head) => head + clock)
+      : clock + page.html;
+    writeFileSync(join(work, "index.html"), pageHtml);
     // Chrome will not make a window narrower than 500 CSS px: a narrower page is laid out 500
     // wide and the shot is still saved at the requested size, so the page is cropped and every
     // run of text lands where the 500-wide layout put it. The page gets the viewport it asks for
@@ -179,19 +227,21 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
     if (width < 500) {
       writeFileSync(
         join(work, "wrapper.html"),
+        // The framed page writes its first-frame time on its own document and posts it up; the
+        // wrapper copies it either way, so the dumped DOM carries the captured page's time, from
+        // this launch, rather than a time read from another launch held to be the same.
         `<!doctype html><html><body style="margin:0;overflow:hidden;background:#000">` +
+          `<script>addEventListener("message", function (e) { try { var v = e && e.data && e.data["gate-t0"]; if (v !== undefined) document.documentElement.setAttribute("data-gate-t0", String(v)); } catch (err) {} });` +
+          `setInterval(function () { try { var f = document.querySelector("iframe"); var d = f && f.contentDocument; var v = d && d.documentElement.getAttribute("data-gate-t0"); if (v) document.documentElement.setAttribute("data-gate-t0", v); } catch (e) {} }, 16);</script>` +
           `<iframe src="index.html" scrolling="no" style="border:0;display:block;width:${width}px;height:${height}px"></iframe>` +
           `</body></html>`,
       );
       target = join(work, "wrapper.html");
     }
-    const r = require("node:child_process").spawnSync(chrome, [
+    const glPath = gl ?? chromeGL(chrome);
+    const args = [
       "--headless=new",
-      // Headless Chrome ships without a GPU; ask ANGLE for its software rasterizer so the page's
-      // WebGL 2 context exists, which is what the WebGL and three.js examples draw with.
-      "--use-gl=angle",
-      "--use-angle=swiftshader",
-      "--enable-unsafe-swiftshader",
+      ...glPath.flags,
       "--hide-scrollbars",
       "--no-first-run",
       "--no-default-browser-check",
@@ -203,10 +253,25 @@ export async function chromeShot(chrome, exampleDir, { width, height, scale, out
       `--force-device-scale-factor=${scale}`,
       `--window-size=${width},${height}`,
       `--virtual-time-budget=${virtualTimeMs}`,
-      `--screenshot=${resolve(outPng)}`,
-      `file://${target}`,
-    ], { encoding: "utf8", timeout: 90_000, maxBuffer: 32 * 1024 * 1024 });
-    return { ok: existsSync(outPng), status: r.status, stderr: (r.stderr ?? "").slice(-2000), ...page };
+    ];
+    const run = (extra) => require("node:child_process").spawnSync(chrome, [...args, ...extra], {
+      encoding: "utf8",
+      timeout: 90_000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+    // One launch carries both: the screenshot and the clock marker come from the same page load,
+    // so native is stepped from the clock of the page that was captured.
+    const clockPattern = /data-gate-t0="([0-9.]+)"/;
+    const r = run([`--screenshot=${resolve(outPng)}`, "--dump-dom", pathToFileURL(target).href]);
+    const t0 = clockPattern.exec(r.stdout ?? "");
+    return {
+      ok: existsSync(outPng),
+      status: r.status,
+      stderr: (r.stderr ?? "").slice(-2000),
+      gl: glPath.gl,
+      t0: t0 === null ? null : Number(t0[1]),
+      ...page,
+    };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
