@@ -3439,7 +3439,9 @@ function autoDirection(el: Element): number {
  */
 function applyDirHint(el: Element): void {
   let dir = el.getAttribute("dir");
-  if (dir === null && el.localName === "bdi") dir = "auto";
+  // A <bdi> is auto unless its dir names a direction: an invalid value is ignored, so the
+  // element keeps the auto default rather than inheriting.
+  if (el.localName === "bdi" && (dir === null || !/^(ltr|rtl|auto)$/i.test(dir.trim()))) dir = "auto";
   if (dir === null) return;
   const v = dir.trim().toLowerCase();
   let rtl: boolean;
@@ -3861,7 +3863,10 @@ function runtimeMatches(test: Element, pseudo: number): RuntimeMatch[] {
  */
 function elementDirection(el: Element): number {
   const dir = el.getAttribute("dir");
-  const value = dir !== null ? dir.trim().toLowerCase() : (el.localName === "bdi" ? "auto" : "");
+  let value = dir !== null ? dir.trim().toLowerCase() : "";
+  // A <bdi> is auto unless its dir names a direction: an invalid value is ignored, as browsers
+  // ignore it, so the element takes its direction from its contents.
+  if (el.localName === "bdi" && value !== "rtl" && value !== "ltr" && value !== "auto") value = "auto";
   if (value === "rtl") return P.DIR_RTL;
   if (value === "ltr") return P.DIR_LTR;
   if (value === "auto") {
