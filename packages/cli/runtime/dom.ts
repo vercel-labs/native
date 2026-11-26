@@ -6980,6 +6980,24 @@ function labelableDescendant(root: Node): HTMLElement | null {
   return null;
 }
 
+/** The options a select lists: its descendant options, less the subtrees the HTML form-elements
+ *  rules leave out — an option's own, a datalist's, an hr's, a nested select's, and an optgroup
+ *  inside another optgroup. A wrapper element around them is transparent. */
+function collectSelectOptions(root: Node, out: HTMLOptionElement[], inOptgroup: boolean): void {
+  for (const c of root.kids) {
+    if (!c.isElementNode || c.pseudoKind !== P.PE_NONE) continue;
+    const e = c as Element;
+    if (e instanceof HTMLOptionElement) { out.push(e); continue; }
+    if (e instanceof HTMLSelectElement || e instanceof HTMLDataListElement || e.localName === "hr") continue;
+    if (e.localName === "optgroup") {
+      if (inOptgroup) continue;
+      collectSelectOptions(e, out, true);
+      continue;
+    }
+    collectSelectOptions(e, out, inOptgroup);
+  }
+}
+
 /** Every element under `root`, in document order. */
 function collectElements(root: Node, out: Element[]): void {
   for (const c of root.kids) {
@@ -8136,14 +8154,45 @@ function disabledBits(el: Element): number {
   // A disabled fieldset disables the controls inside it, and a disabled option group or select
   // disables the options in it.
   let off = controlDisabled(el as HTMLElement);
-  if (!off && el.localName === "option") {
+  if (!off && el.localName === "option") off = optionDisabled(el as HTMLOptionElement);
+  // An option group is disabled with the select it belongs to, as its options are.
+  if (!off && el.localName === "optgroup") {
     let a = el.parentElement;
-    while (a !== null && !off) {
-      if (a.localName === "optgroup" || a.localName === "select") off = attributeFlag(a, "disabled");
+    while (a !== null) {
+      const n = a.localName;
+      if (n === "select") { off = attributeFlag(a, "disabled"); break; }
+      // A group keeps the state of the select it is directly in: one inside another group, an
+      // option, an hr or a datalist takes after none of them.
+      if (n === "optgroup" || n === "option" || n === "hr" || n === "datalist") break;
       a = a.parentElement;
     }
   }
   return off ? P.S_DISABLED : P.S_ENABLED;
+}
+
+/** Whether an option is disabled: by its own attribute, or by the option group or select the
+ *  first one up the chain past a wrapper. An option nested in an option, an hr or a datalist
+ *  takes after none of them. */
+function optionDisabled(el: HTMLOptionElement): boolean {
+  if (attributeFlag(el, "disabled")) return true;
+  // Only the option's own group counts, and a disabled select reaches the options it lists;
+  // an option nested in a second group, an option, an hr or a datalist is not one of them.
+  let groups = 0;
+  let a = el.parentElement;
+  while (a !== null) {
+    const n = a.localName;
+    if (n === "optgroup") {
+      groups++;
+      if (groups > 1) return false;
+      if (attributeFlag(a, "disabled")) return true;
+    } else if (n === "select") {
+      return attributeFlag(a, "disabled");
+    } else if (n === "option" || n === "hr" || n === "datalist") {
+      return false;
+    }
+    a = a.parentElement;
+  }
+  return false;
 }
 
 function requiredBits(el: Element): number {
@@ -8207,8 +8256,11 @@ function validBits(el: Element): number {
   // An out-of-range value fails the field's constraints even though validity only reports the
   // constraints the form code checks, so the range state decides here too.
   if ((rangeBits(el) & P.S_OUT_OF_RANGE) !== 0) return P.S_INVALID;
-  const field = el as HTMLInputElement;
-  return field.validity.valid ? P.S_VALID : P.S_INVALID;
+  // A select and a textarea report constraints of their own: only an input's validity would be
+  // the wrong interface to ask.
+  const valid = el instanceof HTMLInputElement || el instanceof HTMLSelectElement ||
+    el instanceof HTMLTextAreaElement ? el.validity.valid : true;
+  return valid ? P.S_VALID : P.S_INVALID;
 }
 
 function focusWithinBits(el: Element): number {
@@ -8845,7 +8897,10 @@ export class HTMLOptionElement extends HTMLElement {
   }
   get form(): HTMLFormElement | null {
     const s = this.selectElement();
-    return s === null ? null : formOwnerFor(s);
+    // An option the select doesn't list — one nested in an hr, a datalist or another option — has
+    // no form of its own, as the option list says.
+    if (s === null || s.options.indexOf(this) < 0) return null;
+    return formOwnerFor(s);
   }
   /** The select this option is in, or null when it isn't in a select's list. */
   selectElement(): HTMLSelectElement | null {
@@ -9028,9 +9083,7 @@ export class HTMLSelectElement extends HTMLElement {
   /** The options in the select, including those inside option groups, in document order. */
   get options(): HTMLOptionElement[] {
     const out: HTMLOptionElement[] = [];
-    const all: Element[] = [];
-    collectElements(this, all);
-    for (const e of all) if (e instanceof HTMLOptionElement) out.push(e);
+    collectSelectOptions(this, out, false);
     return out;
   }
   get length(): number {
@@ -9174,6 +9227,19 @@ export class HTMLSelectElement extends HTMLElement {
     const option = this.item(index);
     if (option !== null) this.removeChild(option);
   }
+  /** The placeholder label option: the first option of a drop-down select when its value is
+   *  empty and no option group holds it. A required select fails validation while it shows one. */
+  get placeholderOption(): HTMLOptionElement | null {
+    if (this.multiple || this.size > 1) return null;
+    const options = this.options;
+    if (options.length === 0) return null;
+    const first = options[0];
+    if (first.value !== "") return null;
+    for (let a = first.parentElement; a !== null && a !== this; a = a.parentElement) {
+      if (a.localName === "optgroup") return null;
+    }
+    return first;
+  }
   /** Whether `option` is shown as selected, with the default a browser picks when nothing says. */
   isSelected(option: HTMLOptionElement): boolean {
     const options = this.options;
@@ -9193,7 +9259,7 @@ export class HTMLSelectElement extends HTMLElement {
     }
     if (this.multiple) return option.defaultSelected;
     for (let i = 0; i < options.length; i++) if (options[i].defaultSelected) return index === i;
-    for (let i = 0; i < options.length; i++) if (!options[i].disabled) return index === i;
+    for (let i = 0; i < options.length; i++) if (!optionDisabled(options[i])) return index === i;
     return false;
   }
   /** Whether the select takes part in validation: a disabled one, or one a disabled fieldset
@@ -9205,7 +9271,11 @@ export class HTMLSelectElement extends HTMLElement {
   get validity(): ValidityState {
     const state = new ValidityState();
     state.customError = this.customMessage !== "";
-    state.valueMissing = this.willValidate && this.required && this.selectedIndex < 0;
+    if (this.willValidate && this.required) {
+      const placeholder = this.placeholderOption;
+      state.valueMissing = this.selectedIndex < 0 ||
+        (placeholder !== null && this.isSelected(placeholder));
+    }
     return state;
   }
   get validationMessage(): string {
