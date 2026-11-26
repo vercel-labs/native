@@ -7730,6 +7730,9 @@ interface ClickActivation {
   checked: boolean;
   indeterminate: boolean;
   groupPrev: HTMLInputElement | null;
+  /** Whether the click changed the control at all: a radio that was already checked's click
+   *  sends no input or change event. */
+  changed: boolean;
 }
 
 /** The state a click activates on a checkbox or radio, applied before the click event runs. */
@@ -7739,7 +7742,7 @@ function preClickActivate(target: Node): ClickActivation | null {
     if (n instanceof HTMLInputElement) {
       const kind = controlKind(n.type);
       if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
-        const act: ClickActivation = { el: n, checked: n.checked, indeterminate: n.indeterminate, groupPrev: null };
+        const act: ClickActivation = { el: n, checked: n.checked, indeterminate: n.indeterminate, groupPrev: null, changed: false };
         if (kind === CONTROL_RADIO) {
           if (!n.checked) {
             // A radio's click takes the group's checkedness: the one that had it is unchecked
@@ -7752,10 +7755,15 @@ function preClickActivate(target: Node): ClickActivation | null {
               o.checked = false;
             }
             n.checked = true;
+            act.changed = true;
           }
         } else {
+          // A half-checked box goes the rest of the way to checked, and clearing the half state
+          // is a change of its own.
+          const next = n.indeterminate ? true : !n.checked;
+          act.changed = next !== n.checked || n.indeterminate;
           n.indeterminate = false;
-          n.checked = !n.checked;
+          n.checked = next;
         }
         return act;
       }
@@ -7769,6 +7777,8 @@ function preClickActivate(target: Node): ClickActivation | null {
 
 /** The input and change events a completed click activation sends. */
 function finishClickActivation(act: ClickActivation): void {
+  // A click that left the control as it was — a radio that was already checked — sends nothing.
+  if (!act.changed) return;
   dispatch(trusted(new Event("input", { bubbles: true })), act.el);
   dispatch(trusted(new Event("change", { bubbles: true })), act.el);
 }
