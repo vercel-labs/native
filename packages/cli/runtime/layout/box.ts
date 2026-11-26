@@ -919,7 +919,6 @@ export function layoutRoot(root: Node): void {
   if (!incremental.on) {
     bumpSizeCache();
     layoutRootPass(root);
-    growTransformedOverflow(root);
     layoutPasses.full++;
     return;
   }
@@ -930,7 +929,6 @@ export function layoutRoot(root: Node): void {
     try {
       bumpSizeCache();
       layoutRootPass(root);
-      growTransformedOverflow(root);
     } finally {
       incremental.on = true;
     }
@@ -958,11 +956,9 @@ export function layoutRoot(root: Node): void {
   if (relayoutDirtyRoots(root)) {
     layoutPasses.local++;
     placeAndClamp(root);
-    growTransformedOverflow(root);
   } else {
     layoutPasses.full++;
     layoutRootPass(root);
-    growTransformedOverflow(root);
     // The pass placed every positioned box; the sets still follow the boxes that changed.
     updateBoxSets(root);
     boxChanges.placement.length = 0;
@@ -1117,6 +1113,7 @@ function placeAndClamp(root: Node): void {
     boxChanges.placement.length = 0;
     resetNaturalSizes(root);
     regrowAll(root);
+    growTransformedOverflow(root);
     clampScrollOf(root);
     for (const el of scrollerSet) if (rendered(el, root)) clampScrollOf(el);
     return;
@@ -1135,6 +1132,7 @@ function placeAndClamp(root: Node): void {
     }
   }
   if (place || settleLayouts()) regrowAll(root);
+  growTransformedOverflow(root);
   clampScrollOf(root);
   for (const el of scrollerSet) if (rendered(el, root)) clampScrollOf(el);
 }
@@ -1214,5 +1212,9 @@ function layoutRootPass(root: Node): void {
   // ancestors' scroll extents, which a reused layout still holds from the last time.
   if (incremental.on) placeAfterReuse(root);
   else placeNestedOutOfFlow(root);
+  // A transform's reach grows the ancestors' scroll extents, and the scroll offsets are clamped
+  // against those extents: grow them first, or a scroll into a translated child snaps back to the
+  // untransformed content on the next layout.
+  growTransformedOverflow(root);
   clampScroll(root);
 }
