@@ -404,6 +404,37 @@ const RUNNER_CACHE = join(homedir(), ".cache", "native", "wpt-runners");
 const SLOTS_DIR = join(homedir(), ".cache", "native", "wpt-slots");
 
 /**
+ * Keeps the compiled-runner cache within NATIVE_WPT_CACHE_MB (default 8 GB). A run builds many
+ * runners of a few hundred megabytes each, and a machine that runs the suite repeatedly fills its
+ * volume with them until a run is killed for disk. The oldest entries go first; a build that
+ * finished moments ago is the one a rerun would hit, so the newest always stay.
+ */
+function pruneRunnerCache(): void {
+  if (!existsSync(RUNNER_CACHE)) return;
+  const entries: { path: string; size: number; at: number }[] = [];
+  let total = 0;
+  for (const name of readdirSync(RUNNER_CACHE)) {
+    const path = join(RUNNER_CACHE, name);
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) continue;
+      entries.push({ path, size: st.size, at: st.mtimeMs });
+      total += st.size;
+    } catch {}
+  }
+  const max = Math.max(256, Number(process.env.NATIVE_WPT_CACHE_MB ?? 8192)) * 1024 * 1024;
+  if (total <= max) return;
+  entries.sort((a, b) => a.at - b.at);
+  for (const entry of entries) {
+    if (total <= max) break;
+    try {
+      rmSync(entry.path, { force: true });
+      total -= entry.size;
+    } catch {}
+  }
+}
+
+/**
  * How a runner is compiled. The dev posture is -O0 with scriptc's cached LLVM object shards, so
  * every batch after the first reuses the runtime's shards instead of optimizing them again: a
  * release build spends minutes optimizing the same runtime for every batch, which is most of a
@@ -1159,6 +1190,7 @@ async function run(args: string[]): Promise<void> {
     }
   }));
   releaseSlot();
+  pruneRunnerCache();
   process.stderr.write(`\nnative wpt: compiled runners: ${cacheStats.misses} built, ${cacheStats.hits} reused from ${relative(process.cwd(), RUNNER_CACHE) || RUNNER_CACHE}\n`);
 
   for (const r of runnable) {
