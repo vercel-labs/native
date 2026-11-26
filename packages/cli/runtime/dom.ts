@@ -6927,7 +6927,8 @@ function collectFormEntries(form: HTMLFormElement, data: FormData): void {
       if (type === "checkbox" || type === "radio") {
         if (node.checked) data.append(name, node.value);
       } else if (type === "file") {
-        for (const file of node.files) data.append(name, file);
+        const files = node.files;
+        if (files !== null) for (const file of files) data.append(name, file);
       } else if (type !== "submit" && type !== "reset" && type !== "button" && type !== "image") {
         data.append(name, node.value);
       }
@@ -10567,11 +10568,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -12349,6 +12346,21 @@ function parseFloatingPointNumber(text: string): number {
   return isFinite(n) ? n : NaN;
 }
 
+/** An email field's value: its newlines are stripped and the ends trimmed, and a multiple field
+ *  also trims each address. */
+function sanitizeEmailText(text: string, multiple: boolean): string {
+  const one = text.replace(/[\r\n]/g, "").trim();
+  if (!multiple) return one;
+  const out: string[] = [];
+  for (const a of one.split(",")) out.push(a.trim());
+  return out.join(",");
+}
+
+/** A url field's value: its tabs and newlines are removed and its ends trimmed. */
+function sanitizeUrlText(text: string): string {
+  return text.replace(/[\t\r\n]/g, "").trim();
+}
+
 /** The value a number field keeps of `text`: the number as written, or nothing when it names none. */
 function sanitizeNumberText(text: string): string {
   if (text === "") return "";
@@ -12593,6 +12605,18 @@ export class HTMLInputElement extends HTMLElement {
       noteControlChange(this);
       return;
     }
+    // An email or url field keeps only what its value sanitization allows.
+    const fieldType = this.type.toLowerCase();
+    if (fieldType === "email" || fieldType === "url") {
+      const text = fieldType === "email" ? sanitizeEmailText(String(v), this.multiple) : sanitizeUrlText(String(v));
+      if (text !== this.val) moveValueRanges(this, 0, this.val.length, text.length);
+      this.val = text;
+      this.selStart = text.length;
+      this.selEnd = text.length;
+      this.anchor = text.length;
+      noteControlChange(this);
+      return;
+    }
     // A whole-value write is a replace of the field's text to a live value range; writing the
     // same text changes nothing.
     if (v !== this.val) moveValueRanges(this, 0, this.val.length, v.length);
@@ -12746,7 +12770,7 @@ export class HTMLInputElement extends HTMLElement {
     const declared = stepAttr === null ? 1 : Number(stepAttr);
     const step = isFinite(declared) && declared > 0 ? declared : 1;
     if (min > max) return;
-    let current = this.val === "" ? (t === "range" ? spec.value : 0) : Number(this.val);
+    let current = this.val === "" ? (t === "range" ? spec.value : isFinite(min) && min > 0 ? min : 0) : Number(this.val);
     if (isNaN(current)) current = t === "range" ? spec.value : 0;
     if (current < min || current > max) return;
     // A number or range with no min steps from zero; an endless bound is no bound at all.
@@ -12837,12 +12861,27 @@ export class HTMLInputElement extends HTMLElement {
   set accept(v: string) {
     this.setAttribute("accept", v);
   }
-  /** The files the field holds. Nothing opens a picker here, so this stays empty unless set. */
-  get files(): readonly File[] {
-    return this.fileList;
+  /** The files the field holds, which only a file field has: nothing opens a picker here, so
+   *  this stays empty unless a script sets it. */
+  get files(): readonly File[] | null {
+    return this.type.toLowerCase() === "file" ? this.fileList : null;
   }
   set files(list: readonly File[]) {
     this.fileList = list.slice();
+  }
+  /** The datalist the list attribute names, or null when it names none. */
+  get list(): HTMLDataListElement | null {
+    const id = this.getAttribute("list");
+    if (id === null || id === "") return null;
+    const el = document.getElementById(id);
+    return el instanceof HTMLDataListElement ? el : null;
+  }
+  /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
+  get defaultIndeterminate(): boolean {
+    return attributeFlag(this, "indeterminate");
+  }
+  set defaultIndeterminate(v: boolean) {
+    setAttributeFlag(this, "indeterminate", v);
   }
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
@@ -12994,6 +13033,18 @@ export class HTMLInputElement extends HTMLElement {
         noteControlChange(this);
       } else if (String(value).trim().toLowerCase() === "number") {
         this.val = sanitizeNumberText(this.val);
+        noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
+        noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "url") {
+        this.val = sanitizeUrlText(this.val);
+        noteControlChange(this);
+      }
+    } else if (name === "multiple") {
+      super.setAttribute(name, value);
+      if (this.type.toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
         noteControlChange(this);
       }
     } else if (name === "checked") {
