@@ -11,7 +11,7 @@ import { isMulticol, layoutMulticol } from "./multicol.ts";
 import { FloatCtx, Flow } from "./floats.ts";
 import { elideOverflowText, hasInlineContent, layoutOwnText } from "./inline.ts";
 import { clampScroll, clampScrollOf } from "./geometry.ts";
-import { placeNestedOutOfFlow, placeOutOfFlow } from "./positioned.ts";
+import { placeNestedOutOfFlow, placeOutOfFlow, growTransformedOverflow } from "./positioned.ts";
 import { isQuirks } from "../quirk.ts";
 import { contentMaxWidth, contentMinWidth, maxContentWidth, minContentWidth, wrapText, bumpSizeCache } from "./text.ts";
 import { boxChanges, incremental, layoutEpoch, unsupportedLayout } from "../invalidation.ts";
@@ -919,6 +919,7 @@ export function layoutRoot(root: Node): void {
   if (!incremental.on) {
     bumpSizeCache();
     layoutRootPass(root);
+    growTransformedOverflow(root);
     layoutPasses.full++;
     return;
   }
@@ -929,6 +930,7 @@ export function layoutRoot(root: Node): void {
     try {
       bumpSizeCache();
       layoutRootPass(root);
+      growTransformedOverflow(root);
     } finally {
       incremental.on = true;
     }
@@ -956,9 +958,11 @@ export function layoutRoot(root: Node): void {
   if (relayoutDirtyRoots(root)) {
     layoutPasses.local++;
     placeAndClamp(root);
+    growTransformedOverflow(root);
   } else {
     layoutPasses.full++;
     layoutRootPass(root);
+    growTransformedOverflow(root);
     // The pass placed every positioned box; the sets still follow the boxes that changed.
     updateBoxSets(root);
     boxChanges.placement.length = 0;

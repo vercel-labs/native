@@ -3,10 +3,10 @@
 import * as P from "../../shared/props.ts";
 import { Node, document, boxKids } from "../dom.ts";
 import { fitHeight, layoutBox } from "./box.ts";
-import { aspectRatio, aspectW, borderBottom, borderLeft, borderRight, borderTop, boundedRatioH, clampH, clampW, clipsX, display, isIntrinsicSize, isOutOfFlow, isReplaced, len, lenPhys, padV, place, sizeUnit, specH, specW, viewport, zeroIfNaN } from "./box-model.ts";
+import { aspectRatio, aspectW, borderBottom, borderLeft, borderRight, borderTop, boundedRatioH, clampH, clampW, clipsX, display, isIntrinsicSize, isOutOfFlow, isReplaced, len, lenPhys, padV, place, sizeUnit, specH, specW, viewport, zeroIfNaN, allChildren } from "./box-model.ts";
 import { contentMinWidth, maxContentWidth } from "./text.ts";
 import { isRtl, isVerticalText, lineHeightPx, usedWritingMode } from "../style.ts";
-import { hasTransform } from "../transform.ts";
+import { hasTransform, pageMatrix } from "../transform.ts";
 import { hasFilterContext } from "../filters.ts";
 import { hasClipPath } from "../clip.ts";
 import { hasMask } from "../mask.ts";
@@ -363,6 +363,57 @@ function growOverflow(el: Node, cb: Node | null, mr: number, mb: number): void {
     oy += a.y;
     a = a.parentElement;
   }
+}
+
+/**
+ * A transformed box draws past its layout box, and that reach is part of the scrollable overflow
+ * of every ancestor (CSS Overflow 3): the corners it paints at grow its ancestors' natural size,
+ * the same way an out-of-flow box's margin box does. Only the affine path is taken here; a box a
+ * perspective projects keeps to its layout box for scrolling.
+ */
+export function growTransformedOverflow(page: Node): void {
+  const walk = (el: Node): void => {
+    for (const c of allChildren(el)) {
+      if (display(c) === P.D_NONE) continue;
+      walk(c);
+      if (!hasTransform(c)) continue;
+      let px = 0;
+      let py = 0;
+      for (let a: Node | null = c; a !== null; a = a.parentElement) {
+        px += a.x;
+        py += a.y;
+      }
+      const m = pageMatrix(c, px, py);
+      if (m === null) continue;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const [lx, ly] of [[0, 0], [c.w, 0], [c.w, c.h], [0, c.h]]) {
+        const x = px + lx;
+        const y = py + ly;
+        const tx = m.a * x + m.c * y + m.e;
+        const ty = m.b * x + m.d * y + m.f;
+        if (tx > maxX) maxX = tx;
+        if (ty > maxY) maxY = ty;
+      }
+      for (let a = c.parentElement; a !== null; a = a.parentElement) {
+        let ox = 0;
+        let oy = 0;
+        for (let b: Node | null = a; b !== null; b = b.parentElement) {
+          ox += b.x;
+          oy += b.y;
+        }
+        // A box that a transform leaves entirely before an ancestor's start edge is in the
+        // unreachable part of its overflow and grows nothing there (CSS Overflow 3).
+        if (maxX - ox <= 0.01 || maxY - oy <= 0.01) continue;
+        if (maxX - ox > a.naturalW) a.naturalW = maxX - ox;
+        // naturalH is the box's own block extent, border box and all, so the bottom border the
+        // content reaches over is part of it.
+        const bottom = maxY - oy + borderBottom(a);
+        if (bottom > a.naturalH) a.naturalH = bottom;
+      }
+    }
+  };
+  walk(page);
 }
 
 /** The scrolling of the ancestors above a fixed box, which its own position leaves out. */
