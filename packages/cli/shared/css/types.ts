@@ -151,6 +151,11 @@ export interface Compound {
    */
   scope?: boolean;
   classes: string[];
+  /**
+   * Class-prefix selectors (".foo-*"): a class token that starts with the prefix, has at least
+   * one character after it, and that character is not "-".
+   */
+  classPrefixes?: string[];
   states: number; // S_HOVER | S_ACTIVE | S_FOCUS | S_FOCUS_VISIBLE
   /**
    * Sibling-count conditions, as triplets [A, B, ofType] for :nth-child(An+B) (and the
