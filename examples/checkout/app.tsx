@@ -194,6 +194,8 @@ function App() {
                 })}
               </div>
 
+              {/* The UI SDK Button defaults to type="button", and a form with several text
+                  fields needs a submit button before Enter submits it, as a browser does. */}
               {step === 1 && (
                 <form onSubmit={(event: any) => { event.preventDefault(); next(); }} className="space-y-4">
                   <h2 className="text-[20px] font-semibold tracking-tight">Create your account</h2>
@@ -203,7 +205,7 @@ function App() {
                   {field({ id: "password", label: "Password", value: password, type: "password", placeholder: "At least 8 characters", change: (value: string) => { setPassword(value); clear("password"); } })}
                   {field({ id: "confirm", label: "Confirm password", value: confirm, type: "password", placeholder: "Type it again", change: (value: string) => { setConfirm(value); clear("confirm"); } })}
                   <div className="pt-2">
-                    <Button id="continue" onClick={next} className="inline-flex h-11 w-full items-center justify-center rounded-lg bg-indigo-600 text-[13.5px] font-medium text-white shadow-sm hover:bg-indigo-500">
+                    <Button id="continue" type="submit" className="inline-flex h-11 w-full items-center justify-center rounded-lg bg-indigo-600 text-[13.5px] font-medium text-white shadow-sm hover:bg-indigo-500">
                       Continue to shipping
                     </Button>
                   </div>
@@ -245,7 +247,7 @@ function App() {
                     <button id="back" type="button" onClick={back} className="inline-flex h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-[13px] font-medium text-slate-600 hover:bg-slate-50">
                       Back
                     </button>
-                    <Button id="continue" onClick={next} className="inline-flex h-11 flex-1 items-center justify-center rounded-lg bg-indigo-600 text-[13.5px] font-medium text-white shadow-sm hover:bg-indigo-500">
+                    <Button id="continue" type="submit" className="inline-flex h-11 flex-1 items-center justify-center rounded-lg bg-indigo-600 text-[13.5px] font-medium text-white shadow-sm hover:bg-indigo-500">
                       Continue to payment
                     </Button>
                   </div>
@@ -270,7 +272,7 @@ function App() {
                     <button id="back" type="button" onClick={back} className="inline-flex h-11 items-center justify-center rounded-lg border border-slate-200 bg-white px-4 text-[13px] font-medium text-slate-600 hover:bg-slate-50">
                       Back
                     </button>
-                    <Button id="place-order" onClick={placeOrder} className="inline-flex h-11 flex-1 items-center justify-center rounded-lg bg-slate-900 text-[13.5px] font-medium text-white shadow-sm hover:bg-slate-800">
+                    <Button id="place-order" type="submit" className="inline-flex h-11 flex-1 items-center justify-center rounded-lg bg-slate-900 text-[13.5px] font-medium text-white shadow-sm hover:bg-slate-800">
                       Place order · {money(total)}
                     </Button>
                   </div>

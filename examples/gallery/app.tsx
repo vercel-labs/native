@@ -121,6 +121,13 @@ function App() {
     setScrollTop(Number(event.target.scrollTop));
   }
 
+  // A new filter, order or favourites set is a different list: its first row is the one to show,
+  // and a window left at the old scroll offset would draw rows past the end of the new list.
+  function resetScroll(): void {
+    if (gridRef.current !== null) gridRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }
+
   function reveal(index: number): void {
     if (index < 0 || index >= visible.length) return;
     setSelectedId(visible[index].id);
@@ -156,14 +163,14 @@ function App() {
           <Input
             id="search"
             value={query}
-            onValueChange={(value: string) => setQuery(value)}
+            onValueChange={(value: string) => { setQuery(value); resetScroll(); }}
             placeholder="Search plates and tags"
             className="h-9 w-64 rounded-lg border border-slate-200 bg-slate-50 px-3 text-[13px] text-slate-700 outline-none placeholder:text-slate-400 focus:border-indigo-300 focus:bg-white focus:ring-4 focus:ring-indigo-50"
           />
           <button
             id="favorites"
             type="button"
-            onClick={() => setFavoritesOnly(!favoritesOnly)}
+            onClick={() => { setFavoritesOnly(!favoritesOnly); resetScroll(); }}
             className={"inline-flex h-9 items-center gap-1.5 rounded-lg border px-3 text-[12.5px] font-medium " + (favoritesOnly ? "border-rose-200 bg-rose-50 text-rose-600" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50")}
           >
             <span>{favoritesOnly ? "♥" : "♡"}</span> Favourites
@@ -173,8 +180,8 @@ function App() {
       </header>
 
       <div className="flex h-12 shrink-0 items-center gap-1 border-b border-slate-200 bg-white px-8">
-        <button id="sort-newest" type="button" onClick={() => setSort("newest")} className={"rounded-lg px-3 py-1.5 text-[12.5px] font-medium " + (sort === "newest" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100")}>Newest</button>
-        <button id="sort-popular" type="button" onClick={() => setSort("popular")} className={"rounded-lg px-3 py-1.5 text-[12.5px] font-medium " + (sort === "popular" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100")}>Most liked</button>
+        <button id="sort-newest" type="button" onClick={() => { setSort("newest"); resetScroll(); }} className={"rounded-lg px-3 py-1.5 text-[12.5px] font-medium " + (sort === "newest" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100")}>Newest</button>
+        <button id="sort-popular" type="button" onClick={() => { setSort("popular"); resetScroll(); }} className={"rounded-lg px-3 py-1.5 text-[12.5px] font-medium " + (sort === "popular" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100")}>Most liked</button>
         <p id="count" className="ml-auto text-[11.5px] text-slate-500">{visible.length} of {PHOTOS.length} plates</p>
       </div>
 

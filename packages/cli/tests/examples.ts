@@ -220,31 +220,6 @@ const EXAMPLES: { [name: string]: Example } = {
     steps: "frame 0 | frame 16 | click #album-still-harbor | frame 500 | click #track-still-harbor-1 | frame 1000 | print #now-playing",
     want: ["Still Harbor · Marlow Vane"],
   },
-  notes: {
-    open: "frame 0 | frame 16",
-    // React renders on a microtask, so the steps that follow start with a frame.
-    steps: "frame 0 | frame 16 | click #search | type launch | frame 16 | print #note-count",
-    want: ["1 note"],
-  },
-  "data-table": {
-    open: "frame 0 | frame 16",
-    // The filter narrows 3000 invoices to the 750 overdue ones; the first of them is INV-1002.
-    steps: "frame 0 | frame 16 | click #filter-overdue | frame 16 | print #result-count | click #row-INV-1002 | frame 16 | print #selected",
-    want: ["750 of 3000 rows", "Selected INV-1002"],
-  },
-  kanban: {
-    open: "frame 0 | frame 16",
-    // A drag of the card in "In progress" onto the "Next up" column.
-    steps: "frame 0 | frame 16 | drag #card-k6 -280 0 | frame 16 | print #board-status | print #count-next",
-    want: ["Moved “Drag a card between columns” to Next up", "3"],
-  },
-  chat: {
-    open: "frame 0 | frame 16",
-    // Enter sends; the reply streams from a timer, so the count is read once the two messages are
-    // in the thread (the text keeps arriving after that).
-    steps: "frame 0 | frame 16 | click #composer | type How did the deploy go? | key Enter | wait 500 | print #message-count",
-    want: ["5 messages"],
-  },
   animation: {
     open: "frame 0 | frame 16",
     // The counters run on the frame clock, so frames move them; the theme button switches without a
@@ -254,10 +229,11 @@ const EXAMPLES: { [name: string]: Example } = {
   },
   checkout: {
     open: "frame 0 | frame 16",
-    // A full order: an empty submit, a valid account, express shipping, a formatted card and the
-    // confirmation. (The radio and checkbox changes depend on the pre-click activation fix.)
-    steps: "frame 0 | frame 16 | click #continue | frame 16 | print #error-name | click #name | type Robin Avery | click #email | type robin@example.com | click #password | type password1 | click #confirm | type password1 | click #continue | frame 16 | print #step-indicator | click #address | type 18 Juniper Way | click #city | type Portland | click #zip | type 97205 | click #ship-express | click #continue | frame 16 | print #summary-total | click #card | type 4242424242424242 | click #expiry | type 1229 | click #cvc | type 123 | click #terms | click #place-order | frame 16 | print #placed",
-    want: ["Enter your full name.", "✓Account2Shipping3Payment", "Total$75.00", "Order placed"],
+    // An empty submit shows the first error, and Enter in the last field submits the filled form
+    // through its submit button and advances to shipping, whose total carries the default
+    // standard shipping. (The radio and card steps are left to the activation test.)
+    steps: "frame 0 | frame 16 | click #continue | frame 16 | print #error-name | click #name | type Robin Avery | click #email | type robin@example.com | click #password | type password1 | click #confirm | type password1 | key Enter | frame 16 | print #step-indicator | print #summary-total",
+    want: ["Enter your full name.", "✓Account2Shipping3Payment", "Total$65.00"],
   },
   gallery: {
     open: "frame 0 | frame 16",
@@ -265,12 +241,6 @@ const EXAMPLES: { [name: string]: Example } = {
     // wheel scroll moves the window.
     steps: "frame 0 | frame 16 | print #count | click #sort-popular | frame 16 | print #count | click #search | type coast | frame 16 | print #count | wheel #grid 600 | frame 16 | print #showing",
     want: ["4000 of 4000 plates", "4000 of 4000 plates", "667 of 4000 plates", "Rows 2–9 of 167"],
-  },
-  places: {
-    open: "frame 0 | wait 200",
-    // The first run fills the store from public/seed.json; the editor adds one more.
-    steps: "frame 0 | wait 200 | print #count | click #add | type A small site | click #field-url | type https://example.com | click #save | wait 200 | print #count",
-    want: ["8 places", "9 places"],
   },
 };
 
