@@ -47,6 +47,7 @@
     { "name": "hostPoll", "symbol": "host_poll", "params": ["f64"], "returns": "i32" },
     { "name": "hostRefreshInterval", "symbol": "host_refresh_interval", "params": [], "returns": "f64" },
     { "name": "hostUntilRefresh", "symbol": "host_until_refresh", "params": [], "returns": "f64" },
+    { "name": "hostGlWindow", "symbol": "host_gl_window", "params": [], "returns": "i32" },
     { "name": "hostEventX", "symbol": "host_event_x", "params": [], "returns": "f64" },
     { "name": "hostEventY", "symbol": "host_event_y", "params": [], "returns": "f64" },
     { "name": "hostViewWidth", "symbol": "host_view_width", "params": [], "returns": "f64" },

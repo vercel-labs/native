@@ -1,7 +1,7 @@
 // Pointer input: :hover/:active state, focus on press, click synthesis and text selection.
 
 import * as P from "../../shared/props.ts";
-import { Node, Element, Event, HTMLDialogElement, HTMLInputElement, HTMLOptionElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, PointerEvent, document, dispatch, trusted, invalidateStyle, focusState, setFocus, runClickDefault, inDisabledFormControl, noteInput, lightDismissPopovers, controlKind, setRangeValue, notePointerActive, pointerCaptureElement, endPointerCapture, CONTROL_NONE, CONTROL_RANGE, topLayerElements, dateKind, dateSetActive } from "../dom.ts";
+import { Node, Element, Event, HTMLDialogElement, HTMLInputElement, HTMLOptionElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, PointerEvent, document, dispatch, trusted, invalidateStyle, focusState, setFocus, runClickDefault, dispatchClick, noteUserActivation, inDisabledFormControl, noteInput, lightDismissPopovers, controlKind, setRangeValue, notePointerActive, pointerCaptureElement, endPointerCapture, CONTROL_NONE, CONTROL_RANGE, topLayerElements, dateKind, dateSetActive } from "../dom.ts";
 import { restyleForState } from "../style.ts";
 import { invalidateLayout } from "../invalidation.ts";
 import { inputIndexAt } from "../layout.ts";
@@ -231,6 +231,7 @@ function textAreaAt(target: Node | null): HTMLTextAreaElement | null {
 
 export function pointerDown(x: number, y: number, clicks: number = 1, mods: number = 0): void {
   noteInput("pointer");
+  noteUserActivation();
   pointer.x = x;
   pointer.y = y;
   pointer.mods = mods;
@@ -387,7 +388,7 @@ export function pointerUp(x: number, y: number, clicks: number = 1, mods: number
     let common: Node | null = pressed;
     while (common !== null && ups.indexOf(common) < 0) common = common.parentElement;
     // A disabled control takes no click event, as in a browser.
-    if (common !== null && !inDisabledFormControl(common) && dispatch(mouseEvent("click", x, y, clicks, mods), common)) runClickDefault(common, true);
+    if (common !== null && !inDisabledFormControl(common)) dispatchClick(common, () => mouseEvent("click", x, y, clicks, mods), true);
   }
   // The capture ends with the release, and the element hears that it lost the pointer.
   endPointerCapture(1);
@@ -476,6 +477,9 @@ export function pointerMove(x: number, y: number, mods: number = 0): void {
  */
 export function pressElement(el: Element): void {
   if (!el.isConnected || inDisabledFormControl(el)) return;
+  // A press from an accessibility client is the user's own input, as a pointer press is: it counts
+  // as a gesture, so a control it activates may open a window as a clicked one can.
+  noteUserActivation();
   noteInput("pointer");
   const r = el.getBoundingClientRect();
   const x = r.x + r.width / 2;
@@ -493,7 +497,7 @@ export function pressElement(el: Element): void {
   }
   dispatch(pointerEvent("pointerup", x, y, 0, 1), el);
   dispatch(mouseEvent("mouseup", x, y, 1), el);
-  if (el.isConnected && !inDisabledFormControl(el) && dispatch(mouseEvent("click", x, y, 1), el)) runClickDefault(el, true);
+  if (el.isConnected && !inDisabledFormControl(el)) dispatchClick(el, () => mouseEvent("click", x, y, 1), true);
 }
 
 /** An accessibility client's request for an element's menu: contextmenu at its centre, as the
