@@ -1146,8 +1146,11 @@ async function run(args: string[]): Promise<void> {
   for (const r of runnable) {
     // Until every page of a test (its own and its references) has run, there is no verdict: a
     // partial write leaves those tests out rather than calling them errors.
-    const ready = outputs.has(r.page.key) &&
-      r.matchRefs.every((ref) => outputs.has(ref.key)) && r.mismatchRefs.every((ref) => outputs.has(ref.key));
+    // A page whose scripts scriptc refused has a verdict of its own (a skip), so it is ready too:
+    // an interrupted run keeps it along with the pages that ran.
+    const hasRun = (key: string): boolean => outputs.has(key) || scriptFailures.has(key);
+    const ready = hasRun(r.page.key) &&
+      r.matchRefs.every((ref) => hasRun(ref.key)) && r.mismatchRefs.every((ref) => hasRun(ref.key));
     if (!ready && !final) continue;
     // A page whose scripts scriptc refused is a skip with the error; a script that throws while
     // running is an error, since what the page shows then isn't what it means to show.
@@ -1195,10 +1198,11 @@ async function run(args: string[]): Promise<void> {
       continue;
     }
     if (r.test.kind === "layout") {
-      if (out.startsWith("PASS")) results.push({ path: r.test.path, kind: "layout", status: "pass" });
-      else if (out === "NONE") results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: no expectations found" });
-      else if (/unsupported check/.test(out)) results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: " + /unsupported check [\w-]+/.exec(out)![0] });
-      else results.push({ path: r.test.path, kind: "layout", status: "fail", reason: out.replace(/^FAIL /, "") });
+      // Into the batch's own list, like every other verdict: the final write replaces it.
+      if (out.startsWith("PASS")) target.push({ path: r.test.path, kind: "layout", status: "pass" });
+      else if (out === "NONE") target.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: no expectations found" });
+      else if (/unsupported check/.test(out)) target.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: " + /unsupported check [\w-]+/.exec(out)![0] });
+      else target.push({ path: r.test.path, kind: "layout", status: "fail", reason: out.replace(/^FAIL /, "") });
     } else if (r.test.kind === "crash") {
       target.push({ path: r.test.path, kind: "crash", status: "pass" });
     } else {
