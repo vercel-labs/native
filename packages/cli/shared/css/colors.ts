@@ -597,7 +597,10 @@ function mixEnds(s: string): { space: string; e1: Rgba; e2: Rgba; w1: number; w2
   if (!first.startsWith("in ")) return null;
   const space = first.slice(3).trim().split(/\s+/)[0];
   const parsed = [args[1], args[2]].map((raw) => {
-    const t = raw.trim();
+    // CSS allows a percentage to follow a colour function's `)` with no space between them, and
+    // Tailwind's opacity utilities write it that way ("oklch(…)15%"); give the split below the
+    // space it looks for.
+    const t = raw.trim().replace(/\)(-?[\d.]+%)$/, ") $1");
     const m = /^(.*?)(?:\s+(-?[\d.]+%))?$/.exec(t);
     if (m === null) return null;
     const color = parseColorRgba(m[1]);
