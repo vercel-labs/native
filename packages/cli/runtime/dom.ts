@@ -10567,11 +10567,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -11876,24 +11872,49 @@ export const geometry: {
 
 export const focusState = { el: null as Element | null };
 /**
- * Whether the last interaction came from the keyboard. Programmatic focus follows it, which is
- * how a browser decides :focus-visible for a script's focus() call.
+ * The kind of interaction that last reached the page, or null while the user has not touched it.
+ * Programmatic focus follows it, which is how a browser decides :focus-visible for a script's
+ * focus() call: focus a script sets before the user has done anything shows the ring, as does
+ * focus after a key; focus after a pointer does not.
  */
-let lastInputIsKey = false;
+let lastInput: "key" | "pointer" | null = null;
 
 /** Records the kind of interaction that just happened ("key" or "pointer"). */
 export function noteInput(kind: "key" | "pointer"): void {
-  lastInputIsKey = kind === "key";
+  lastInput = kind;
+  // A key from the keyboard switches the page's modality without moving focus, and the element
+  // that has focus starts showing the ring, as Chrome does.
+  if (kind === "key") refreshFocusVisible();
 }
 
-/** Whether the element always shows a focus ring when focused: text fields do. */
+/** A fresh page has no interaction behind it, even when it takes over from another in the same
+ *  process (the WPT runner shows several pages in turn): script focus shows the ring again. */
+export function resetInput(): void {
+  lastInput = null;
+}
+
+/** Whether the element always shows a focus ring when focused: text fields and editable
+ *  content do, whatever brought the focus. */
 function alwaysFocusVisible(el: Element): boolean {
+  if (isContentEditableElement(el)) return true;
   if (el.localName === "textarea") return true;
   if (!(el instanceof HTMLInputElement)) return false;
   const t = el.type;
   return t === "" || t === "text" || t === "search" || t === "url" || t === "tel" || t === "email" ||
     t === "password" || t === "number" || t === "date" || t === "datetime-local" || t === "month" ||
     t === "time" || t === "week";
+}
+
+/** Recomputes the focused element's ring from the interaction behind it and what it now is: a
+ *  key press or a field that became a text field gives it one, and a field that stops being one
+ *  loses it. */
+export function refreshFocusVisible(): void {
+  const el = focusState.el;
+  if (el === null) return;
+  const ring = alwaysFocusVisible(el) || lastInput !== "pointer";
+  const was = el.state;
+  el.state = ring ? el.state | P.S_FOCUS_VISIBLE : el.state & ~P.S_FOCUS_VISIBLE;
+  if (el.state !== was) restyleForState(el, P.S_FOCUS_VISIBLE);
 }
 
 /**
@@ -11932,12 +11953,16 @@ export function setAxGeometryHook(fn: (() => void) | null): void {
 
 export function setFocus(el: Element | null, visible?: boolean): void {
   const prev = focusState.el;
-  const ring = el !== null && (visible ?? (alwaysFocusVisible(el) || lastInputIsKey));
+  const ring = el !== null && (visible ?? (alwaysFocusVisible(el) || lastInput !== "pointer"));
   if (prev === el) {
     if (el !== null) {
       const was = el.state;
-      el.state = ring ? el.state | P.S_FOCUS_VISIBLE : el.state & ~P.S_FOCUS_VISIBLE;
-      if (el.state !== was) restyleForState(el, P.S_FOCUS_VISIBLE);
+      // Focus did not move, so the modality that decided its ring still stands: only an explicit
+      // request changes it here (a press on the focused element leaves the ring it had).
+      if (visible !== undefined) {
+        el.state = ring ? el.state | P.S_FOCUS_VISIBLE : el.state & ~P.S_FOCUS_VISIBLE;
+        if (el.state !== was) restyleForState(el, P.S_FOCUS_VISIBLE);
+      }
       invalidatePaint();
     }
     return;
@@ -12996,6 +13021,9 @@ export class HTMLInputElement extends HTMLElement {
         this.val = sanitizeNumberText(this.val);
         noteControlChange(this);
       }
+      // A field that becomes a text field while focused starts showing the ring a text field
+      // has, and one that stops being one loses it: :focus-visible follows the type change.
+      if (focusState.el === this) refreshFocusVisible();
     } else if (name === "checked") {
       super.setAttribute(name, value);
       this.checked = true;

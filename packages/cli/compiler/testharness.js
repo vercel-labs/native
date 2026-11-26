@@ -140,10 +140,17 @@ var test_driver = {
     return Promise.resolve(accessibleNode(element).name);
   },
   click: function (element) {
-    if (element !== null && element !== undefined && typeof element.click === "function") element.click();
+    // A real click lands on the element and focuses what it hits; the page's press path does the
+    // same where element.click() would only send the event.
+    if (element === null || element === undefined) return Promise.resolve();
+    if (typeof __nativePress === "function") __nativePress(element);
+    else if (typeof element.click === "function") element.click();
     return Promise.resolve();
   },
-  hover: function (_element) { return Promise.resolve(); },
+  hover: function (element) {
+    if (element !== null && element !== undefined && typeof __nativeHover === "function") __nativeHover(element);
+    return Promise.resolve();
+  },
   focus: function (element) {
     if (element !== null && element !== undefined && typeof element.focus === "function") element.focus();
     return Promise.resolve();

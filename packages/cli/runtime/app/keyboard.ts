@@ -284,6 +284,9 @@ function lineEndAt(v: string, at: number): number {
  * character is typed text.
  */
 export function __nativeSendKeys(element: any, keys: any): void {
+  // The keys come from the keyboard, and so does the shadow the focus they bring casts:
+  // :focus-visible matches it even when the element took focus before the key events.
+  noteInput("key");
   if (element !== null && element !== undefined && typeof element.focus === "function") element.focus();
   let mods = 0;
   const text = String(keys);

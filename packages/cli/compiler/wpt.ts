@@ -661,6 +661,9 @@ function writePageModules(dir: string, job: Job): string[] {
     // The page's scripts share this module scope, so the harness's keyboard driver (which
     // testharness.js calls) is bound here rather than exposed as a global an app would get.
     let loader = `import { __nativeSendKeys } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/keyboard.ts")))}; `;
+    // The harness's clicks and hovers take the page's own pointer path, so a press focuses what
+    // it hits and the page sees the events a real one sends.
+    loader += `import { pressElement as __nativePress, hoverElement as __nativeHover } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/pointer.ts")))}; `;
     if (handlers.length > 0) {
       loader += `import { attachHandler } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app.ts")))}; `;
       for (const h of handlers) {
