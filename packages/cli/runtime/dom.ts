@@ -8173,6 +8173,24 @@ function disabledBits(el: Element): number {
 /** Whether an option is disabled: by its own attribute, or by the option group or select the
  *  first one up the chain past a wrapper. An option nested in an option, an hr or a datalist
  *  takes after none of them. */
+/** Whether the option or the option group it is in is disabled. The select's own disabled state
+ *  doesn't take part: a disabled select still shows the option it would have chosen. */
+function optionOrGroupDisabled(el: HTMLOptionElement): boolean {
+  if (attributeFlag(el, "disabled")) return true;
+  let group = false;
+  for (let a = el.parentElement; a !== null; a = a.parentElement) {
+    const n = a.localName;
+    if (n === "optgroup") {
+      if (group) return false;
+      group = true;
+      if (attributeFlag(a, "disabled")) return true;
+    } else if (n === "select" || n === "option" || n === "hr" || n === "datalist") {
+      return false;
+    }
+  }
+  return false;
+}
+
 function optionDisabled(el: HTMLOptionElement): boolean {
   if (attributeFlag(el, "disabled")) return true;
   // Only the option's own group counts, and a disabled select reaches the options it lists;
@@ -8869,6 +8887,9 @@ export class HTMLOptionElement extends HTMLElement {
     if (this.selectedSet) return this.selectedFlag;
     const s = this.selectElement();
     if (s === null) return this.defaultSelected;
+    // An option the select's list leaves out — one nested in an hr, a datalist or another
+    // option — keeps the selectedness its attribute gives it.
+    if (s.options.indexOf(this) < 0) return this.defaultSelected;
     return s.isSelected(this);
   }
   set selected(value: boolean) {
@@ -8887,7 +8908,9 @@ export class HTMLOptionElement extends HTMLElement {
   get index(): number {
     const s = this.selectElement();
     if (s === null) return 0;
-    return s.options.indexOf(this);
+    // An option the list leaves out sits at index 0, as a detached one does, not at -1.
+    const at = s.options.indexOf(this);
+    return at < 0 ? 0 : at;
   }
   get disabled(): boolean {
     return attributeFlag(this, "disabled");
@@ -9259,7 +9282,7 @@ export class HTMLSelectElement extends HTMLElement {
     }
     if (this.multiple) return option.defaultSelected;
     for (let i = 0; i < options.length; i++) if (options[i].defaultSelected) return index === i;
-    for (let i = 0; i < options.length; i++) if (!optionDisabled(options[i])) return index === i;
+    for (let i = 0; i < options.length; i++) if (!optionOrGroupDisabled(options[i])) return index === i;
     return false;
   }
   /** Whether the select takes part in validation: a disabled one, or one a disabled fieldset
