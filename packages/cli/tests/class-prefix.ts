@@ -12,12 +12,14 @@ const PAGE = `<!doctype html>
 <html><head><title>class-prefix</title><style>
 .foo-* { color: rgb(0, 128, 0); }
 #y.foo-bar-* { background-color: rgb(0, 0, 255); }
+.bar-*::before { content: "X"; }
 </style></head><body>
 <div id="x" class="foo--bar"></div>
 <div id="y" class="foo-bar-baz"></div>
 <div id="z" class="foo-"></div>
 <div id="w" class="foobar"></div>
 <span id="s" class="foo-bar"></span>
+<div id="p1" class="bar-x"></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -38,6 +40,7 @@ const style = (id: string): string => {
   return s.color + "/" + s.backgroundColor;
 };
 log("style y=" + style("y") + " z=" + style("z"));
+log("before " + getComputedStyle(document.getElementById("p1") as HTMLElement, "::before").content);
 `;
 
 const EXPECTED_LOG = [
@@ -48,6 +51,8 @@ const EXPECTED_LOG = [
   "query=2",
   // The rule colours y and #y.foo-bar-* fills it; z and the others keep their own style.
   "style y=rgb(0, 128, 0)/rgb(0, 0, 255) z=rgb(0, 0, 0)/rgba(0, 0, 0, 0)",
+  // A prefix rule styles a pseudo-element too: the box is made and the rule decides.
+  'before "X"',
 ];
 
 let failed = 0;

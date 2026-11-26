@@ -1199,7 +1199,9 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     return rules.some((r) => r.selectors.some((s) => s.pseudo === kind &&
       (name === null || s.pseudoName === name) &&
       (s.tagNs !== undefined || s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
-      (s.classPrefixes ?? []).length === 0 && s.classes.every((c) => classes.includes(c))));
+      // A class prefix can't be screened out here: the box is made and the rule's conditions
+      // decide at runtime whether it draws anything.
+      ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(c)))));
   };
 
   /** A child node for generated content. It carries no attributes: its style is all rules. */
