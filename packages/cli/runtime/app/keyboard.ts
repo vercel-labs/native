@@ -17,8 +17,12 @@ import { compositionCancel, compositionEnd, compositionStart, compositionUpdate,
 // ---------------------------------------------------------------------------
 // Keyboard
 
+/** A key a test presses by name rather than by character (a modifier): it types nothing. */
+const KEY_MODIFIER = -3;
+
 function keyName(code: number, text: string): string {
   if (code === KEY_TEXT) return text;
+  if (code === KEY_MODIFIER) return text;
   if (code === KEY_BACKSPACE) return "Backspace";
   if (code === KEY_ENTER) return "Enter";
   if (code === KEY_LEFT) return "ArrowLeft";
@@ -39,6 +43,13 @@ function keyName(code: number, text: string): string {
 
 /** The physical key's name, as a browser reports it: "KeyA", "Space", "ArrowLeft" and so on. */
 function keyCodeName(code: number, text: string): string {
+  if (code === KEY_MODIFIER) {
+    if (text === "Shift") return "ShiftLeft";
+    if (text === "Control") return "ControlLeft";
+    if (text === "Alt") return "AltLeft";
+    if (text === "Meta") return "MetaLeft";
+    return text;
+  }
   if (code === KEY_TEXT) {
     if (text === " ") return "Space";
     if (text.length === 1 && text >= "a" && text <= "z") return "Key" + text.toUpperCase();
@@ -332,10 +343,10 @@ export function actionKey(value: string, mods: number, down: boolean): number {
   else if (ch === 0x00e014) { code = KEY_RIGHT; text = ""; }
   else if (ch === 0x00e015) { code = KEY_DOWN; text = ""; }
   else if (ch === 0x00e017) { code = KEY_DELETE; text = ""; }
-  else if (ch === 0x00e008) mod = MOD_SHIFT;
-  else if (ch === 0x00e009) mod = MOD_CTRL;
-  else if (ch === 0x00e00a) mod = MOD_ALT;
-  else if (ch === 0x00e03d) mod = MOD_META;
+  else if (ch === 0x00e008) { mod = MOD_SHIFT; code = KEY_MODIFIER; text = "Shift"; }
+  else if (ch === 0x00e009) { mod = MOD_CTRL; code = KEY_MODIFIER; text = "Control"; }
+  else if (ch === 0x00e00a) { mod = MOD_ALT; code = KEY_MODIFIER; text = "Alt"; }
+  else if (ch === 0x00e03d) { mod = MOD_META; code = KEY_MODIFIER; text = "Meta"; }
   if (down) {
     keyDown(code, mods | mod, text);
     return mods | mod;

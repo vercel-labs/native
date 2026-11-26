@@ -198,12 +198,27 @@ function __hRunActions(actions) {
         seqs.push(seq);
         if (seq.length > ticks) ticks = seq.length;
       }
-      // The ticks run back to back: the page sees the sequence as one turn of input, and an
-      // action never waits on a frame the page cannot draw.
-      for (var t = 0; t < ticks; t++) {
-        for (var j = 0; j < seqs.length; j++) if (t < seqs[j].length) __hRunAction(seqs[j][t]);
+      // Each tick runs in its own task: a pause holds the next tick for its duration, and the
+      // rest for one frame, as WebDriver's actions do.
+      var t = 0;
+      function step() {
+        var wait = 0;
+        try {
+          for (var j = 0; j < seqs.length; j++) {
+            if (t >= seqs[j].length) continue;
+            var a = seqs[j][t];
+            if (a.type === "pause" && a.duration !== undefined && a.duration > 0) wait = Math.max(wait, a.duration);
+            __hRunAction(a);
+          }
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        t++;
+        if (t < ticks) setTimeout(step, wait > 0 ? wait : 16);
+        else resolve();
       }
-      resolve();
+      step();
     } catch (e) {
       reject(e);
     }
