@@ -2038,6 +2038,7 @@ function appendChecked(parent: Node, node: Node): void {
   if (styleInsertedText(parent, node) || styleAppendedBox(parent, node)) return;
   noteStructureChange(parent);
   noteDetailsInserted(node);
+  noteRadiosInserted(node);
   invalidateStyleOf(parent);
 }
 
@@ -7659,13 +7660,47 @@ function radioGroup(el: HTMLInputElement, out: HTMLInputElement[]): void {
     out.push(el);
     return;
   }
+  // The group is the radios of the element's own tree: a radio taken out of the document forms
+  // a group with the radios of the tree it sits in, not with the page's.
+  const root = el.getRootNode() as Node;
   const all: Element[] = [];
-  collectElements(document.documentElement, all);
+  if (root.isElementNode) {
+    all.push(root as Element);
+    collectElements(root, all);
+  } else {
+    collectElements(root, all);
+  }
   const owner = formOwnerFor(el);
+  let found = false;
   for (const e of all) {
     if (!(e instanceof HTMLInputElement) || controlKind(e.type) !== CONTROL_RADIO) continue;
-    if (e.name === name && formOwnerFor(e) === owner) out.push(e);
+    if (e.name === name && formOwnerFor(e) === owner) {
+      out.push(e);
+      if (e === el) found = true;
+    }
   }
+  if (!found) out.push(el);
+}
+
+/** Unchecks the groups of any checked radios at or under `node`, after an insertion. */
+function noteRadiosInserted(node: Node): void {
+  const radios: HTMLInputElement[] = [];
+  collectRadios(node, radios);
+  for (const r of radios) if (r.checked) uncheckRadioGroup(r);
+}
+
+/** The radio inputs at or under `node`, in tree order. */
+function collectRadios(node: Node, out: HTMLInputElement[]): void {
+  if (node instanceof HTMLInputElement && controlKind(node.type) === CONTROL_RADIO) out.push(node);
+  for (const c of node.kids) collectRadios(c, out);
+}
+
+/** Unchecks the other radios of the group `el` is in, as checking it does. */
+function uncheckRadioGroup(el: HTMLInputElement): void {
+  if (controlKind(el.type) !== CONTROL_RADIO || !el.checked) return;
+  const group: HTMLInputElement[] = [];
+  radioGroup(el, group);
+  for (const other of group) if (other !== el && other.checked) other.checked = false;
 }
 
 /**
@@ -10567,11 +10602,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -12543,6 +12574,8 @@ export class HTMLInputElement extends HTMLElement {
   set checked(v: boolean) {
     if (this.checkedFlag === v) return;
     this.checkedFlag = v;
+    // A radio checked with a script unchecks the rest of its group, as a click does.
+    if (v) uncheckRadioGroup(this);
     noteControlChange(this);
   }
   get indeterminate(): boolean {
@@ -12996,6 +13029,18 @@ export class HTMLInputElement extends HTMLElement {
         this.val = sanitizeNumberText(this.val);
         noteControlChange(this);
       }
+      // A field that becomes a radio or a checkbox takes its checked attribute as its
+      // checkedness, which unchecks the group it joins.
+      const nextType = String(value).trim().toLowerCase();
+      if ((nextType === "radio" || nextType === "checkbox") && this.hasAttribute("checked")) {
+        this.checkedFlag = true;
+        if (nextType === "radio") uncheckRadioGroup(this);
+        noteControlChange(this);
+      }
+    } else if (name === "form") {
+      super.setAttribute(name, value);
+      // Joining a form puts a checked radio in that form's group.
+      uncheckRadioGroup(this);
     } else if (name === "checked") {
       super.setAttribute(name, value);
       this.checked = true;
@@ -13010,6 +13055,8 @@ export class HTMLInputElement extends HTMLElement {
   removeAttribute(name: string): void {
     super.removeAttribute(name);
     if (name === "disabled") this.disabledFlag = false;
+    // Leaving a form owner moves a checked radio into the ownerless group.
+    if (name === "form") uncheckRadioGroup(this);
   }
 
   /**
