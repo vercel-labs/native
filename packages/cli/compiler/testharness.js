@@ -322,19 +322,26 @@ var test_driver = {
     return Promise.resolve(accessibleNode(element).name);
   },
   click: function (element) {
-    // A real click lands on the element and focuses what it hits; the page's press path does the
-    // same where element.click() would only send the event. The page is laid out first, as a
-    // browser has it before input.
+    // A real click is input at the element's centre: the page's own pointer path move there,
+    // presses and releases, which also focuses what the press hits and leaves the pointer where
+    // later Actions expect it.
     if (element === null || element === undefined) return Promise.resolve();
     frame();
-    if (typeof __nativePress === "function") __nativePress(element);
-    else if (typeof element.click === "function") element.click();
+    var c = __hCenter(element);
+    __hPointerX = c.x;
+    __hPointerY = c.y;
+    pointerMove(c.x, c.y, 0);
+    pointerDown(c.x, c.y, 1, 0);
+    pointerUp(c.x, c.y, 1, 0);
     return Promise.resolve();
   },
   hover: function (element) {
-    if (element !== null && element !== undefined && typeof __nativeHover === "function") {
+    if (element !== null && element !== undefined) {
       frame();
-      __nativeHover(element);
+      var c = __hCenter(element);
+      __hPointerX = c.x;
+      __hPointerY = c.y;
+      pointerMove(c.x, c.y, 0);
     }
     return Promise.resolve();
   },
