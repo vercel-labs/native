@@ -1,0 +1,71 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=1080, height=780">
+    <title>Places</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="mark">P</span>
+        <div>
+          <h1>Places</h1>
+          <p>Links worth keeping, kept on this machine.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <label class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+          <input id="search" type="text" placeholder="Search titles, links and notes" autocomplete="off">
+        </label>
+        <button id="add" class="primary" type="button">Add a place</button>
+      </div>
+    </header>
+
+    <nav id="tag-bar" class="tags" aria-label="Tags"></nav>
+
+    <main>
+      <div id="list" class="grid"></div>
+      <div id="empty" class="empty" hidden>
+        <p class="empty-title">Nothing here yet</p>
+        <p class="empty-note">Add a link, or clear the search to see everything again.</p>
+      </div>
+    </main>
+
+    <footer class="foot">
+      <p id="count">0 places</p>
+      <p id="status">Stored on this machine with IndexedDB</p>
+    </footer>
+
+    <div id="editor" class="overlay" hidden>
+      <form id="form" class="panel" autocomplete="off">
+        <h2 id="editor-title">Add a place</h2>
+        <label class="field">
+          <span>Title</span>
+          <input id="field-title" type="text" placeholder="A name you'll recognize">
+        </label>
+        <label class="field">
+          <span>Address</span>
+          <input id="field-url" type="text" placeholder="https://example.com/article">
+        </label>
+        <label class="field">
+          <span>Tags</span>
+          <input id="field-tags" type="text" placeholder="reading, design">
+        </label>
+        <label class="field">
+          <span>Note</span>
+          <textarea id="field-note" rows="3" placeholder="Why keep it?"></textarea>
+        </label>
+        <p id="error" class="error" hidden></p>
+        <div class="panel-actions">
+          <button id="cancel" class="ghost" type="button">Cancel</button>
+          <button id="save" class="primary" type="submit">Save place</button>
+        </div>
+      </form>
+    </div>
+
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>
