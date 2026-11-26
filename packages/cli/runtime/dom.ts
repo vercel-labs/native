@@ -3882,6 +3882,9 @@ function refreshLiveCollections(): void {
 /** Forgets the collections of the page that just ended (the WPT runner reuses the process). */
 export function clearLiveCollections(): void {
   liveHead = null;
+  // The labels lists a page handed out belong to that page: a runner's next page starts with
+  // none, so a previous page's controls are not retained and refreshed on every mutation.
+  labelLists.clear();
 }
 
 /**
