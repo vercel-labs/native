@@ -727,6 +727,8 @@ function layoutBoxFull(el: Node, cbW: number, cbH: number, fixedW: number, fixed
   // The box's own width is not overflow: padding swallows the room up to the padding edge, so the
   // scrollable reach stays the content box's right edge until something goes past it.
   el.naturalW = extentW;
+  el.tW = 0;
+  el.tH = 0;
 
   // A button centers its content vertically, as browsers do. Block flow starts the anonymous
   // content box at the content edge, so when the button is taller than what it holds, the content
@@ -750,6 +752,8 @@ function layoutBoxFull(el: Node, cbW: number, cbH: number, fixedW: number, fixed
       const nw = el.naturalW;
       el.naturalW = el.naturalH;
       el.naturalH = nw;
+      el.tW = 0;
+      el.tH = 0;
     } else unturnBox(el, rl);
   }
 }
@@ -799,6 +803,8 @@ function unturnBox(el: Node, rl: boolean): void {
   const nw = el.naturalW;
   el.naturalW = el.naturalH;
   el.naturalH = nw;
+  el.tW = 0;
+  el.tH = 0;
   // A table part draws its row bands in its own box's axes, which were the frame's.
   if (el.bgbox.length === 4) {
     const bx = el.bgbox[0];
@@ -906,6 +912,8 @@ function layoutReplaced(el: Node, cbW: number, cbH: number, fixedW: number, fixe
   el.contentH = Math.max(0, h - padsV);
   el.naturalH = h;
   el.naturalW = w;
+  el.tW = 0;
+  el.tH = 0;
   const rel = relativeOffset(el, cbW, cbH);
   el.relX = rel[0];
   el.relY = rel[1];

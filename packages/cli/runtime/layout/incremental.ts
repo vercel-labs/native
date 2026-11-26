@@ -107,6 +107,8 @@ function restore(el: Node, s: number[], at: number): void {
   el.h = s[o + 1];
   el.naturalW = s[o + 2];
   el.naturalH = s[o + 3];
+  el.tW = 0;
+  el.tH = 0;
   el.contentX = s[o + 4];
   el.contentY = s[o + 5];
   el.contentW = s[o + 6];
@@ -384,6 +386,8 @@ export function resetNaturalSize(el: Node): void {
     el.naturalW = 0;
     el.naturalH = 0;
   }
+  el.tW = 0;
+  el.tH = 0;
 }
 
 // ---------------------------------------------------------------------------

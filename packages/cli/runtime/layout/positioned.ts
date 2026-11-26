@@ -372,68 +372,176 @@ function growOverflow(el: Node, cb: Node | null, mr: number, mb: number): void {
  * of every ancestor (CSS Overflow 3): the corners it paints at grow its ancestors' natural size,
  * the same way an out-of-flow box's margin box does. Only the affine path is taken here; a box a
  * perspective projects keeps to its layout box for scrolling.
+ *
+ * The walk is bottom up and linear: each box hands its parent the reach its subtree paints in the
+ * parent's own coordinates, with its own transform applied, and every box grows itself once from
+ * what its children hand it. A clipping box hands on its own edge instead (what it hides cannot
+ * paint outside it), a box anchored to the viewport hands on nothing, and an out-of-flow box hands
+ * its reach to its containing block rather than to the boxes between.
  */
 export function growTransformedOverflow(page: Node): void {
-  const walk = (el: Node, m: Matrix | null, stopAt: Node | null, sx: number, sy: number): void => {
+  takeBackTransformGrowth(page);
+  // Reaches on their way to a containing block further up: the boxes between are not in the
+  // out-of-flow box's chain, so they neither clip it nor grow by it.
+  const pending = new Map<Node, number[]>();
+  const route = (cb: Node | null, r: number[]): void => {
+    const at = pending.get(cb === null ? page : cb);
+    if (at === undefined) pending.set(cb === null ? page : cb, r.slice());
+    else unionInto(at, r);
+  };
+  // Each box hands its parent two things: the right and bottom edges every box in its subtree
+  // paints at, each through the transforms above it (exact: every box is transformed on its own),
+  // and the bounding box of the subtree in the parent's coordinates, for the parent's own scroll
+  // extents when the parent carries a transform of its own.
+  const walk = (el: Node, m: Matrix | null, ex: number, ey: number): number[] => {
+    let pageX = -Infinity;
+    let pageY = -Infinity;
+    const box = [Infinity, Infinity, -Infinity, -Infinity];
     for (const c of allChildren(el)) {
       if (display(c) === P.D_NONE) continue;
-      const px = sx + c.x;
-      const py = sy + c.y;
-      // A fixed box anchored to the viewport paints where the viewport is: it scrolls with
-      // nothing, so its reach stops at the box and grows no box outside it, nor does anything
-      // inside it. A transform, filter or container above it anchors it instead, and then it
-      // moves with the page.
-      const stop = c.sv[P.P_POSITION] === P.POS_FIXED && containingBlock(c) === null ? c : stopAt;
-      const own = hasTransform(c) ? pageMatrix(c, px, py) : null;
+      const cx = ex + c.x;
+      const cy = ey + c.y;
+      const own = hasTransform(c) ? pageMatrix(c, cx, cy) : null;
       // The ancestors' transforms carry the box too: a translation inside a translated box
       // paints at the sum of the two, so the reach is the composed matrix, outermost last.
       const total = own === null ? m : m === null ? own : mul(own, m);
-      if (total !== null) growReach(c, total, px, py, stop);
-      walk(c, total, stop, px, py);
+      const under = walk(c, total, cx, cy);
+      if (under[0] === -Infinity && under[1] === -Infinity && under[4] === -Infinity) continue;
+      // A fixed box anchored to the viewport scrolls with nothing: nothing it paints reaches a
+      // box outside it. A transform, filter or container above it anchors it instead, and then
+      // it moves with the page and does pass its reach on.
+      if (isOutOfFlow(c) && c.sv[P.P_POSITION] === P.POS_FIXED && containingBlock(c) === null) continue;
+      // An out-of-flow box belongs to its containing block's scroll extents, not to the boxes
+      // between the two.
+      const cb = isOutOfFlow(c) ? containingBlock(c) : el;
+      if (cb !== el) {
+        route(cb, under);
+        continue;
+      }
+      if (under[0] > pageX) pageX = under[0];
+      if (under[1] > pageY) pageY = under[1];
+      unionInto(box, under);
     }
+    const arrived = pending.get(el);
+    if (arrived !== undefined) {
+      pending.delete(el);
+      if (arrived[0] > pageX) pageX = arrived[0];
+      if (arrived[1] > pageY) pageY = arrived[1];
+      unionInto(box, arrived);
+    }
+    // The box's own scroll extents take in what its subtree paints (CSS Overflow 3). A box with a
+    // transform of its own measures the subtree in its own coordinates, so the transform it
+    // carries is not part of its own scroll range.
+    if (hasTransform(el)) growReach(el, box[2], box[3], ex, ey);
+    else growReach(el, pageX, pageY, ex, ey);
+    // Content a clipping box hides cannot paint outside it: the boxes above see the box's edge.
+    const clipX = clipsForOverflow(el, true);
+    const clipY = clipsForOverflow(el, false);
+    if (clipX) {
+      box[0] = ex;
+      box[2] = ex + el.w;
+    } else {
+      if (ex < box[0]) box[0] = ex;
+      if (ex + el.w > box[2]) box[2] = ex + el.w;
+    }
+    if (clipY) {
+      box[1] = ey;
+      box[3] = ey + el.h;
+    } else {
+      if (ey < box[1]) box[1] = ey;
+      if (ey + el.h > box[3]) box[3] = ey + el.h;
+    }
+    // The box itself is painted, and the boxes above it see it through the transforms above.
+    let ownX = ex + el.w;
+    let ownY = ey + el.h;
+    if (m !== null) {
+      const r = transformBox(m, ex, ey, ex + el.w, ey + el.h);
+      ownX = r[2];
+      ownY = r[3];
+    }
+    if (clipX) pageX = ownX;
+    else if (ownX > pageX) pageX = ownX;
+    if (clipY) pageY = ownY;
+    else if (ownY > pageY) pageY = ownY;
+    const own = hasTransform(el) ? pageMatrix(el, ex, ey) : null;
+    const out = own === null ? box : transformBox(own, box[0], box[1], box[2], box[3]);
+    return [pageX, pageY, out[0], out[1], out[2], out[3]];
   };
-  walk(page, null, null, page.x, page.y);
+  walk(page, null, page.x, page.y);
 }
 
-/**
- * Grows the ancestors of a box by the corners it paints at, through the composed transform `m`.
- * A box that clips has painted its content inside itself: what it hides does not reach the
- * ancestors above it on that axis, which is where the growing stops.
- */
-function growReach(c: Node, m: Matrix, px: number, py: number, stopAt: Node | null): void {
+/** Adds the box in `r`'s last four entries (or a child's `box`) to `into`. */
+function unionInto(into: number[], r: number[]): void {
+  if (r[2] < into[0]) into[0] = r[2];
+  if (r[3] < into[1]) into[1] = r[3];
+  if (r[4] > into[2]) into[2] = r[4];
+  if (r[5] > into[3]) into[3] = r[5];
+}
+
+/** The bounding box a box from (x0, y0) to (x1, y1) paints at, through `m`. */
+function transformBox(m: Matrix, x0: number, y0: number, x1: number, y1: number): number[] {
+  let minX = Infinity;
+  let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  for (const [lx, ly] of [[0, 0], [c.w, 0], [c.w, c.h], [0, c.h]]) {
-    const x = px + lx;
-    const y = py + ly;
-    const tx = m.a * x + m.c * y + m.e;
-    const ty = m.b * x + m.d * y + m.f;
+  for (const [lx, ly] of [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]) {
+    const tx = m.a * lx + m.c * ly + m.e;
+    const ty = m.b * lx + m.d * ly + m.f;
+    if (tx < minX) minX = tx;
+    if (ty < minY) minY = ty;
     if (tx > maxX) maxX = tx;
     if (ty > maxY) maxY = ty;
   }
-  let clippedX = false;
-  let clippedY = false;
-  // The box itself is the boundary when it is anchored to the viewport: nothing above it moves.
-  for (let a = c === stopAt ? null : c.parentElement; a !== null; a = a.parentElement) {
-    let ox = 0;
-    let oy = 0;
-    for (let b: Node | null = a; b !== null; b = b.parentElement) {
-      ox += b.x;
-      oy += b.y;
+  return [minX, minY, maxX, maxY];
+}
+
+/**
+ * Undoes what the last pass added to the scroll extents. A box whose layout was reused still
+ * carries it, and a translation that shrank since must not leave the larger extent behind.
+ */
+function takeBackTransformGrowth(el: Node): void {
+  if (el.tW !== 0) {
+    el.naturalW -= el.tW;
+    el.tW = 0;
+  }
+  if (el.tH !== 0) {
+    el.naturalH -= el.tH;
+    el.tH = 0;
+  }
+  for (const c of allChildren(el)) takeBackTransformGrowth(c);
+}
+
+/**
+ * Whether a box clips what it holds on an axis, as the page's scroll extents see it. The body's
+ * own overflow is the viewport's when the root's is visible (CSS Overflow 3): the body itself
+ * then holds nothing back, and the page's scroll range is the one that grows.
+ */
+function clipsForOverflow(el: Node, x: boolean): boolean {
+  const root = document.documentElement;
+  if (el === document.body && el.parentElement === root && (x ? !clipsX(root) : !clipsY(root))) return false;
+  return x ? clipsX(el) : clipsY(el);
+}
+
+/**
+ * Grows a box by the reach its subtree paints, given as right and bottom edges in page
+ * coordinates: `ox`/`oy` are the box's own position there. What it adds is remembered, so the
+ * next pass can take it back before it measures again.
+ */
+function growReach(a: Node, maxX: number, maxY: number, ox: number, oy: number): void {
+  // A box that a transform leaves entirely before an ancestor's start edge is in the
+  // unreachable part of its overflow and grows nothing there (CSS Overflow 3).
+  if (maxX - ox > 0.01 && maxX - ox > a.naturalW) {
+    a.tW += maxX - ox - a.naturalW;
+    a.naturalW = maxX - ox;
+  }
+  if (maxY - oy > 0.01) {
+    // naturalH is the box's own block extent, border box and all, so the bottom border the
+    // content reaches over is part of it.
+    const bottom = maxY - oy + borderBottom(a);
+    if (bottom > a.naturalH) {
+      a.tH += bottom - a.naturalH;
+      a.naturalH = bottom;
     }
-    // A box that a transform leaves entirely before an ancestor's start edge is in the
-    // unreachable part of its overflow and grows nothing there (CSS Overflow 3).
-    if (!clippedX && maxX - ox > 0.01 && maxX - ox > a.naturalW) a.naturalW = maxX - ox;
-    if (!clippedY && maxY - oy > 0.01) {
-      // naturalH is the box's own block extent, border box and all, so the bottom border the
-      // content reaches over is part of it.
-      const bottom = maxY - oy + borderBottom(a);
-      if (bottom > a.naturalH) a.naturalH = bottom;
-    }
-    if (a === stopAt) break;
-    if (clipsX(a)) clippedX = true;
-    if (clipsY(a)) clippedY = true;
-    if (clippedX && clippedY) break;
   }
 }
 
