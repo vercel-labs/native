@@ -1,7 +1,7 @@
 // Pointer input: :hover/:active state, focus on press, click synthesis and text selection.
 
 import * as P from "../../shared/props.ts";
-import { Node, Element, Event, HTMLDialogElement, HTMLInputElement, HTMLOptionElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, PointerEvent, document, dispatch, trusted, invalidateStyle, focusState, setFocus, runClickDefault, inDisabledFormControl, noteInput, lightDismissPopovers, controlKind, setRangeValue, notePointerActive, pointerCaptureElement, endPointerCapture, CONTROL_NONE, CONTROL_RANGE, topLayerElements, dateKind, dateSetActive } from "../dom.ts";
+import { Node, Element, Event, HTMLDialogElement, HTMLInputElement, HTMLOptionElement, HTMLSelectElement, HTMLTextAreaElement, MouseEvent, PointerEvent, document, dispatch, trusted, invalidateStyle, focusState, setFocus, runClickDefault, inDisabledFormControl, noteInput, noteUserActivation, lightDismissPopovers, controlKind, setRangeValue, notePointerActive, pointerCaptureElement, endPointerCapture, CONTROL_NONE, CONTROL_RANGE, topLayerElements, dateKind, dateSetActive } from "../dom.ts";
 import { restyleForState } from "../style.ts";
 import { invalidateLayout } from "../invalidation.ts";
 import { inputIndexAt } from "../layout.ts";
@@ -231,6 +231,7 @@ function textAreaAt(target: Node | null): HTMLTextAreaElement | null {
 
 export function pointerDown(x: number, y: number, clicks: number = 1, mods: number = 0): void {
   noteInput("pointer");
+  noteUserActivation();
   pointer.x = x;
   pointer.y = y;
   pointer.mods = mods;

@@ -10570,6 +10570,16 @@ function textDataMovesStyle(parent: Node): boolean {
   const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
+  // A display: contents box has no box of its own: its children are items of the container that
+  // does, so a whitespace-only run under it is decided there and an edit must restyle.
+  if (d === P.D_CONTENTS) {
+    for (let a = parent.parentNode; a !== null && a.nodeType === 1; a = a.parentNode) {
+      const ad = (a as Element).sv[P.P_DISPLAY];
+      if (ad === P.D_FLEX || ad === P.D_INLINE_FLEX || ad === P.D_GRID || ad === P.D_INLINE_GRID ||
+        ad === P.D_GRID_LANES || ad === P.D_INLINE_GRID_LANES) return true;
+      if (ad !== P.D_CONTENTS) break;
+    }
+  }
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
     if (a.firstLetterPseudo !== null || a.firstLetterFloat !== null) return true;
     // `dir=auto` (and a <bdi>) takes its direction from the text below it, and :dir() sees that.
@@ -11723,10 +11733,16 @@ let activationAt = -1;
 /** How long a gesture keeps counting, the way a browser's transient activation does. */
 const ACTIVATION_WINDOW_MS = 5000;
 
-/** The trusted events a browser treats as activating: a press, a click, a key. */
-function isActivationEvent(type: string): boolean {
-  return type === "mousedown" || type === "pointerdown" || type === "click" ||
-    type === "keydown" || type === "touchend";
+/** Records a user gesture at the input path: a press or a key the host delivered, never an event
+ *  a script dispatched (document.createEvent, element.click() and dispatchEvent are not gestures). */
+export function noteUserActivation(): void {
+  activationAt = performance.now();
+}
+
+/** Spends the current gesture: a transient activation opens at most one window, as a browser's
+ *  does. */
+export function consumeUserActivation(): void {
+  activationAt = -1;
 }
 
 /** Whether the page may open a new window now: a user gesture began within the activation
@@ -11736,7 +11752,6 @@ export function hasTransientActivation(): boolean {
 }
 
 export function dispatch(event: Event, target: Node): boolean {
-  if (event.isTrusted && isActivationEvent(event.type)) activationAt = performance.now();
   event.dispatchFlag = true;
   event.windowCaptureRan = false;
   event.windowBubbleRan = false;
