@@ -42,6 +42,10 @@ import { frameTimes } from "./frame-times.ts";
 
 export class StyleTables {
   ruleClasses: string[][] = [];
+  /** Class-prefix conditions on each rule's subject compound (".foo-*"). */
+  ruleClassPrefixes: string[][] = [];
+  /** The same condition on the ancestor compounds of each rule's chain. */
+  chainClassPrefixes: string[][][] = [];
   ruleStates: number[] = [];
   /** True for a rule whose declarations set a custom property (or hold a var()). */
   ruleCustoms: boolean[] = [];
@@ -394,6 +398,17 @@ function attrMatches(el: Element, enc: string): boolean {
   return false;
 }
 
+/** Whether a class token matches a class-prefix selector: it starts with the prefix, something
+ *  follows it, and what follows is not another "-" (the separator ends the prefix). */
+export function classPrefixFits(el: Element, prefix: string): boolean {
+  const names = el.classList.tokens();
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    if (n.length > prefix.length && n.startsWith(prefix) && n.charAt(prefix.length) !== "-") return true;
+  }
+  return false;
+}
+
 /** Does the element match one compound encoded for a :not() condition? */
 function encodedMatches(el: Element, enc: string): boolean {
   if (enc === "") return true; // :not(*) matches every element
@@ -417,6 +432,8 @@ function encodedMatches(el: Element, enc: string): boolean {
       if (el.id !== v) return false;
     } else if (kind === "c") {
       if (!el.classList.contains(v)) return false;
+    } else if (kind === "p") {
+      if (!classPrefixFits(el, v)) return false;
     } else if (kind === "s") {
       const s = Number(v);
       if ((s & P.S_FORM_STATES) !== 0) refreshFormState(el, s);
@@ -576,6 +593,9 @@ function linkMatches(rule: number, k: number, el: Element): boolean {
     ? tables.chainNthEndOf[rule][k] : NO_OF;
   if (!nthApplies(el, tables.chainNthStart[rule][k], tables.chainNthEnd[rule][k], chainStartOf, chainEndOf)) return false;
   for (const c of tables.chainClasses[rule][k]) if (!el.classList.contains(c)) return false;
+  const chainPrefixes = rule < tables.chainClassPrefixes.length && k < tables.chainClassPrefixes[rule].length
+    ? tables.chainClassPrefixes[rule][k] : undefined;
+  if (chainPrefixes !== undefined) for (const p of chainPrefixes) if (!classPrefixFits(el, p)) return false;
   for (const a of tables.chainAttrs[rule][k]) if (!attrMatches(el, a)) return false;
   if (!langApplies(el, rule < tables.chainLang.length && k < tables.chainLang[rule].length
     ? tables.chainLang[rule][k] : NO_LANG)) return false;
@@ -1689,6 +1709,8 @@ function ruleApplies(el: Element, rule: number): boolean {
   // The subject's own tests come first: a rule that names a class this element doesn't have — the
   // common case — costs one lookup rather than the media, container and scope lookups below.
   for (const c of tables.ruleClasses[rule]) if (!test.classList.contains(c)) return false;
+  const prefixes = rule < tables.ruleClassPrefixes.length ? tables.ruleClassPrefixes[rule] : undefined;
+  if (prefixes !== undefined) for (const p of prefixes) if (!classPrefixFits(test, p)) return false;
   if (!ruleMediaHolds(rule)) return false;
   // A rule inside @container applies while a matching ancestor container's size says so. The
   // generated box of a pseudo-element asks about the containers around the element that makes it.
@@ -2836,6 +2858,11 @@ function ensureChainIndex(): void {
     if (r < tables.chainId.length) {
       for (const id of tables.chainId[r]) if (id !== "") { ancestorChainsTestMore = true; break; }
     }
+    if (r < tables.chainClassPrefixes.length) {
+      // A class prefix on an ancestor names no class to index, so any class change has to be
+      // checked against it.
+      for (const link of tables.chainClassPrefixes[r]) if (link.length > 0) { ancestorChainsTestMore = true; break; }
+    }
     if (r < tables.chainAttrs.length) {
       for (const attrs of tables.chainAttrs[r]) if (attrs.length > 0) { ancestorChainsTestMore = true; break; }
     }
@@ -3902,6 +3929,7 @@ function compoundFits(el: Element, c: Compound, scope: Element | null = null): b
   // parseSelector has already turned :scope into :root.
   if (c.scope === true && el !== (scope === null ? document.documentElement : scope)) return false;
   for (const k of c.classes) if (!el.classList.contains(k)) return false;
+  if (c.classPrefixes !== undefined) for (const p of c.classPrefixes) if (!classPrefixFits(el, p)) return false;
   if ((c.states & P.S_FORM_STATES) !== 0) refreshFormState(el, c.states);
   if ((c.states & el.state) !== c.states) return false;
   if (!nthApplies(el, c.nthStart, c.nthEnd, c.nthStartOf ?? NO_OF, c.nthEndOf ?? NO_OF)) return false;
