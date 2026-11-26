@@ -772,6 +772,14 @@ async function runBatchOne(index: number, jobs: Job[], outDir: string, hostObjs:
   }
 }
 
+/**
+ * How long one compiled runner may take for its batch. A testharness page whose tests never
+ * settle holds its turn for the harness's 30-second test limit, so a batch of a hundred pages can
+ * legitimately run for several minutes; a two-minute cap reported those batches as crashes and
+ * split them, so this one is generous.
+ */
+const RUN_TIMEOUT = 900_000;
+
 async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs: string[]): Promise<BatchOutput> {
   rmSync(dir, { recursive: true, force: true });
   mkdirSync(join(dir, "node_modules", "@scriptc"), { recursive: true });
@@ -864,7 +872,7 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
     const crashedPages: string[] = [];
     let start = 0;
     while (start < active.length) {
-      const r = await exec(exe, [String(start)], 120_000, { NATIVE_WPT_OUT: outDir });
+      const r = await exec(exe, [String(start)], RUN_TIMEOUT, { NATIVE_WPT_OUT: outDir });
       let last = start - 1;
       let begun = -1;
       for (const line of (r.stdout ?? "").split("\n")) {

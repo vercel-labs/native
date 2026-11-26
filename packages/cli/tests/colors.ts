@@ -44,6 +44,8 @@ const CASES: [string, string][] = [
   ["color-mix(in oklch, red 25%, blue)", "122,0,244,255"],
   ["color-mix(in oklab, oklch(20.8% 0.042 265.755) 5%, oklch(100% 0 0))", "241,242,243,255"],
   ["color-mix(in oklab, oklch(20.8% 0.042 265.755) 5%, transparent)", "15,23,43,13"],
+  // A percentage may follow a colour function with no space, as Tailwind's opacity utilities write it.
+  ["color-mix(in oklab, oklch(69.6% 0.17 162.48)15%, transparent)", "0,188,125,38"],
   // Relative colors: the origin's own channels, in the function's space (identity or permuted).
   ["oklab(from #ff0000 l a b)", "255,0,0,255"],
   ["lab(from rgb(0, 128, 0) l a b)", "0,128,0,255"],
@@ -72,7 +74,8 @@ const PAGE = `<!doctype html>
 <html><head><meta name="native-window" content="width=100, height=100"><style>
 body { margin: 0; }
 #box { width: 100px; height: 50px; background-color: oklch(58.5% 0.233 277.117); color: lab(50% 40 -30); }
-</style></head><body><div id="box">x</div></body></html>`;
+#mix { width: 100px; height: 50px; background-color: color-mix(in oklab, oklch(69.6% 0.17 162.48)15%, transparent); }
+</style></head><body><div id="box">x</div><div id="mix"></div></body></html>`;
 const dir = mkdtempSync(join(tmpdir(), "native-colors-"));
 writeFileSync(join(dir, "index.html"), PAGE);
 const exe = join(dir, "app");
@@ -90,6 +93,7 @@ const at = (x: number, y: number): string => {
   return `${img.rgba[o]},${img.rgba[o + 1]},${img.rgba[o + 2]}`;
 };
 check("a background-color in oklch() paints", at(80, 40) === "97,95,255", `got ${at(80, 40)}`);
+check("a background-color in color-mix() paints", at(80, 140) === "217,245,236", `got ${at(80, 140)}`);
 
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
