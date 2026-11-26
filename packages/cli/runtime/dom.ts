@@ -10567,11 +10567,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -11795,6 +11791,10 @@ export function dispatch(event: Event, target: Node): boolean {
     (event.composed && root instanceof ShadowRoot && root.host.isConnected));
   if (reachesWindow) {
     event.windowCaptureRan = true;
+    // The window sits above the document in the path, so its listeners see the target and the
+    // related target the outermost path item shows, as a browser's do.
+    if (shown.length > 0) event.target = shown[shown.length - 1];
+    if (event.pathItems.length > 0) event.relatedNow = event.pathItems[event.pathItems.length - 1].related;
     host!.invokeWindowListeners(event.type, event, true);
   }
   // Capture: from the outermost item inward, the target's own listeners included.
@@ -11820,6 +11820,8 @@ export function dispatch(event: Event, target: Node): boolean {
   // (focus, mouseenter, ...) still reaches its capture listeners there.
   if (reachesWindow && event.bubbles && !event.propagationStopped) {
     event.windowBubbleRan = true;
+    if (shown.length > 0) event.target = shown[shown.length - 1];
+    if (event.pathItems.length > 0) event.relatedNow = event.pathItems[event.pathItems.length - 1].related;
     host!.invokeWindowListeners(event.type, event, false);
   }
   event.eventPhase = Event.NONE;

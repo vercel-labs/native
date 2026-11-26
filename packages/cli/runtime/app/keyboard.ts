@@ -310,6 +310,41 @@ export function __nativeSendKeys(element: any, keys: any): void {
 }
 
 /**
+ * One WebDriver key value from a test_driver.Actions source: presses or releases it through the
+ * same path the host's keys take, so the event is trusted, and answers the modifier state that
+ * holds afterwards. The values are WebDriver's: U+E003 Backspace, U+E007 Enter, U+E008 Shift,
+ * U+E03D Meta and so on; every other character is typed text.
+ */
+export function actionKey(value: string, mods: number, down: boolean): number {
+  const ch = value.length === 0 ? 0 : value.charCodeAt(0);
+  let code = KEY_TEXT;
+  let text = value;
+  let mod = 0;
+  if (ch === 0x00e003) { code = KEY_BACKSPACE; text = ""; }
+  else if (ch === 0x00e004) { code = KEY_TAB; text = ""; }
+  else if (ch === 0x00e006 || ch === 0x00e007) { code = KEY_ENTER; text = ""; }
+  else if (ch === 0x00e00c) { code = KEY_ESCAPE; text = ""; }
+  else if (ch === 0x00e00d) { text = " "; }
+  else if (ch === 0x00e010) { code = KEY_END; text = ""; }
+  else if (ch === 0x00e011) { code = KEY_HOME; text = ""; }
+  else if (ch === 0x00e012) { code = KEY_LEFT; text = ""; }
+  else if (ch === 0x00e013) { code = KEY_UP; text = ""; }
+  else if (ch === 0x00e014) { code = KEY_RIGHT; text = ""; }
+  else if (ch === 0x00e015) { code = KEY_DOWN; text = ""; }
+  else if (ch === 0x00e017) { code = KEY_DELETE; text = ""; }
+  else if (ch === 0x00e008) mod = MOD_SHIFT;
+  else if (ch === 0x00e009) mod = MOD_CTRL;
+  else if (ch === 0x00e00a) mod = MOD_ALT;
+  else if (ch === 0x00e03d) mod = MOD_META;
+  if (down) {
+    keyDown(code, mods | mod, text);
+    return mods | mod;
+  }
+  keyUp(code, mods & ~mod, text);
+  return mods & ~mod;
+}
+
+/**
  * A key came up. The event bubbles from the focused element, or the page when nothing is
  * focused, and reaches the window's listeners. Editing happens on keydown, so keyup only tells
  * the page the key is no longer held.
