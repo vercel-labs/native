@@ -498,9 +498,10 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
             if (a === "") continue;
             const f = scanFrag(a);
             if (f === null || !fragBuilds(f, dom)) {
-              // An item that can match nothing adds no alternative, but :is() still weighs the
-              // most specific thing it lists.
-              dropped = Math.max(dropped, textSpec(a));
+              // A malformed item is dropped by every browser and weighs nothing; one that is
+              // valid but can match nothing here (:visited) adds no alternative, yet :is() still
+              // weighs the most specific thing it lists.
+              if (f !== null) dropped = Math.max(dropped, droppedWeight(f, dom));
               continue;
             }
             frags.push(f);
@@ -648,14 +649,15 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
   };
 }
 
-/** The specificity of a selector's text as written, even one that can match nothing here. */
-function textSpec(text: string): number {
-  const parts = splitComplex(text);
-  if (parts === null) return 0;
+/** The weight a dropped forgiving-list item adds: an item whose compounds all build but whose
+ *  variants can match nothing here (:visited) keeps its weight, one that doesn't build at all is
+ *  malformed and weighs nothing. Both are read from the scan already done, never re-parsed. */
+function droppedWeight(frag: Frag, dom: boolean): number {
   let spec = 0;
-  for (const c of parts.compounds) {
-    const s = scanCompound(c, false);
-    if (s === null) return 0;
+  for (const s of [frag.subject, ...frag.chain.map((c) => c.scan)]) {
+    const variants = expandScan(s, dom);
+    if (variants === null) return 0;
+    for (const v of variants) if (buildCompound(v.simples, dom) === null) return 0;
     spec += scanSpec(s);
   }
   return spec;
@@ -847,7 +849,11 @@ function applyPseudo(c: Compound, name: string, arg: string | null, dom: boolean
 let activeNamespaces: Map<string, string> | null = null;
 
 export function setSelectorNamespaces(ns: Map<string, string> | null): void {
+  if (ns === activeNamespaces) return;
   activeNamespaces = ns;
+  // Scans made for the old prefixes are keyed by text alone, and a text's reading can change
+  // with the prefixes that name its namespaces.
+  scanMemo.clear();
 }
 
 /** Whether a compound's type selector fits an element of this local name and namespace. */

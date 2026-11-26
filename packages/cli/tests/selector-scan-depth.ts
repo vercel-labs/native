@@ -2,7 +2,7 @@
 // an "of S" filter must cost linear time, not exponential.
 //   npm test
 
-import { parseSelector } from "../shared/css/selectors.ts";
+import { parseSelector, setSelectorNamespaces } from "../shared/css/selectors.ts";
 
 let failed = 0;
 function check(name: string, ok: boolean, detail = ""): void {
@@ -13,6 +13,23 @@ function check(name: string, ok: boolean, detail = ""): void {
 check(":is(.a, :visited) keeps .a", (parseSelector(":is(.a, :visited)", true) ?? []).length === 1);
 check(":where(.a) parses", parseSelector(":where(.a)", true) !== null);
 check(":nth-child(2n of .a) parses", parseSelector(":nth-child(2n of .a)", true) !== null);
+
+// A malformed item is dropped by every browser and adds no weight; a valid one that matches
+// nothing here keeps its own.
+const spec = (text: string): number => {
+  const list = parseSelector(text, true);
+  return list === null || list.length === 0 ? -1 : list[0].specificity;
+};
+check("a malformed :is() item weighs nothing", spec(":is(#id:nth-child(foo), .a)") === 100, String(spec(":is(#id:nth-child(foo), .a)")));
+check("a :visited item keeps its weight", spec(":is(#x:visited, .a)") === 10100, String(spec(":is(#x:visited, .a)")));
+
+// The scan cache follows the namespace prefixes a sheet declares, never an older set.
+setSelectorNamespaces(new Map([["", "http://www.w3.org/2000/svg"]]));
+const svg = parseSelector("a", false);
+check("a sheet's default namespace reaches the scan", svg !== null && svg[0].tagNs === "http://www.w3.org/2000/svg", JSON.stringify(svg));
+setSelectorNamespaces(null);
+const plain = parseSelector("a", false);
+check("a new set of prefixes reads the same text anew", plain !== null && plain[0].tagNs === undefined, JSON.stringify(plain));
 
 // 64 levels of :where(:nth-child(1 of …)): linear work, well under a second; the repeated-scan
 // shape took seconds by depth 20.
