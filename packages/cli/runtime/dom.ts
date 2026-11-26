@@ -3097,6 +3097,9 @@ export class Node extends EventTarget {
       child.scrollMarkers = [];
     }
     noteChildList(this, [], [child], prev, next);
+    // Focus doesn't survive the element leaving the page: a browser unfocuses it, and the page's
+    // active element falls back to the body.
+    if (wasConnected && focusState.el !== null && !focusState.el.isConnected) setFocus(null);
     // A popover that leaves the document closes, going away from the screen it was on.
     if (wasConnected && openPopoverCount > 0) hidePopoversIn(child);
     if (wasConnected && CUSTOM_DEFS > 0) disconnectedSubtree(child);
@@ -5957,7 +5960,8 @@ export class Element extends Node {
    * the ring, and anything else shows it when the last interaction came from the keyboard.
    */
   focus(options?: { preventScroll?: boolean; focusVisible?: boolean }): void {
-    if (this.isFocusable) setFocus(this, options?.focusVisible);
+    // An element outside the document takes no focus; a browser leaves the active element alone.
+    if (this.isFocusable && this.isConnected) setFocus(this, options?.focusVisible);
   }
   blur(): void {
     if (focusState.el === this) setFocus(null);
@@ -8212,7 +8216,16 @@ function validBits(el: Element): number {
 }
 
 function focusWithinBits(el: Element): number {
-  return focusState.el !== null && el.contains(focusState.el) ? P.S_FOCUS_WITHIN : 0;
+  const focused = focusState.el;
+  if (focused === null || !el.contains(focused)) return 0;
+  // A box on the top layer takes the focus it holds for itself: nothing above it sees it.
+  let n: Node | null = focused;
+  while (n !== null) {
+    if (n === el) return P.S_FOCUS_WITHIN;
+    if (isInTopLayer(n)) return 0;
+    n = n.parentNode;
+  }
+  return 0;
 }
 
 /** A box's top edge relative to a scroll container's padding box, in unscrolled content px. */
@@ -11959,6 +11972,20 @@ export function setFocus(el: Element | null, visible?: boolean): void {
       prev.commit();
       resetDateEdit(prev);
     }
+  }
+  // A blur handler may have focused something else; a browser keeps that focus, and the call
+  // that lost it in passing does not take it back.
+  if (prev !== null && focusState.el !== null) {
+    invalidatePaint();
+    return;
+  }
+  // A focusout handler may have taken the element out of the page: a browser leaves the document
+  // unfocused then, rather than focusing a node that is no longer in it.
+  if (el !== null && !el.isConnected) {
+    focusState.el = null;
+    if (focusChangedHook !== null) focusChangedHook();
+    invalidatePaint();
+    return;
   }
   if (el !== null) {
     focusState.el = el;
