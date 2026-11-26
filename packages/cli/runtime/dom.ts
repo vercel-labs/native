@@ -10661,6 +10661,16 @@ function textDataMovesStyle(parent: Node): boolean {
   const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
+  // A display: contents box has no box of its own: its children are items of the container that
+  // does, so a whitespace-only run under it is decided there and an edit must restyle.
+  if (d === P.D_CONTENTS) {
+    for (let a = parent.parentNode; a !== null && a.nodeType === 1; a = a.parentNode) {
+      const ad = (a as Element).sv[P.P_DISPLAY];
+      if (ad === P.D_FLEX || ad === P.D_INLINE_FLEX || ad === P.D_GRID || ad === P.D_INLINE_GRID ||
+        ad === P.D_GRID_LANES || ad === P.D_INLINE_GRID_LANES) return true;
+      if (ad !== P.D_CONTENTS) break;
+    }
+  }
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
     if (a.firstLetterPseudo !== null || a.firstLetterFloat !== null) return true;
     // `dir=auto` (and a <bdi>) takes its direction from the text below it, and :dir() sees that.
