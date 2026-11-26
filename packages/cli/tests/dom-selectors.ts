@@ -78,6 +78,15 @@ out.push("document scope=" + one(":scope") + " " +
   ids(document.querySelectorAll(":scope > html")) + " " + document.documentElement.matches(":scope"));
 out.push("pseudo chars=" + one("p::before") + " " + one("p::first-line") + " " + one("::selection"));
 out.push("checked=" + one(":checked") + " empty=" + one("p:empty"));
+// :is() and :where() take a forgiving list: a name this build doesn't know drops out of it, and
+// a list left empty matches nothing rather than throwing.
+out.push("forgiving is=" + ids(document.querySelectorAll(":is(p.a, :bogus)")) + " " +
+  ids(document.querySelectorAll(":is()")) + " " + ids(document.querySelectorAll(":is(:bogus > p, p.c)")));
+// A selector whose right tokens the page left off is closed at the end of the text, as a
+// browser closes the blocks and strings that run to it.
+out.push("eof tokens=" + one('p[data-k="1"') + " " + one('p[data-k="1') + " " +
+  ids(document.querySelectorAll("p:not([data-k]")) + " " +
+  ids(document.querySelectorAll("p:not([data-k")));
 out.push("invalid1=" + err(() => document.querySelector("p >")));
 out.push("invalid2=" + err(() => document.querySelector(",")));
 out.push("invalid3=" + err(() => document.querySelector("[a=")));
@@ -117,6 +126,8 @@ const EXPECTED_LOG: [string, string][] = [
   ["the document's query is scoped to the root", "document scope=html [] true"],
   ["pseudo-elements name nothing", "pseudo chars=null null null"],
   ["an unknown pseudo-class names nothing", "checked=null empty=null"],
+  ["a forgiving :is() list drops what it can't take", "forgiving is=[\"p:a\"] [] [\"p:c\"]"],
+  ["missing right tokens at the end are closed", "eof tokens=p p [\"p:b\",\"p:c\",\"p:sp\",\"p:sp2\"] [\"p:b\",\"p:c\",\"p:sp\",\"p:sp2\"]"],
   ["a dangling combinator throws", "invalid1=SyntaxError: Failed to execute 'querySelector' on 'Document': 'p >' is not a valid selector."],
   ["a bare comma throws", "invalid2=SyntaxError: Failed to execute 'querySelector' on 'Document': ',' is not a valid selector."],
   ["an unclosed attribute selector throws", "invalid3=SyntaxError: Failed to execute 'querySelector' on 'Document': '[a=' is not a valid selector."],

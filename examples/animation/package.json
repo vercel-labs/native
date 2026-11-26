@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-animation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/animation"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

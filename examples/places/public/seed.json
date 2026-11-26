@@ -1,0 +1,10 @@
+[
+  { "title": "The Timeless Way of Building", "url": "https://archive.example.org/timeless-way", "tags": "reading, architecture", "note": "The pattern-language book people keep quoting.", "added": 1750000000000 },
+  { "title": "Invisible Cities — notes", "url": "https://notes.example.org/invisible-cities", "tags": "reading", "note": "A chapter-by-chapter note set worth rereading.", "added": 1750100000000 },
+  { "title": "System fonts in CSS", "url": "https://css.example.org/system-fonts", "tags": "design, css", "note": "The short list that avoids a webfont.", "added": 1750200000000 },
+  { "title": "Writing a tiny parser", "url": "https://dev.example.org/tiny-parser", "tags": "engineering", "note": "Explains precedence climbing with a calculator.", "added": 1750300000000 },
+  { "title": "The quiet launch checklist", "url": "https://launch.example.org/checklist", "tags": "engineering, process", "note": "Useful even when the launch is not quiet.", "added": 1750400000000 },
+  { "title": "Field recordings of the coast", "url": "https://sound.example.org/coast", "tags": "listening", "note": "For the afternoon that needs less noise.", "added": 1750500000000 },
+  { "title": "A field guide to shade", "url": "https://design.example.org/shade", "tags": "design", "note": "Picking real shadows instead of black at 20%.", "added": 1750600000000 },
+  { "title": "Notes on slow software", "url": "https://writing.example.org/slow", "tags": "reading, engineering", "note": "The case for programs that do less.", "added": 1750700000000 }
+]
