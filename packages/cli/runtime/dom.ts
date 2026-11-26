@@ -12965,14 +12965,8 @@ export class HTMLInputElement extends HTMLElement {
     const declared = stepAttr === null ? 1 : Number(stepAttr);
     const step = isFinite(declared) && declared > 0 ? declared : 1;
     if (min > max) return;
-    if (t === "number" && this.val === "") {
-      // An empty field steps to the bound on the side it is stepped toward and stays empty when
-      // there is no such bound, as the stepping algorithm says: it is not one step past the min.
-      const bound = n > 0 ? min : max;
-      if (!isFinite(bound)) return;
-      this.value = String(bound);
-      return;
-    }
+    // An empty field counts as zero, as the stepping algorithm has it; its bounds then clamp the
+    // result, so an unbounded field steps from zero and a bounded one lands on its bound.
     let current = this.val === "" ? (t === "range" ? spec.value : 0) : Number(this.val);
     if (isNaN(current)) current = t === "range" ? spec.value : 0;
     if (current < min || current > max) return;
