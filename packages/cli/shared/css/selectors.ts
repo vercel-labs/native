@@ -50,7 +50,8 @@ export function hasStates(list: readonly string[]): number {
   let s = 0;
   for (const raw of list) {
     const at = raw.indexOf("\u0003");
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    let body = at < 0 ? raw : raw.slice(at + 1);
+    if (body.charAt(0) === "\u0005") body = body.slice(1);
     const sels = parseSelector(body);
     if (sels === null) continue;
     for (const sel of sels) {
@@ -409,8 +410,19 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
           // A relative selector starts with an optional combinator, then a complex selector.
           const lead = /^([>+~])?\s*([\s\S]*)$/.exec(a);
           const body = lead === null ? "" : lead[2].trim();
-          if (body === "" || scanFrag(body) === null) return null;
-          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + body);
+          const frag = body === "" ? null : scanFrag(body);
+          if (frag === null) return null;
+          // `:has(> :is(.a > .b))`: the leading combinator relates the compound's own subject to
+          // the anchor, while the :is() argument's chain sits above that subject. The marker tells
+          // the runtime matcher to test the relation on the subject rather than on the leftmost
+          // compound of the argument's chain.
+          const parts = splitComplex(body);
+          let onSubject = false;
+          if (parts !== null && parts.compounds.length === 1) {
+            const variants = expandScan(frag.subject);
+            onSubject = variants !== null && variants.some((v) => v.chain.length > 0);
+          }
+          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + (onSubject ? "\u0005" : "") + body);
         }
         i = j;
         continue;
@@ -625,7 +637,10 @@ function scanSpec(scan: Scan): number {
     } else spec += 100;
   }
   for (const a of scan.has) {
-    const body = a.slice(a.indexOf("\u0003") + 1);
+    let body = a.slice(a.indexOf("\u0003") + 1);
+    // The \u0005 marker records that the leading combinator relates the :is() subject; it is not
+    // part of the selector text.
+    if (body.charAt(0) === "\u0005") body = body.slice(1);
     const frag = scanFrag(body);
     if (frag === null) continue;
     let argSpec = 0;
