@@ -324,12 +324,32 @@ function EventWatcher(test, watchedNode, eventTypes, timeoutPromise) {
     resolveFunc(result);
   });
   for (var i = 0; i < eventTypes.length; i++) watchedNode.addEventListener(eventTypes[i], eventHandler, false);
+  function stopWatching() {
+    for (var j = 0; j < eventTypes.length; j++) watchedNode.removeEventListener(eventTypes[j], eventHandler, false);
+  }
+  this.stop_watching = stopWatching;
+  // The listeners belong to the test that made the watcher: remove them when it finishes, so a
+  // later event on a shared target cannot fail a test that had passed.
+  if (typeof test.add_cleanup === "function") test.add_cleanup(stopWatching);
   this.wait_for = function (types, options) {
     if (waitingFor !== null) return Promise.reject(new Error("Already waiting for an event"));
     if (typeof types === "string") types = [types];
+    recordedEvents = options !== undefined && options !== null && options.record === "all" ? [] : null;
     return new Promise(function (resolve) {
-      waitingFor = { types: types.slice(), resolve: resolve };
-      recordedEvents = options !== undefined && options !== null && options.record === "all" ? [] : null;
+      var mine = { types: types.slice(), resolve: resolve };
+      waitingFor = mine;
+      // A timeoutPromise handed to the watcher bounds the wait: when it settles first, the events
+      // never came, which is a failure unless none were expected.
+      if (typeof timeoutPromise === "function") {
+        timeoutPromise().then(function () {
+          if (waitingFor === null || waitingFor !== mine) return;
+          assert_true(mine.types.length === 0, "Timed out waiting for " + mine.types.join(", "));
+          var result = recordedEvents;
+          recordedEvents = null;
+          waitingFor = null;
+          resolve(result);
+        });
+      }
     });
   };
 }

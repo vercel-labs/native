@@ -590,6 +590,39 @@ function isModuleText(text: string): boolean {
  * undefined global. A page's scripts have such names shortened, consistently, before they are
  * compiled, so the page runs.
  */
+/** Whether the character can be part of an identifier. */
+function identChar(ch: string): boolean {
+  return /[A-Za-z0-9_$]/.test(ch);
+}
+
+/** Replaces a name in code but not in a string literal, so an id, a selector or text that spells
+ *  it keeps its value. */
+function replaceIdentifier(text: string, name: string, replacement: string): string {
+  let out = "";
+  let i = 0;
+  let quote = "";
+  while (i < text.length) {
+    const ch = text[i];
+    if (quote !== "") {
+      out += ch;
+      if (ch === "\\" && i + 1 < text.length) { out += text[i + 1]; i += 2; continue; }
+      if (ch === quote) quote = "";
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") { quote = ch; out += ch; i++; continue; }
+    if (text.startsWith(name, i) && (i === 0 || (!identChar(text[i - 1]) && text[i - 1] !== ".")) &&
+      (i + name.length >= text.length || !identChar(text[i + name.length]))) {
+      out += replacement;
+      i += name.length;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
 function renameLongIdentifiers(text: string): string {
   const names = new Set<string>();
   const re = /[A-Za-z_$][A-Za-z0-9_$]{44,}/g;
@@ -602,7 +635,7 @@ function renameLongIdentifiers(text: string): string {
     // same way and a call from one script reaches the declaration in another.
     let h = 0;
     for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-    out = out.replace(new RegExp(`(?<![\\w$.])${name}(?![\\w$])`, "g"), `__w${h.toString(36)}`);
+    out = replaceIdentifier(out, name, `__w${h.toString(36)}`);
   }
   return out;
 }
