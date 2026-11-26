@@ -6,7 +6,7 @@
 // counted in its parent element's stream, since the owner a fragment records is that element.
 
 import type { Node } from "./dom.ts";
-import { Element, document, selectionState, selectionStreamRange, textOwnersBetween, textStreamIndex } from "./dom.ts";
+import { Element, Event, document, dispatch, trusted, selectionState, selectionStreamRange, textOwnersBetween, textStreamIndex } from "./dom.ts";
 import { FRAG_TEXT, absolutePosition } from "./layout.ts";
 import { textWidth } from "./layout/text.ts";
 import { clipsX, clipsY, display } from "./layout/box-model.ts";
@@ -262,6 +262,9 @@ function rectInBlock(block: Element, a: number, b: number): number[] | null {
  * that drops a selection of three paragraphs repaints those three.
  */
 function repaintSelectionChange(before: [number, number] | null): void {
+  // Browsers send `selectionchange` at the document whenever the selection moves; it is how an
+  // editor keeps its toolbar in step with the caret. It doesn't bubble.
+  dispatch(trusted(new Event("selectionchange")), document);
   const after = selectionStreamRange();
   const spans: [number, number][] = [];
   if (before === null && after !== null) spans.push(after);
