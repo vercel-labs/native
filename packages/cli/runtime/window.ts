@@ -3,7 +3,7 @@
 // can share them; the DOM reaches the window object through document.defaultView.
 
 import type { Element, EventListener, EventListenerOrEventListenerObject, ListenerOptions, ScrollToOptions, Selection, WindowEventMap } from "./dom.ts";
-import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
+import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, hasTransientActivation, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
 import { CSS } from "./cssom.ts";
 import * as domIface from "./dom.ts";
 import * as highlightIface from "./highlights.ts";
@@ -566,6 +566,9 @@ export class Window {
       if (href !== "") this.location.href = href;
       return proxyFor(hostWindowId(), this.name);
     }
+    // A page opens a new window only while a user gesture counts, as a browser's popup blocker
+    // has it: outside one the call does nothing and answers null.
+    if (!hasTransientActivation()) return null;
     const id = hostWindowOpen(route, target === "_blank" ? "" : target, features === undefined ? "" : features);
     if (id < 0) return null;
     return proxyFor(id, target === "_blank" ? "" : target);

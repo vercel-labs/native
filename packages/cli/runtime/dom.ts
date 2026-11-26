@@ -10567,11 +10567,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -11722,7 +11718,25 @@ export function setWindowEventHost(host: WindowEventHost | null): void {
   windowEventHost = host;
 }
 
+/** When a trusted input event last counted as a user gesture. */
+let activationAt = -1;
+/** How long a gesture keeps counting, the way a browser's transient activation does. */
+const ACTIVATION_WINDOW_MS = 5000;
+
+/** The trusted events a browser treats as activating: a press, a click, a key. */
+function isActivationEvent(type: string): boolean {
+  return type === "mousedown" || type === "pointerdown" || type === "click" ||
+    type === "keydown" || type === "touchend";
+}
+
+/** Whether the page may open a new window now: a user gesture began within the activation
+ *  window. A window.open() outside one is a popup, which browsers block, so this does too. */
+export function hasTransientActivation(): boolean {
+  return activationAt >= 0 && performance.now() - activationAt <= ACTIVATION_WINDOW_MS;
+}
+
 export function dispatch(event: Event, target: Node): boolean {
+  if (event.isTrusted && isActivationEvent(event.type)) activationAt = performance.now();
   event.dispatchFlag = true;
   event.windowCaptureRan = false;
   event.windowBubbleRan = false;
