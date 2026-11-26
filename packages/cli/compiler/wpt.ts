@@ -937,6 +937,9 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
  */
 const MAX_SPLIT_DEPTH = 3;
 
+/** The first index a split child takes; top-level batches never reach it. */
+let splitIndex = 1_000_000;
+
 async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: string[], depth: number = 0): Promise<BatchOutput> {
   const first = await runBatchOne(index, jobs, outDir, hostObjs);
   // A build that never succeeded is split, whoever the error was attributed to: the pages that
@@ -960,7 +963,11 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
   }
   const mid = Math.ceil(jobs.length / 2);
   process.stderr.write(`\nnative wpt: batch ${index}: ${why} for ${jobs.length} page(s); splitting to find the page that breaks it\n`);
-  const half = async (n: number, part: Job[]): Promise<BatchOutput> => runBatch(index * 100 + n, part, outDir, hostObjs, depth + 1);
+  // A split child gets an index of its own, above every top-level one: its build directory lives
+  // until its parent's results are merged, and a later top-level batch must not reuse it and have
+  // its live tree deleted underneath it.
+  const half = async (_n: number, part: Job[]): Promise<BatchOutput> =>
+    runBatch(splitIndex++, part, outDir, hostObjs, depth + 1);
   const a = await half(1, jobs.slice(0, mid));
   const b = await half(2, jobs.slice(mid));
   const outputs = new Map(first.outputs);
