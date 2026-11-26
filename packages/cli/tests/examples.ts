@@ -220,6 +220,28 @@ const EXAMPLES: { [name: string]: Example } = {
     steps: "frame 0 | frame 16 | click #album-still-harbor | frame 500 | click #track-still-harbor-1 | frame 1000 | print #now-playing",
     want: ["Still Harbor · Marlow Vane"],
   },
+  animation: {
+    open: "frame 0 | frame 16",
+    // The counters run on the frame clock, so frames move them; the theme button switches without a
+    // colour transition (a transition on an inherited colour is a known runtime limitation).
+    steps: "frame 0 | wheel #hero 800 | frame 400 | frame 700 | frame 1200 | print #count-a | print #count-b | print #count-c | click #theme | frame 100 | print #theme",
+    want: ["2841", "12", "36", "Dark mode"],
+  },
+  checkout: {
+    open: "frame 0 | frame 16",
+    // An empty submit shows the first error, and Enter in the last field submits the filled form
+    // through its submit button and advances to shipping, whose total carries the default
+    // standard shipping. (The radio and card steps are left to the activation test.)
+    steps: "frame 0 | frame 16 | click #continue | frame 16 | print #error-name | click #name | type Robin Avery | click #email | type robin@example.com | click #password | type password1 | click #confirm | type password1 | key Enter | frame 16 | print #step-indicator | print #summary-total",
+    want: ["Enter your full name.", "✓Account2Shipping3Payment", "Total$65.00"],
+  },
+  gallery: {
+    open: "frame 0 | frame 16",
+    // Four thousand plates in a windowed four-column grid; search narrows to the Coast tag and a
+    // wheel scroll moves the window.
+    steps: "frame 0 | frame 16 | print #count | click #sort-popular | frame 16 | print #count | click #search | type coast | frame 16 | print #count | wheel #grid 600 | frame 16 | print #showing",
+    want: ["4000 of 4000 plates", "4000 of 4000 plates", "667 of 4000 plates", "Rows 2–9 of 167"],
+  },
   notes: {
     open: "frame 0 | frame 16",
     // React renders on a microtask, so the steps that follow start with a frame.
