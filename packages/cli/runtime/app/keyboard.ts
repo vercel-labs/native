@@ -2,7 +2,7 @@
 
 import * as P from "../../shared/props.ts";
 import { Node, Element, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, InputEvent, KeyboardEvent, document, dispatch, trusted, implicitSubmit, markPaintDirty, invalidatePaint, focusState, setFocus, noteInput, dismissPopover, openSelectMenu, controlKind, rangeSpec, setRangeValue, CONTROL_NONE, CONTROL_RANGE, inDisabledFormControl, dateKind, dateSegments, dateTypeText, dateStepActive, dateMoveActive, dateClearActive, dateSetActive, editingHostFor } from "../dom.ts";
-import { deleteTextIn, insertTextInto, selectHost } from "../editable.ts";
+import { deleteTextIn, insertTextInto, moveCaretIn, selectHost } from "../editable.ts";
 import { datePickerKey, closeDatePicker } from "../date-picker.ts";
 import { caret, textAreaLineStarts } from "../paint.ts";
 import { textWidth } from "../layout.ts";
@@ -433,6 +433,12 @@ export function keyDown(code: number, mods: number, text: string, repeat: boolea
       deleteTextIn(host, true);
       return;
     }
+    const extend = (mods & MOD_SHIFT) !== 0;
+    if (code === KEY_LEFT) { moveCaretIn(host, "left", extend); return; }
+    if (code === KEY_RIGHT) { moveCaretIn(host, "right", extend); return; }
+    if (code === KEY_HOME) { moveCaretIn(host, "home", extend); return; }
+    if (code === KEY_END) { moveCaretIn(host, "end", extend); return; }
+    if (code === KEY_UP || code === KEY_DOWN) return;
   }
   // A textarea edits its own text: Enter is a newline, and the caret walks the text it has.
   if (target instanceof HTMLTextAreaElement) {
