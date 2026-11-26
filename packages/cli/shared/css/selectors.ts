@@ -17,6 +17,7 @@ export function encodeCompound(c: Compound): string {
   if (c.id !== null) tokens.push("i" + c.id);
   if (c.root) tokens.push("r");
   for (const k of c.classes) tokens.push("c" + k);
+  for (const k of c.classPrefixes ?? []) tokens.push("p" + k);
   if (c.states !== 0) tokens.push("s" + c.states);
   if (c.nthStart.length > 0) tokens.push("a" + c.nthStart.join(","));
   if (c.nthEnd.length > 0) tokens.push("z" + c.nthEnd.join(","));
@@ -45,12 +46,18 @@ export function compoundStates(c: Compound): number {
   return s;
 }
 
+/** The selector text of a `:has()` argument, without its combinator and subject markers. */
+function hasArgumentBody(raw: string): string {
+  const at = raw.indexOf("\u0003");
+  const body = at < 0 ? raw : raw.slice(at + 1);
+  return body.charAt(0) === "\u0005" ? body.slice(1) : body;
+}
+
 /** Every state bit the selectors of a :has() argument list mention. */
 export function hasStates(list: readonly string[]): number {
   let s = 0;
   for (const raw of list) {
-    const at = raw.indexOf("\u0003");
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    const body = hasArgumentBody(raw);
     const sels = parseSelector(body);
     if (sels === null) continue;
     for (const sel of sels) {
@@ -219,7 +226,7 @@ function parseAttr(text: string): string | null {
 
 /** One simple selector of a compound, already decoded. */
 interface Simple {
-  kind: "tag" | "id" | "class" | "attr" | "pseudo" | "host" | "slotted";
+  kind: "tag" | "id" | "class" | "classPrefix" | "attr" | "pseudo" | "host" | "slotted";
   name: string;
   arg: string | null;
 }
@@ -303,8 +310,17 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
       if (pseudo !== P.PE_NONE || !flush()) return null;
       const id = readIdent(text, i + 1);
       if (id === null) return null;
-      simples.push({ kind: ch === "#" ? "id" : "class", name: id[0], arg: null });
-      i = id[1];
+      // A class name followed by "*" is a class-prefix selector (".foo-*"): it names a class
+      // that starts with the name. The star has to close the name.
+      let end = id[1];
+      let isPrefix = false;
+      if (ch === "." && text[end] === "*") {
+        isPrefix = true;
+        end++;
+        if (end < text.length && /[-a-zA-Z0-9_\u0080-\uffff]/.test(text[end])) return null;
+      }
+      simples.push({ kind: isPrefix ? "classPrefix" : ch === "#" ? "id" : "class", name: id[0], arg: null });
+      i = end;
       continue;
     }
     if (ch === "[") {
@@ -409,8 +425,19 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
           // A relative selector starts with an optional combinator, then a complex selector.
           const lead = /^([>+~])?\s*([\s\S]*)$/.exec(a);
           const body = lead === null ? "" : lead[2].trim();
-          if (body === "" || scanFrag(body) === null) return null;
-          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + body);
+          const frag = body === "" ? null : scanFrag(body);
+          if (frag === null) return null;
+          // `:has(> :is(.a > .b))`: the leading combinator relates the compound's own subject to
+          // the anchor, while the :is() argument's chain sits above that subject. The marker tells
+          // the runtime matcher to test the relation on the subject rather than on the leftmost
+          // compound of the argument's chain.
+          const parts = splitComplex(body);
+          let onSubject = false;
+          if (parts !== null && parts.compounds.length === 1) {
+            const variants = expandScan(frag.subject);
+            onSubject = variants !== null && variants.some((v) => v.chain.length > 0);
+          }
+          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + (onSubject ? "\u0005" : "") + body);
         }
         i = j;
         continue;
@@ -573,6 +600,7 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
   };
   const langs = (a.lang ?? []).concat(b.lang ?? []);
   const notSels = (a.notSels ?? []).concat(b.notSels ?? []);
+  const prefixes = (a.classPrefixes ?? []).concat(b.classPrefixes ?? []);
   return {
     tag: a.tag !== null ? a.tag : b.tag,
     tagNs: a.tagNs !== undefined ? a.tagNs : b.tagNs,
@@ -581,6 +609,7 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
     dir: a.dir !== undefined ? a.dir : b.dir,
     scope: a.scope === true || b.scope === true ? true : undefined,
     classes: a.classes.concat(b.classes),
+    classPrefixes: prefixes.length > 0 ? prefixes : undefined,
     states: a.states | b.states,
     empty: a.empty || b.empty,
     nthStart: a.nthStart.concat(b.nthStart),
@@ -625,7 +654,7 @@ function scanSpec(scan: Scan): number {
     } else spec += 100;
   }
   for (const a of scan.has) {
-    const body = a.slice(a.indexOf("\u0003") + 1);
+    const body = hasArgumentBody(a);
     const frag = scanFrag(body);
     if (frag === null) continue;
     let argSpec = 0;
@@ -841,6 +870,10 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       spec += 10000;
     } else if (s.kind === "class") {
       c.classes.push(s.name);
+      spec += 100;
+    } else if (s.kind === "classPrefix") {
+      if (c.classPrefixes === undefined) c.classPrefixes = [];
+      c.classPrefixes.push(s.name);
       spec += 100;
     } else if (s.kind === "attr") {
       c.attrs.push(s.name);

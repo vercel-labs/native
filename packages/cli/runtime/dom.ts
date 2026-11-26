@@ -35,7 +35,7 @@ import type { WebGLContextAttributes } from "./webgl.ts";
 import { StyleDeclaration, styleView } from "./cssom.ts";
 import type { CSSStyleDeclaration } from "./cssom.ts";
 import { hostFileRead, hostSetTitle, hostVideoCanPlay, hostWindowFullscreen, hostWindowFullscreenState } from "./host.ts";
-import { runEditCommand, supportsEditCommand } from "./editing.ts";
+import { queryEditCommandState, runEditCommand, supportsEditCommand } from "./editing.ts";
 import { followLinkHook } from "./link-hook.ts";
 import { runCommandHook } from "./command-hook.ts";
 import { ROW_GROUP, ROW_OPTION, closeSelectPopup, openSelectPopup, selectPopupSerial } from "./select-popup.ts";
@@ -118,9 +118,13 @@ export interface UIEventInit extends EventInit {
 export class UIEvent extends Event {
   get [Symbol.toStringTag](): string { return "UIEvent"; }
   readonly detail: number;
+  /** The window an event from a view belongs to; null for one a script constructs, as Chrome's. */
+  readonly view: any;
   constructor(...args: any[]) {
     super(eventTypeArg(args), eventInitArg(args));
-    this.detail = dictLong(eventInitArg(args), "detail", 0);
+    const init = eventInitArg(args);
+    this.detail = dictLong(init, "detail", 0);
+    this.view = init.view === undefined || init.view === null ? null : init.view;
   }
 }
 
@@ -147,6 +151,9 @@ export class MouseEvent extends UIEvent {
   readonly screenY: number;
   readonly clientX: number;
   readonly clientY: number;
+  /** The position in the document: the viewport position plus the page's scroll, as a browser's. */
+  readonly pageX: number;
+  readonly pageY: number;
   readonly movementX: number;
   readonly movementY: number;
   readonly button: number;
@@ -171,6 +178,9 @@ export class MouseEvent extends UIEvent {
     this.screenY = dictDouble(init, "screenY", 0);
     this.clientX = dictDouble(init, "clientX", 0);
     this.clientY = dictDouble(init, "clientY", 0);
+    const scroller = document.scrollingElement;
+    this.pageX = this.clientX + (scroller === null ? 0 : scroller.scrollLeft);
+    this.pageY = this.clientY + (scroller === null ? 0 : scroller.scrollTop);
     this.movementX = dictDouble(init, "movementX", 0);
     this.movementY = dictDouble(init, "movementY", 0);
     this.button = dictLong(init, "button", 0);
@@ -1172,6 +1182,11 @@ export class DOMTokenList {
   private changed(): void {
     if (this.owner === null) invalidateStyle();
     else if (this.owner.isConnected) invalidateStyleOf(this.owner);
+    // An element created by script keeps the rules it matched when it was made. A class it gains
+    // later names rules that were never in that set, so ask the style pass to work them out again,
+    // as the id setter does for an id. A compiled element's rules already cover every class a
+    // script can add, since the build keeps them all.
+    if (this.owner !== null && this.owner.dynamic) this.owner.rulesStale = true;
     if (liveHead !== null) refreshLiveCollections();
   }
 
@@ -2484,6 +2499,11 @@ export class Node extends EventTarget {
   naturalH = 0;
   /** Width of the content plus padding and the reach of out-of-flow boxes (see scrollWidth). */
   naturalW = 0;
+  /** How much of naturalW and naturalH the transformed-overflow pass added, to take back. */
+  tW = 0;
+  tH = 0;
+  /** The transform values layout last measured the box's painted reach from, -1 before any. */
+  lTransformSig = -1;
   /**
    * Set while the box's own intrinsic width is being measured, so that a min-width or max-width
    * keyword met during that measurement doesn't measure it again and spin.
@@ -2580,6 +2600,14 @@ export class Node extends EventTarget {
   fixedViewport = false;
   /** When this element last scrolled (ms), for showing the overlay scrollbar. */
   lastScroll = -1e9;
+  /**
+   * The lines a line-clamp ancestor still allows this box (CSS Overflow 4): a flow from a
+   * clamped box passes down what is left of its budget, -1 when there is none.
+   */
+  clampBudget = -1;
+  /** Whether the flow goes on past this box, so its last kept line ends in an ellipsis even when
+   *  the line itself fits the budget (CSS Overflow 4's block-ellipsis). */
+  clampEllipsis = false;
   lines: string[] = [];
   lineWidths: number[] = [];
   /** The first line's `text-indent`, which shifts it and narrows it in the content box. */
@@ -6981,6 +7009,24 @@ function labelableDescendant(root: Node): HTMLElement | null {
   return null;
 }
 
+/** The options a select lists: its descendant options, less the subtrees the HTML form-elements
+ *  rules leave out — an option's own, a datalist's, an hr's, a nested select's, and an optgroup
+ *  inside another optgroup. A wrapper element around them is transparent. */
+function collectSelectOptions(root: Node, out: HTMLOptionElement[], inOptgroup: boolean): void {
+  for (const c of root.kids) {
+    if (!c.isElementNode || c.pseudoKind !== P.PE_NONE) continue;
+    const e = c as Element;
+    if (e instanceof HTMLOptionElement) { out.push(e); continue; }
+    if (e instanceof HTMLSelectElement || e instanceof HTMLDataListElement || e.localName === "hr") continue;
+    if (e.localName === "optgroup") {
+      if (inOptgroup) continue;
+      collectSelectOptions(e, out, true);
+      continue;
+    }
+    collectSelectOptions(e, out, inOptgroup);
+  }
+}
+
 /** Every element under `root`, in document order. */
 function collectElements(root: Node, out: Element[]): void {
   for (const c of root.kids) {
@@ -8137,14 +8183,63 @@ function disabledBits(el: Element): number {
   // A disabled fieldset disables the controls inside it, and a disabled option group or select
   // disables the options in it.
   let off = controlDisabled(el as HTMLElement);
-  if (!off && el.localName === "option") {
+  if (!off && el.localName === "option") off = optionDisabled(el as HTMLOptionElement);
+  // An option group is disabled with the select it belongs to, as its options are.
+  if (!off && el.localName === "optgroup") {
     let a = el.parentElement;
-    while (a !== null && !off) {
-      if (a.localName === "optgroup" || a.localName === "select") off = attributeFlag(a, "disabled");
+    while (a !== null) {
+      const n = a.localName;
+      if (n === "select") { off = attributeFlag(a, "disabled"); break; }
+      // A group keeps the state of the select it is directly in: one inside another group, an
+      // option, an hr or a datalist takes after none of them.
+      if (n === "optgroup" || n === "option" || n === "hr" || n === "datalist") break;
       a = a.parentElement;
     }
   }
   return off ? P.S_DISABLED : P.S_ENABLED;
+}
+
+/** Whether an option is disabled: by its own attribute, or by the option group or select the
+ *  first one up the chain past a wrapper. An option nested in an option, an hr or a datalist
+ *  takes after none of them. */
+/** Whether the option or the option group it is in is disabled. The select's own disabled state
+ *  doesn't take part: a disabled select still shows the option it would have chosen. */
+function optionOrGroupDisabled(el: HTMLOptionElement): boolean {
+  if (attributeFlag(el, "disabled")) return true;
+  let group = false;
+  for (let a = el.parentElement; a !== null; a = a.parentElement) {
+    const n = a.localName;
+    if (n === "optgroup") {
+      if (group) return false;
+      group = true;
+      if (attributeFlag(a, "disabled")) return true;
+    } else if (n === "select" || n === "option" || n === "hr" || n === "datalist") {
+      return false;
+    }
+  }
+  return false;
+}
+
+function optionDisabled(el: HTMLOptionElement): boolean {
+  if (attributeFlag(el, "disabled")) return true;
+  // Only the option's own group counts, and a disabled select reaches the options it lists;
+  // an option nested in a second group, an option, an hr or a datalist is not one of them.
+  let groups = 0;
+  let a = el.parentElement;
+  while (a !== null) {
+    const n = a.localName;
+    if (n === "optgroup") {
+      groups++;
+      if (groups > 1) return false;
+      if (attributeFlag(a, "disabled")) return true;
+    } else if (n === "select") {
+      return attributeFlag(a, "disabled");
+    } else if (n === "option" || n === "hr" || n === "datalist") {
+      return false;
+    }
+    a = a.parentElement;
+  }
+  return false;
 }
 
 function requiredBits(el: Element): number {
@@ -8208,12 +8303,26 @@ function validBits(el: Element): number {
   // An out-of-range value fails the field's constraints even though validity only reports the
   // constraints the form code checks, so the range state decides here too.
   if ((rangeBits(el) & P.S_OUT_OF_RANGE) !== 0) return P.S_INVALID;
-  const field = el as HTMLInputElement;
-  return field.validity.valid ? P.S_VALID : P.S_INVALID;
+  // A select and a textarea report constraints of their own: only an input's validity would be
+  // the wrong interface to ask.
+  const valid = el instanceof HTMLInputElement || el instanceof HTMLSelectElement ||
+    el instanceof HTMLTextAreaElement ? el.validity.valid : true;
+  return valid ? P.S_VALID : P.S_INVALID;
 }
 
 function focusWithinBits(el: Element): number {
-  return focusState.el !== null && el.contains(focusState.el) ? P.S_FOCUS_WITHIN : 0;
+  const focused = focusState.el;
+  if (focused === null) return 0;
+  // The focused node lies within every ancestor of the flattened tree: inside a shadow tree or
+  // a slot, that chain runs through the host and past the slot's ancestors, not the DOM's own.
+  let n: Node | null = focused;
+  while (n !== null) {
+    if (n === el) return P.S_FOCUS_WITHIN;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return 0;
 }
 
 /** A box's top edge relative to a scroll container's padding box, in unscrolled content px. */
@@ -8818,6 +8927,9 @@ export class HTMLOptionElement extends HTMLElement {
     if (this.selectedSet) return this.selectedFlag;
     const s = this.selectElement();
     if (s === null) return this.defaultSelected;
+    // An option the select's list leaves out — one nested in an hr, a datalist or another
+    // option — keeps the selectedness its attribute gives it.
+    if (s.options.indexOf(this) < 0) return this.defaultSelected;
     return s.isSelected(this);
   }
   set selected(value: boolean) {
@@ -8836,7 +8948,9 @@ export class HTMLOptionElement extends HTMLElement {
   get index(): number {
     const s = this.selectElement();
     if (s === null) return 0;
-    return s.options.indexOf(this);
+    // An option the list leaves out sits at index 0, as a detached one does, not at -1.
+    const at = s.options.indexOf(this);
+    return at < 0 ? 0 : at;
   }
   get disabled(): boolean {
     return attributeFlag(this, "disabled");
@@ -8846,7 +8960,10 @@ export class HTMLOptionElement extends HTMLElement {
   }
   get form(): HTMLFormElement | null {
     const s = this.selectElement();
-    return s === null ? null : formOwnerFor(s);
+    // An option the select doesn't list — one nested in an hr, a datalist or another option — has
+    // no form of its own, as the option list says.
+    if (s === null || s.options.indexOf(this) < 0) return null;
+    return formOwnerFor(s);
   }
   /** The select this option is in, or null when it isn't in a select's list. */
   selectElement(): HTMLSelectElement | null {
@@ -9029,9 +9146,7 @@ export class HTMLSelectElement extends HTMLElement {
   /** The options in the select, including those inside option groups, in document order. */
   get options(): HTMLOptionElement[] {
     const out: HTMLOptionElement[] = [];
-    const all: Element[] = [];
-    collectElements(this, all);
-    for (const e of all) if (e instanceof HTMLOptionElement) out.push(e);
+    collectSelectOptions(this, out, false);
     return out;
   }
   get length(): number {
@@ -9175,6 +9290,19 @@ export class HTMLSelectElement extends HTMLElement {
     const option = this.item(index);
     if (option !== null) this.removeChild(option);
   }
+  /** The placeholder label option: the first option of a drop-down select when its value is
+   *  empty and no option group holds it. A required select fails validation while it shows one. */
+  get placeholderOption(): HTMLOptionElement | null {
+    if (this.multiple || this.size > 1) return null;
+    const options = this.options;
+    if (options.length === 0) return null;
+    const first = options[0];
+    if (first.value !== "") return null;
+    for (let a = first.parentElement; a !== null && a !== this; a = a.parentElement) {
+      if (a.localName === "optgroup") return null;
+    }
+    return first;
+  }
   /** Whether `option` is shown as selected, with the default a browser picks when nothing says. */
   isSelected(option: HTMLOptionElement): boolean {
     const options = this.options;
@@ -9194,7 +9322,7 @@ export class HTMLSelectElement extends HTMLElement {
     }
     if (this.multiple) return option.defaultSelected;
     for (let i = 0; i < options.length; i++) if (options[i].defaultSelected) return index === i;
-    for (let i = 0; i < options.length; i++) if (!options[i].disabled) return index === i;
+    for (let i = 0; i < options.length; i++) if (!optionOrGroupDisabled(options[i])) return index === i;
     return false;
   }
   /** Whether the select takes part in validation: a disabled one, or one a disabled fieldset
@@ -9206,7 +9334,11 @@ export class HTMLSelectElement extends HTMLElement {
   get validity(): ValidityState {
     const state = new ValidityState();
     state.customError = this.customMessage !== "";
-    state.valueMissing = this.willValidate && this.required && this.selectedIndex < 0;
+    if (this.willValidate && this.required) {
+      const placeholder = this.placeholderOption;
+      state.valueMissing = this.selectedIndex < 0 ||
+        (placeholder !== null && this.isSelected(placeholder));
+    }
     return state;
   }
   get validationMessage(): string {
@@ -9764,6 +9896,11 @@ export class HTMLTextAreaElement extends HTMLElement {
   set value(value: any) {
     const text = String(value);
     const old = this.textContent;
+    // Writing the text the field already holds changes nothing, and leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    if (text === old) return;
     this.writeText(text, 0, old.length, text.length);
     this.selectionStart = text.length;
     this.selectionEnd = text.length;
@@ -11725,6 +11862,29 @@ export function setWindowEventHost(host: WindowEventHost | null): void {
   windowEventHost = host;
 }
 
+/** When a trusted input event last counted as a user gesture. */
+let activationAt = -1;
+/** How long a gesture keeps counting, the way a browser's transient activation does. */
+const ACTIVATION_WINDOW_MS = 5000;
+
+/** Records a user gesture at the input path: a press or a key the host delivered, never an event
+ *  a script dispatched (document.createEvent, element.click() and dispatchEvent are not gestures). */
+export function noteUserActivation(): void {
+  activationAt = performance.now();
+}
+
+/** Spends the current gesture: a transient activation opens at most one window, as a browser's
+ *  does. */
+export function consumeUserActivation(): void {
+  activationAt = -1;
+}
+
+/** Whether the page may open a new window now: a user gesture began within the activation
+ *  window. A window.open() outside one is a popup, which browsers block, so this does too. */
+export function hasTransientActivation(): boolean {
+  return activationAt >= 0 && performance.now() - activationAt <= ACTIVATION_WINDOW_MS;
+}
+
 export function dispatch(event: Event, target: Node): boolean {
   event.dispatchFlag = true;
   event.windowCaptureRan = false;
@@ -11798,6 +11958,10 @@ export function dispatch(event: Event, target: Node): boolean {
     (event.composed && root instanceof ShadowRoot && root.host.isConnected));
   if (reachesWindow) {
     event.windowCaptureRan = true;
+    // The window sits above the document in the path, so its listeners see the target and the
+    // related target the outermost path item shows, as a browser's do.
+    if (shown.length > 0) event.target = shown[shown.length - 1];
+    if (event.pathItems.length > 0) event.relatedNow = event.pathItems[event.pathItems.length - 1].related;
     host!.invokeWindowListeners(event.type, event, true);
   }
   // Capture: from the outermost item inward, the target's own listeners included.
@@ -11823,6 +11987,8 @@ export function dispatch(event: Event, target: Node): boolean {
   // (focus, mouseenter, ...) still reaches its capture listeners there.
   if (reachesWindow && event.bubbles && !event.propagationStopped) {
     event.windowBubbleRan = true;
+    if (shown.length > 0) event.target = shown[shown.length - 1];
+    if (event.pathItems.length > 0) event.relatedNow = event.pathItems[event.pathItems.length - 1].related;
     host!.invokeWindowListeners(event.type, event, false);
   }
   event.eventPhase = Event.NONE;
@@ -11931,6 +12097,31 @@ let axGeometryHook: (() => void) | null = null;
 
 export function setAxGeometryHook(fn: (() => void) | null): void {
   axGeometryHook = fn;
+}
+
+/**
+ * Drops the focus when the element holding it can no longer be rendered (display: none on it or
+ * an ancestor): a browser's focus fixup does the same after the style change that hid it.
+ */
+export function dropFocusIfUnrendered(): boolean {
+  const el = focusState.el;
+  if (el === null || !hiddenByStyle(el)) return false;
+  setFocus(null);
+  return true;
+}
+
+/** Whether the style hides a node: it has no box, or something above it in the flattened tree —
+ *  a slot it was assigned to, the host of its shadow tree — is display: none. */
+function hiddenByStyle(el: Element): boolean {
+  if (isUnrendered(el)) return true;
+  let n: Node | null = el;
+  while (n !== null) {
+    if (n !== el && n instanceof Element && n.sv[P.P_DISPLAY] === P.D_NONE) return true;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return false;
 }
 
 export function setFocus(el: Element | null, visible?: boolean): void {
@@ -12611,25 +12802,23 @@ export class HTMLInputElement extends HTMLElement {
       noteControlChange(this);
       return;
     }
+    // A whole-value write is a replace of the field's text to a live value range. Writing the
+    // text the field already holds changes nothing, and in particular leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    let text = String(v);
     // An email or url field keeps only what its value sanitization allows.
     const fieldType = this.type.toLowerCase();
     if (fieldType === "email" || fieldType === "url") {
-      const text = fieldType === "email" ? sanitizeEmailText(String(v), this.multiple) : sanitizeUrlText(String(v));
-      if (text !== this.val) moveValueRanges(this, 0, this.val.length, text.length);
-      this.val = text;
-      this.selStart = text.length;
-      this.selEnd = text.length;
-      this.anchor = text.length;
-      noteControlChange(this);
-      return;
+      text = fieldType === "email" ? sanitizeEmailText(text, this.multiple) : sanitizeUrlText(text);
     }
-    // A whole-value write is a replace of the field's text to a live value range; writing the
-    // same text changes nothing.
-    if (v !== this.val) moveValueRanges(this, 0, this.val.length, v.length);
-    this.val = v;
-    this.selStart = v.length;
-    this.selEnd = v.length;
-    this.anchor = v.length;
+    if (text === this.val) return;
+    moveValueRanges(this, 0, this.val.length, text.length);
+    this.val = text;
+    this.selStart = text.length;
+    this.selEnd = text.length;
+    this.anchor = text.length;
     // A value decides whether a placeholder shows, whether the field is valid, and its range.
     noteControlChange(this);
   }
@@ -14648,7 +14837,9 @@ export class Selection {
   private collapsedOffset = 0;
 
   get rangeCount(): number {
-    return this.ranges.length;
+    // A caret is one collapsed range in a browser; a collapsed selection here keeps its point in
+    // collapsedPoint, and still reports the range a script can read.
+    return this.ranges.length > 0 ? this.ranges.length : (this.collapsedPoint !== null ? 1 : 0);
   }
   get isCollapsed(): boolean {
     return this.ranges.length === 0 || (this.ranges.length === 1 && this.ranges[0].collapsed);
@@ -14674,6 +14865,9 @@ export class Selection {
     return this.collapsedOffset;
   }
   getRangeAt(i: number): Range {
+    if (this.ranges.length === 0 && i === 0 && this.collapsedPoint !== null) {
+      return new Range(this.collapsedPoint, this.collapsedOffset, this.collapsedPoint, this.collapsedOffset);
+    }
     return this.ranges[i];
   }
   addRange(range: Range): void {
@@ -15195,6 +15389,20 @@ export class Document extends Node {
     return supportsEditCommand(String(command));
   }
 
+  /**
+   * Whether the caret or selection is in a command's state, as a toolbar asks: the bold, italic
+   * and underline tags, the two lists, and a link. False when the selection isn't in an editing
+   * host.
+   */
+  queryCommandState(command: string): boolean {
+    return queryEditCommandState(String(command));
+  }
+
+  /** Whether a command can run now; the editing commands above all can. */
+  queryCommandEnabled(command: string): boolean {
+    return supportsEditCommand(String(command));
+  }
+
   /** The page is visible unless its window is minimized or hidden by the system. */
   get visibilityState(): DocumentVisibilityState {
     return visibilityState;
@@ -15704,8 +15912,17 @@ function findById(el: Node, id: string): Element | null {
 }
 
 /** A node just put into the tree: parse the <style> elements it holds, or the one it feeds. */
+/** Marks the elements of a freshly inserted subtree to resolve their rules again: a document's
+ *  author rules stop at a shadow boundary, so a subtree that moves between trees changes what
+ *  applies to it. */
+function markTreeStale(node: Element): void {
+  if (node.dynamic) node.rulesStale = true;
+  for (const k of node.kids) if (k instanceof Element) markTreeStale(k);
+}
+
 function refreshAdded(node: Node): void {
   if (node.nodeType === 1) {
+    markTreeStale(node as Element);
     if (CUSTOM_DEFS > 0) {
       // A defined tag makes the node an instance of its class before its callbacks run, and the
       // elements that are in the document report themselves connected once the subtree is in.
