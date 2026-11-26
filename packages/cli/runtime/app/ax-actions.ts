@@ -56,8 +56,13 @@ function setFieldValue(field: Field, text: string): void {
   dispatch(before, field);
   if (before.defaultPrevented) return;
   // Each kind of field is written through its own class: scriptc assigns to one class's property.
-  if (field instanceof HTMLInputElement) field.value = text;
-  else field.value = text;
+  // A client's set-value is the user's edit, so a text field's change fires on the commit below.
+  if (field instanceof HTMLInputElement) {
+    field.value = text;
+    field.userEdited = true;
+  } else {
+    field.value = text;
+  }
   dispatch(trusted(new InputEvent("input", { bubbles: true, inputType: kind, data: text })), field);
   field.commit();
 }
