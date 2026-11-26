@@ -322,6 +322,9 @@ var test_driver = {
     return Promise.resolve(accessibleNode(element).name);
   },
   click: function (element) {
+    // A real click is input at the element's centre: the page's own pointer path move there,
+    // presses and releases, which also focuses what the press hits and leaves the pointer where
+    // later Actions expect it.
     if (element === null || element === undefined) return Promise.resolve();
     frame();
     var c = __hCenter(element);
