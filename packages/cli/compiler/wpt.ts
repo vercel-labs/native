@@ -1141,6 +1141,81 @@ async function run(args: string[]): Promise<void> {
   const outputs = new Map<string, string>();
   /** Pages whose scripts didn't compile, with scriptc's error: each stays a skip. */
   const scriptFailures = new Map<string, string>();
+  /** Adds the result of every runnable page whose runs are in, or of every page on a final pass. */
+  const collectInto = (target: Result[], final: boolean): void => {
+  for (const r of runnable) {
+    // Until every page of a test (its own and its references) has run, there is no verdict: a
+    // partial write leaves those tests out rather than calling them errors.
+    const ready = outputs.has(r.page.key) &&
+      r.matchRefs.every((ref) => outputs.has(ref.key)) && r.mismatchRefs.every((ref) => outputs.has(ref.key));
+    if (!ready && !final) continue;
+    // A page whose scripts scriptc refused is a skip with the error; a script that throws while
+    // running is an error, since what the page shows then isn't what it means to show.
+    const failed = scriptFailures.get(r.page.key);
+    let refFailed: string | undefined;
+    for (const ref of r.matchRefs) if (refFailed === undefined) refFailed = scriptFailures.get(ref.key);
+    for (const ref of r.mismatchRefs) if (refFailed === undefined) refFailed = scriptFailures.get(ref.key);
+    if (failed !== undefined || refFailed !== undefined) {
+      const msg = failed ?? refFailed!;
+      target.push({ path: r.test.path, kind: r.test.kind, status: "skip", reason: `${failed === undefined ? "reference script: " : "script: "}${msg}` });
+      continue;
+    }
+    const out = outputs.get(r.page.key) ?? "ERROR no output";
+    const refOuts = [...r.matchRefs, ...r.mismatchRefs].map((ref) => outputs.get(ref.key) ?? "ERROR no output");
+    // A page that throws is the test's error; a reference page that throws is the test's error
+    // too, since what it draws then isn't the picture the test compares against — but the reason
+    // says which page it was, so a reference's own script isn't read as the test's.
+    const badTest = /^(ERROR|CRASH|RUNTIME)/.test(out) ? out : "";
+    const badRef = badTest !== "" ? -1 : refOuts.findIndex((o) => /^(ERROR|CRASH|RUNTIME)/.test(o));
+    if (badTest !== "" || badRef >= 0) {
+      const bad = badTest !== "" ? badTest : refOuts[badRef];
+      const status = bad.startsWith("CRASH") ? "crash" : "error";
+      const why = bad.replace(/^RUNTIME /, "script threw: ");
+      target.push({ path: r.test.path, kind: r.test.kind, status, reason: (badRef >= 0 ? "reference page: " : "") + why });
+      continue;
+    }
+    if (r.test.kind === "testharness") {
+      const body = out.replace(/^TESTS /, "");
+      let parsed: { status: number; message: string; tests: { name: string; status: number; message: string }[] } | null = null;
+      try { parsed = JSON.parse(body); } catch { parsed = null; }
+      if (parsed === null) {
+        target.push({ path: r.test.path, kind: "testharness", status: "fail", reason: "no test harness result" });
+      } else {
+        const failed = parsed.tests.filter((t) => t.status !== 0);
+        const reasons: string[] = [];
+        if (parsed.status !== 0) reasons.push(parsed.message === "" ? "harness error" : parsed.message);
+        if (failed.length > 0) reasons.push(`${failed[0].name}: ${failed[0].message === "" ? "failed" : failed[0].message}`);
+        const many = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
+        target.push({
+          path: r.test.path, kind: "testharness",
+          status: reasons.length === 0 ? "pass" : "fail",
+          reason: reasons.length === 0 ? undefined : (reasons.join("; ") + many).slice(0, 300),
+        });
+      }
+      continue;
+    }
+    if (r.test.kind === "layout") {
+      if (out.startsWith("PASS")) results.push({ path: r.test.path, kind: "layout", status: "pass" });
+      else if (out === "NONE") results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: no expectations found" });
+      else if (/unsupported check/.test(out)) results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: " + /unsupported check [\w-]+/.exec(out)![0] });
+      else results.push({ path: r.test.path, kind: "layout", status: "fail", reason: out.replace(/^FAIL /, "") });
+    } else if (r.test.kind === "crash") {
+      target.push({ path: r.test.path, kind: "crash", status: "pass" });
+    } else {
+      // The page passes when it matches any one of its match references and differs from every
+      // one of its mismatch references; the closest reference names the difference otherwise.
+      const testRaw = join(outDir, `${r.page.key}.rgba`);
+      const cmpOf = (ref: Page, mismatch: boolean) => compareImages(testRaw, join(outDir, `${ref.key}.rgba`), r.test.fuzzy, mismatch);
+      const matches = r.matchRefs.map((ref) => cmpOf(ref, false));
+      const differs = r.mismatchRefs.map((ref) => cmpOf(ref, true));
+      const ok = (matches.length === 0 || matches.some((c) => c.pass)) && differs.every((c) => c.pass);
+      const cmps = matches.concat(differs);
+      const nearest = cmps.reduce((a, b) => (b.pixels < a.pixels ? b : a));
+      target.push({ path: r.test.path, kind: "reftest", status: ok ? "pass" : "fail", reason: ok ? undefined : nearest.detail });
+    }
+  }
+  };
+
   const batches = Math.ceil(all.length / batchSize);
   const releaseSlot = await acquireSlot();
   const hostObjs = ensureHost();
@@ -1156,78 +1231,21 @@ async function run(args: string[]): Promise<void> {
       for (const [k, v] of batch.failures) scriptFailures.set(k, v);
       finished++;
       progress();
+      // Write what is known after every batch: a run that is stopped keeps the results of the
+      // batches it finished, instead of losing the whole file.
+      const done = results.slice();
+      collectInto(done, false);
+      if (done.length > results.length) {
+        done.sort((a, b) => a.path.localeCompare(b.path));
+        mkdirSync(dirname(outFile), { recursive: true });
+        writeFileSync(outFile, JSON.stringify({ wpt: wptRevision(), partial: true, results: done }, null, 1) + "\n");
+      }
     }
   }));
   releaseSlot();
   process.stderr.write(`\nnative wpt: compiled runners: ${cacheStats.misses} built, ${cacheStats.hits} reused from ${relative(process.cwd(), RUNNER_CACHE) || RUNNER_CACHE}\n`);
 
-  for (const r of runnable) {
-    // A page whose scripts scriptc refused is a skip with the error; a script that throws while
-    // running is an error, since what the page shows then isn't what it means to show.
-    const failed = scriptFailures.get(r.page.key);
-    let refFailed: string | undefined;
-    for (const ref of r.matchRefs) if (refFailed === undefined) refFailed = scriptFailures.get(ref.key);
-    for (const ref of r.mismatchRefs) if (refFailed === undefined) refFailed = scriptFailures.get(ref.key);
-    if (failed !== undefined || refFailed !== undefined) {
-      const msg = failed ?? refFailed!;
-      results.push({ path: r.test.path, kind: r.test.kind, status: "skip", reason: `${failed === undefined ? "reference script: " : "script: "}${msg}` });
-      continue;
-    }
-    const out = outputs.get(r.page.key) ?? "ERROR no output";
-    const refOuts = [...r.matchRefs, ...r.mismatchRefs].map((ref) => outputs.get(ref.key) ?? "ERROR no output");
-    // A page that throws is the test's error; a reference page that throws is the test's error
-    // too, since what it draws then isn't the picture the test compares against — but the reason
-    // says which page it was, so a reference's own script isn't read as the test's.
-    const badTest = /^(ERROR|CRASH|RUNTIME)/.test(out) ? out : "";
-    const badRef = badTest !== "" ? -1 : refOuts.findIndex((o) => /^(ERROR|CRASH|RUNTIME)/.test(o));
-    if (badTest !== "" || badRef >= 0) {
-      const bad = badTest !== "" ? badTest : refOuts[badRef];
-      const status = bad.startsWith("CRASH") ? "crash" : "error";
-      const why = bad.replace(/^RUNTIME /, "script threw: ");
-      results.push({ path: r.test.path, kind: r.test.kind, status, reason: (badRef >= 0 ? "reference page: " : "") + why });
-      continue;
-    }
-    if (r.test.kind === "testharness") {
-      const body = out.replace(/^TESTS /, "");
-      let parsed: { status: number; message: string; tests: { name: string; status: number; message: string }[] } | null = null;
-      try { parsed = JSON.parse(body); } catch { parsed = null; }
-      if (parsed === null) {
-        results.push({ path: r.test.path, kind: "testharness", status: "fail", reason: "no test harness result" });
-      } else {
-        const failed = parsed.tests.filter((t) => t.status !== 0);
-        const reasons: string[] = [];
-        if (parsed.status !== 0) reasons.push(parsed.message === "" ? "harness error" : parsed.message);
-        if (failed.length > 0) reasons.push(`${failed[0].name}: ${failed[0].message === "" ? "failed" : failed[0].message}`);
-        const many = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
-        results.push({
-          path: r.test.path, kind: "testharness",
-          status: reasons.length === 0 ? "pass" : "fail",
-          reason: reasons.length === 0 ? undefined : (reasons.join("; ") + many).slice(0, 300),
-        });
-      }
-      continue;
-    }
-    if (r.test.kind === "layout") {
-      if (out.startsWith("PASS")) results.push({ path: r.test.path, kind: "layout", status: "pass" });
-      else if (out === "NONE") results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: no expectations found" });
-      else if (/unsupported check/.test(out)) results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: " + /unsupported check [\w-]+/.exec(out)![0] });
-      else results.push({ path: r.test.path, kind: "layout", status: "fail", reason: out.replace(/^FAIL /, "") });
-    } else if (r.test.kind === "crash") {
-      results.push({ path: r.test.path, kind: "crash", status: "pass" });
-    } else {
-      // The page passes when it matches any one of its match references and differs from every
-      // one of its mismatch references; the closest reference names the difference otherwise.
-      const testRaw = join(outDir, `${r.page.key}.rgba`);
-      const cmpOf = (ref: Page, mismatch: boolean) => compareImages(testRaw, join(outDir, `${ref.key}.rgba`), r.test.fuzzy, mismatch);
-      const matches = r.matchRefs.map((ref) => cmpOf(ref, false));
-      const differs = r.mismatchRefs.map((ref) => cmpOf(ref, true));
-      const ok = (matches.length === 0 || matches.some((c) => c.pass)) && differs.every((c) => c.pass);
-      const cmps = matches.concat(differs);
-      const nearest = cmps.reduce((a, b) => (b.pixels < a.pixels ? b : a));
-      results.push({ path: r.test.path, kind: "reftest", status: ok ? "pass" : "fail", reason: ok ? undefined : nearest.detail });
-    }
-  }
-
+  collectInto(results, true);
   report(results, verbose, (performance.now() - t0) / 1000);
   mkdirSync(dirname(outFile), { recursive: true });
   results.sort((a, b) => a.path.localeCompare(b.path));
