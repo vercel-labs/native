@@ -886,6 +886,10 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
       // the batch: the halves are smaller programs, and a smaller program does not overflow.
       if (start === 0 && begun < 0) {
         startup = true;
+        // The pages of a program that never started crashed with it: say so here, so a page left
+        // alone by the split (and every page of a single-page program) reports a crash rather
+        // than no result at all.
+        for (const j of active) out.set(j.page.key, "CRASH the runner died before its first page started");
         return crashedPages;
       }
       const crashed = begun > last ? begun : last + 1;
