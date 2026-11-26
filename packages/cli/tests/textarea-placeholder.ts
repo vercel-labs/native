@@ -9,13 +9,15 @@ import { tmpdir } from "node:os";
 import { inflateSync } from "node:zlib";
 
 const PAGE = `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="native-window" content="width=200, height=120"><style>
+<html><head><meta charset="utf-8"><meta name="native-window" content="width=200, height=240"><style>
 body { margin: 0; background: #ffffff; }
-textarea { display: block; width: 200px; height: 60px; border: 0; padding: 0; margin: 0;
+textarea { display: block; width: 200px; height: 100px; border: 0; padding: 0; margin: 0;
   font-family: sans-serif; font-size: 30px; color: #000000; background: #ffffff; resize: none; }
 #field::placeholder { color: #ff0000; }
+#twoline::placeholder { color: #0000ff; }
 </style></head><body>
 <textarea id="field" placeholder="Hello there"></textarea>
+<textarea id="twoline" placeholder="One&#10;Two"></textarea>
 </body></html>`;
 
 interface Image {
@@ -96,6 +98,23 @@ for (let i = 0; i < img.rgba.length; i += 4) {
   if (img.rgba[i] > 200 && img.rgba[i + 1] < 80 && img.rgba[i + 2] < 80) red++;
 }
 check("a textarea draws its placeholder", red > 50, `red pixels: ${red}`);
+
+// The second field's placeholder has a line break in it: a textarea draws it as two lines, the
+// way white-space: pre-wrap has it, rather than joining the words with a space.
+const blueRows: number[] = [];
+for (let y = 0; y < img.h; y++) {
+  let count = 0;
+  for (let x = 0; x < img.w; x++) {
+    const i = (y * img.w + x) * 4;
+    if (img.rgba[i] < 80 && img.rgba[i + 1] < 80 && img.rgba[i + 2] > 200) count++;
+  }
+  if (count > 0) blueRows.push(y);
+}
+let bands = 0;
+for (let i = 0; i < blueRows.length; i++) {
+  if (i === 0 || blueRows[i] > blueRows[i - 1] + 1) bands++;
+}
+check("a line break in the placeholder starts a second line", bands === 2, `blue rows: ${JSON.stringify(blueRows)}`);
 
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

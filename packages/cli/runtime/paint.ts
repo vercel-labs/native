@@ -411,22 +411,29 @@ export function dateIconContains(el: HTMLInputElement, px: number, py: number): 
   return px >= box[0] && px <= box[0] + size && py >= box[1] && py <= box[1] + size;
 }
 
-/** Wraps placeholder text into the field's content width at its words, as a line box would. */
+/**
+ * Wraps placeholder text into the field's content width at its words, as a line box would. A
+ * textarea's placeholder is drawn with white-space: pre-wrap, so a line break in it starts a new
+ * line instead of joining the words around it.
+ */
 function wrapPlaceholder(style: Node, text: string, width: number): string[] {
   const lines: string[] = [];
-  const words = text.split(/\s+/).filter((word) => word !== "");
-  let line = "";
-  for (const word of words) {
-    const next = line === "" ? word : line + " " + word;
-    if (line !== "" && textWidth(style, next) > width) {
-      lines.push(line);
-      line = word;
-    } else {
-      line = next;
+  const paragraphs = text.replace(/\r\n?/g, "\n").split("\n");
+  for (const paragraph of paragraphs) {
+    const words = paragraph.split(/[ \t\f]+/).filter((word) => word !== "");
+    let line = "";
+    for (const word of words) {
+      const next = line === "" ? word : line + " " + word;
+      if (line !== "" && textWidth(style, next) > width) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = next;
+      }
     }
+    lines.push(line);
   }
-  if (line !== "") lines.push(line);
-  return lines.length === 0 ? [""] : lines;
+  return lines;
 }
 
 function paintInput(el: HTMLInputElement, x: number, y: number, opacity: number): void {
