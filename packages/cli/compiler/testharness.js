@@ -343,10 +343,18 @@ function EventWatcher(test, watchedNode, eventTypes, timeoutPromise) {
       if (typeof timeoutPromise === "function") {
         timeoutPromise().then(function () {
           if (waitingFor === null || waitingFor !== mine) return;
-          assert_true(mine.types.length === 0, "Timed out waiting for " + mine.types.join(", "));
+          var missing = mine.types.slice();
           var result = recordedEvents;
           recordedEvents = null;
           waitingFor = null;
+          // The wait settles whether the events came or not, so the test that made the watcher is
+          // never left pending; a timeout fails that test — the one the watcher was made for —
+          // rather than an implicit one, even though this runs outside any of its steps.
+          if (missing.length > 0) {
+            var report = function () { assert_true(false, "Timed out waiting for " + missing.join(", ")); };
+            if (test !== undefined && test !== null) __hRun(test, report);
+            else report();
+          }
           resolve(result);
         });
       }

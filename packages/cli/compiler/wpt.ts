@@ -595,8 +595,8 @@ function identChar(ch: string): boolean {
   return /[A-Za-z0-9_$]/.test(ch);
 }
 
-/** Replaces a name in code but not in a string literal, so an id, a selector or text that spells
- *  it keeps its value. */
+/** Replaces a name in code but not in a string literal or a comment, so an id, a selector, text
+ *  or prose that spells it keeps its value — an apostrophe in a comment is not a quote. */
 function replaceIdentifier(text: string, name: string, replacement: string): string {
   let out = "";
   let i = 0;
@@ -608,6 +608,22 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
       if (ch === "\\" && i + 1 < text.length) { out += text[i + 1]; i += 2; continue; }
       if (ch === quote) quote = "";
       i++;
+      continue;
+    }
+    // A comment runs to the end of its line, or to its own closing mark, and is left as it is. An
+    // escaped slash — the "//" of a regular expression like /\/\// — is code, not a comment.
+    if (ch === "/" && text[i + 1] === "/" && text[i - 1] !== "\\") {
+      const end = text.indexOf("\n", i);
+      const stop = end < 0 ? text.length : end;
+      out += text.slice(i, stop);
+      i = stop;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*" && text[i - 1] !== "\\") {
+      const close = text.indexOf("*/", i + 2);
+      const stop = close < 0 ? text.length : close + 2;
+      out += text.slice(i, stop);
+      i = stop;
       continue;
     }
     if (ch === "'" || ch === '"' || ch === "`") { quote = ch; out += ch; i++; continue; }
