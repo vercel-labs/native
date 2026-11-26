@@ -582,7 +582,10 @@ function expandFrag(frag: Frag): Variant[] | null {
 function mergeCompound(a: Compound, b: Compound): Compound | null {
   if (a.tag !== null && b.tag !== null && a.tag !== b.tag) return null;
   if (a.id !== null && b.id !== null && a.id !== b.id) return null;
-  if (a.tagNs !== undefined && b.tagNs !== undefined && a.tagNs !== b.tagNs) return null;
+  // "*" asks for any namespace, so it merges with any other: ":link" reads as "*|a[href]" and
+  // an author's "a:any-link" in a namespaced sheet still names its own namespace's anchors.
+  if (a.tagNs !== undefined && b.tagNs !== undefined && a.tagNs !== b.tagNs &&
+    a.tagNs !== "*" && b.tagNs !== "*") return null;
   /** The two compounds' "of S" filters, one entry per condition of both, in order. */
   const ofs = (which: "start" | "end"): string[] | undefined => {
     const an = which === "start" ? a.nthStart.length : a.nthEnd.length;
@@ -599,7 +602,7 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
   const notSels = (a.notSels ?? []).concat(b.notSels ?? []);
   return {
     tag: a.tag !== null ? a.tag : b.tag,
-    tagNs: a.tagNs !== undefined ? a.tagNs : b.tagNs,
+    tagNs: a.tagNs === "*" ? b.tagNs : a.tagNs !== undefined ? a.tagNs : b.tagNs,
     id: a.id !== null ? a.id : b.id,
     root: a.root || b.root,
     dir: a.dir !== undefined ? a.dir : b.dir,
@@ -871,8 +874,10 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       }
       if (name !== "*") c.tag = name;
       if (ns !== undefined) {
-        if (c.tagNs !== undefined && c.tagNs !== ns) never = true;
-        c.tagNs = ns;
+        // "*" asks for any namespace, so it fits whatever the compound already names; two
+        // different namespaces can't both hold.
+        if (c.tagNs !== undefined && c.tagNs !== ns && c.tagNs !== "*" && ns !== "*") never = true;
+        else if (c.tagNs === undefined || c.tagNs === "*") c.tagNs = ns;
       }
       spec += 1;
     } else if (s.kind === "id") {
