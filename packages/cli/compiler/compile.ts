@@ -720,6 +720,13 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   const handlers: HandlerAttribute[] = [];
   const scriptText: string[] = [];
 
+  // A <style> inside a <template> styles whatever tree the template's content is cloned into,
+  // and the build can't know that tree: the sheet is parsed when the content lands, where its
+  // root is known (a shadow tree's sheet styles that tree alone).
+  const inTemplate = new Set<HElement>();
+  for (const t of findAll(doc, (e) => e.tag === "template")) {
+    for (const e of findAll(t, () => true)) inTemplate.add(e);
+  }
   const all = findAll(doc, () => true);
   for (const el of all) {
     // An inline event handler is script too: what it does to the DOM decides whether a selector
@@ -766,7 +773,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         media: el.attrs.get("media") ?? "", disabled: el.attrs.has("disabled"),
       });
     }
-    if (el.tag === "style") {
+    if (el.tag === "style" && !inTemplate.has(el)) {
       sheets.push({
         text: textOf(el), file: htmlFile, line: el.line, col: el.col, node: el,
         media: el.attrs.get("media") ?? "", disabled: false,

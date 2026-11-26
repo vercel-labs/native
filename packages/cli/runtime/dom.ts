@@ -8212,7 +8212,18 @@ function validBits(el: Element): number {
 }
 
 function focusWithinBits(el: Element): number {
-  return focusState.el !== null && el.contains(focusState.el) ? P.S_FOCUS_WITHIN : 0;
+  const focused = focusState.el;
+  if (focused === null) return 0;
+  // The focused node lies within every ancestor of the flattened tree: inside a shadow tree or
+  // a slot, that chain runs through the host and past the slot's ancestors, not the DOM's own.
+  let n: Node | null = focused;
+  while (n !== null) {
+    if (n === el) return P.S_FOCUS_WITHIN;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return 0;
 }
 
 /** A box's top edge relative to a scroll container's padding box, in unscrolled content px. */
