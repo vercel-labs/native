@@ -14587,7 +14587,9 @@ export class Selection {
   private collapsedOffset = 0;
 
   get rangeCount(): number {
-    return this.ranges.length;
+    // A caret is one collapsed range in a browser; a collapsed selection here keeps its point in
+    // collapsedPoint, and still reports the range a script can read.
+    return this.ranges.length > 0 ? this.ranges.length : (this.collapsedPoint !== null ? 1 : 0);
   }
   get isCollapsed(): boolean {
     return this.ranges.length === 0 || (this.ranges.length === 1 && this.ranges[0].collapsed);
@@ -14613,6 +14615,9 @@ export class Selection {
     return this.collapsedOffset;
   }
   getRangeAt(i: number): Range {
+    if (this.ranges.length === 0 && i === 0 && this.collapsedPoint !== null) {
+      return new Range(this.collapsedPoint, this.collapsedOffset, this.collapsedPoint, this.collapsedOffset);
+    }
     return this.ranges[i];
   }
   addRange(range: Range): void {
