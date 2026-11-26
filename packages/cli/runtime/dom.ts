@@ -2499,6 +2499,11 @@ export class Node extends EventTarget {
   naturalH = 0;
   /** Width of the content plus padding and the reach of out-of-flow boxes (see scrollWidth). */
   naturalW = 0;
+  /** How much of naturalW and naturalH the transformed-overflow pass added, to take back. */
+  tW = 0;
+  tH = 0;
+  /** The transform values layout last measured the box's painted reach from, -1 before any. */
+  lTransformSig = -1;
   /**
    * Set while the box's own intrinsic width is being measured, so that a min-width or max-width
    * keyword met during that measurement doesn't measure it again and spin.
