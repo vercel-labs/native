@@ -747,6 +747,10 @@ export class Window {
   /** Dispatches an event at the window's listeners, without the document hearing it. */
   dispatchEvent(event: Event): boolean {
     if (!(event instanceof Event)) throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
+    // The same state checks EventTarget.dispatchEvent makes: an event already dispatching, or one
+    // document.createEvent() made and never initialized, is an error.
+    if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+    if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
     // This is a dispatch of its own, even for an event that travelled through the page before:
     // its listeners hear it again, as EventTarget.dispatchEvent has it.
     event.dispatchFlag = true;
@@ -758,14 +762,20 @@ export class Window {
     event.currentTarget = this as any;
     event.eventPhase = Event.AT_TARGET;
     const outer = setCurrentEvent(event);
-    dispatchWindow(event);
-    setCurrentEvent(outer);
-    event.eventPhase = Event.NONE;
-    event.currentTarget = null;
-    event.dispatchFlag = false;
-    // Dispatch ends with the propagation flags clear, as the DOM's dispatch step has it.
-    event.propagationStopped = false;
-    event.immediateStopped = false;
+    try {
+      dispatchWindow(event);
+    } finally {
+      // A listener that throws must not leave the dispatch's state behind: the outer event, the
+      // dispatch flag and the passive flag are put back whatever happened.
+      setCurrentEvent(outer);
+      event.eventPhase = Event.NONE;
+      event.currentTarget = null;
+      event.dispatchFlag = false;
+      event.passiveListener = false;
+      // Dispatch ends with the propagation flags clear, as the DOM's dispatch step has it.
+      event.propagationStopped = false;
+      event.immediateStopped = false;
+    }
     return !event.defaultPrevented;
   }
 
