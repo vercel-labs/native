@@ -2702,6 +2702,13 @@ function styleDescendants(el: Node, parent: Node | null, prepassEntry: PrepassNo
       for (const n of slotAssignedNodes(slot)) slotted.push(n);
     }
   }
+  // A display: contents element generates no box. The build folds a sole text child into the
+  // element's own text, and a boxless element has nowhere to lay that text out: make it a text
+  // child again before the children are styled, so the run inherits this element's style and the
+  // parent's layout (which flattens contents boxes away) sees it.
+  if (!runningPrepass && el instanceof Element && el.ownText !== "" && el.sv[P.P_DISPLAY] === P.D_CONTENTS) {
+    materializeText(el);
+  }
   for (const c of el.kids) {
     if (slotted !== null && slotted.indexOf(c) >= 0) continue;
     computeStyles(c, el);
