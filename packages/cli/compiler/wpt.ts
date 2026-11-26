@@ -595,38 +595,111 @@ function identChar(ch: string): boolean {
   return /[A-Za-z0-9_$]/.test(ch);
 }
 
-/** Replaces a name in code but not in a string literal or a comment, so an id, a selector, text
- *  or prose that spells it keeps its value — an apostrophe in a comment is not a quote. */
-function replaceIdentifier(text: string, name: string, replacement: string): string {
-  let out = "";
-  let i = 0;
-  let quote = "";
+/** The keywords a regular expression can follow: `return /re/`, `typeof /re/`, `x in /re/`. */
+const REGEX_KEYWORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete",
+  "void", "do", "else", "yield", "await", "case", "throw"]);
+
+/** Whether a slash after the code copied so far begins a regular expression rather than a
+ *  division: after an opening bracket, an operator, or one of the keywords above. */
+function regexAllowedAfter(out: string): boolean {
+  let j = out.length - 1;
+  while (j >= 0 && (out[j] === " " || out[j] === "\t" || out[j] === "\n" || out[j] === "\r")) j--;
+  if (j < 0) return true;
+  const ch = out[j];
+  if (identChar(ch)) {
+    let k = j;
+    while (k >= 0 && identChar(out[k])) k--;
+    return REGEX_KEYWORDS.has(out.slice(k + 1, j + 1));
+  }
+  if (ch === ".") return false;
+  return "(,=:[!&|?{};+-*%~^<>".indexOf(ch) >= 0;
+}
+
+/** The end of the regular expression that starts at `start`, or `start` when the slash is a
+ *  division: a regular expression ends at the first unescaped slash outside a character class,
+ *  before any newline, and its flags follow. */
+function regexEnd(text: string, start: number): number {
+  let i = start + 1;
+  let inClass = false;
   while (i < text.length) {
     const ch = text[i];
-    if (quote !== "") {
-      out += ch;
-      if (ch === "\\" && i + 1 < text.length) { out += text[i + 1]; i += 2; continue; }
-      if (ch === quote) quote = "";
+    if (ch === "\n") return start;
+    if (ch === "\\") { i += 2; continue; }
+    if (inClass) {
+      if (ch === "]") inClass = false;
       i++;
       continue;
     }
-    // A comment runs to the end of its line, or to its own closing mark, and is left as it is. An
-    // escaped slash — the "//" of a regular expression like /\/\// — is code, not a comment.
-    if (ch === "/" && text[i + 1] === "/" && text[i - 1] !== "\\") {
-      const end = text.indexOf("\n", i);
-      const stop = end < 0 ? text.length : end;
-      out += text.slice(i, stop);
-      i = stop;
+    if (ch === "[") { inClass = true; i++; continue; }
+    if (ch === "/") {
+      i++;
+      while (i < text.length && identChar(text[i])) i++;
+      return i;
+    }
+    i++;
+  }
+  return start;
+}
+
+/**
+ * Replaces a name where it is a reference in code: not in a string, a template literal's text, a
+ * comment, or a regular expression, any of which keeps the text that spells it. A template's
+ * `${…}` is code again, and so is the inside of that.
+ */
+function replaceIdentifier(text: string, name: string, replacement: string): string {
+  let out = "";
+  // The rewrite walks the script the way a lexer does: a stack of what the next character is part
+  // of, and the brace depth of each piece of code it is in (a template's interpolation is code
+  // inside a template's text).
+  const modes: string[] = ["code"];
+  const braces: number[] = [0];
+  let i = 0;
+  while (i < text.length) {
+    const mode = modes[modes.length - 1];
+    const ch = text[i];
+    if (mode === "comment") {
+      out += ch;
+      if (ch === "\n") modes.pop();
+      i++;
       continue;
     }
-    if (ch === "/" && text[i + 1] === "*" && text[i - 1] !== "\\") {
+    if (mode === "string") {
+      out += ch;
+      if (ch === "\\" && i + 1 < text.length) { out += text[i + 1]; i += 2; continue; }
+      if (ch === "'" || ch === '"') modes.pop();
+      i++;
+      continue;
+    }
+    if (mode === "template") {
+      if (ch === "\\" && i + 1 < text.length) { out += ch + text[i + 1]; i += 2; continue; }
+      if (ch === "`") { modes.pop(); out += ch; i++; continue; }
+      if (ch === "$" && text[i + 1] === "{") { out += "${"; modes.push("code"); braces.push(0); i += 2; continue; }
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") { out += "//"; modes.push("comment"); i += 2; continue; }
+    if (ch === "/" && text[i + 1] === "*") {
       const close = text.indexOf("*/", i + 2);
       const stop = close < 0 ? text.length : close + 2;
       out += text.slice(i, stop);
       i = stop;
       continue;
     }
-    if (ch === "'" || ch === '"' || ch === "`") { quote = ch; out += ch; i++; continue; }
+    if (ch === "/" && regexAllowedAfter(out)) {
+      const stop = regexEnd(text, i);
+      if (stop > i) { out += text.slice(i, stop); i = stop; continue; }
+    }
+    if (ch === "'" || ch === '"') { out += ch; modes.push("string"); i++; continue; }
+    if (ch === "`") { out += ch; modes.push("template"); i++; continue; }
+    if (ch === "{") { braces[braces.length - 1]++; out += ch; i++; continue; }
+    if (ch === "}") {
+      if (braces[braces.length - 1] > 0) braces[braces.length - 1]--;
+      else if (modes.length > 1) { modes.pop(); braces.pop(); }
+      out += ch;
+      i++;
+      continue;
+    }
     if (text.startsWith(name, i) && (i === 0 || (!identChar(text[i - 1]) && text[i - 1] !== ".")) &&
       (i + name.length >= text.length || !identChar(text[i + name.length]))) {
       out += replacement;

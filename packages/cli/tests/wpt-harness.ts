@@ -34,6 +34,14 @@ test(function () {
   var el = document.getElementById('elementNamedWithAVeryLongIdentifierForHarnessTest');
   assert_true(el !== null, "the id string keeps its value");
 }, "an id in a single-quoted string is found");
+test(function () {
+  var text = \`\${aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest(2, 3)}\`;
+  assert_equals(text, "5", "the interpolation calls the long name");
+}, "a long name inside a template interpolation");
+test(function () {
+  var pattern = /aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/;
+  assert_true(pattern.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest"), "the regular expression keeps its text");
+}, "a regular expression keeps its own text");
 </script>`);
 
 // A watcher whose event never comes: the timeout fails the promise test that made the watcher, and
