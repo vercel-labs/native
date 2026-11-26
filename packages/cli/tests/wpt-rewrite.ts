@@ -74,6 +74,14 @@ same("property access", `var q = obj.${LONG};`, `var q = obj.${LONG};`);
 same("property key", `var o = { ${LONG}: 1 };`, `var o = { ${LONG}: 1 };`);
 same("method name", `var o = { ${LONG}() {} };`, `var o = { ${LONG}() {} };`);
 same("binding rename", `var { ${OTHER}: x } = o;`, `var { ${OTHER}: x } = o;`);
+same("key and value", `var o = { ${LONG}: ${LONG} };`, `var o = { ${LONG}: ${SHORT} };`);
+
+// A shorthand's name is the key and the variable at once: the key stays, the variable is renamed.
+same("shorthand property", `var o = { ${LONG} };`, `var o = { ${LONG}: ${SHORT} };`);
+same("shorthand in an assignment", `({ ${LONG} } = o);`, `({ ${LONG}: ${SHORT} } = o);`);
+same("shorthand binding", `var { ${LONG} } = o;`, `var { ${LONG}: ${SHORT} } = o;`);
+same("shorthand binding with a default", `var { ${LONG} = 1 } = o;`, `var { ${LONG}: ${SHORT} = 1 } = o;`);
+same("shorthand inside a nested pattern", `var { a: { ${LONG} } } = o;`, `var { a: { ${LONG}: ${SHORT} } } = o;`);
 
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

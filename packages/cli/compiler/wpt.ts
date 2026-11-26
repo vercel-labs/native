@@ -598,7 +598,13 @@ function rewriteIdentifiers(text: string, short: Map<string, string>): string {
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && !isPropertyName(node)) {
       const replacement = short.get(node.text);
-      if (replacement !== undefined) edits.push({ start: node.getStart(file), end: node.getEnd(), text: replacement });
+      if (replacement !== undefined) {
+        // A shorthand spells its key with the variable's name: renaming the variable would rename
+        // the key too, and change which property a string elsewhere reaches. So the key is written
+        // out beside the new name — `{long}` becomes `{long: __w…}`, as `{long: long}` reads.
+        const text = isShorthand(node) ? `${node.text}: ${replacement}` : replacement;
+        edits.push({ start: node.getStart(file), end: node.getEnd(), text });
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -611,6 +617,16 @@ function rewriteIdentifiers(text: string, short: Map<string, string>): string {
     pos = edit.end;
   }
   return out + text.slice(pos);
+}
+
+/** Whether the identifier is a shorthand, `{b}` or `{b = 1}`, where the name is the property key
+ *  and the variable at once — in an object literal, or in a destructuring pattern. */
+function isShorthand(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (parent === undefined) return false;
+  if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) return true;
+  if (ts.isBindingElement(parent) && parent.propertyName === undefined && parent.name === node) return true;
+  return false;
 }
 
 /** Whether the identifier is a property's own name, which a string elsewhere spells (`a.b`,
