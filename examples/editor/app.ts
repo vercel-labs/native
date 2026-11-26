@@ -375,10 +375,12 @@ document.addEventListener("keydown", (event: KeyboardEvent) => {
   }
 });
 
+// A saved empty document or title is still a save: the user cleared it, and the sample text
+// must not come back when the app opens again.
 const storedDoc = localStorage.getItem(DOC_KEY);
-if (storedDoc !== null && storedDoc !== "") doc.innerHTML = storedDoc;
+if (storedDoc !== null) doc.innerHTML = storedDoc;
 const storedTitle = localStorage.getItem(TITLE_KEY);
-if (storedTitle !== null && storedTitle !== "") title.value = storedTitle;
+if (storedTitle !== null) title.value = storedTitle;
 lastSnapshot = doc.innerHTML;
 
 updateCounts();
