@@ -1,0 +1,4 @@
+@import "tailwindcss";
+@source "./index.html";
+@source "./app.tsx";
+@source "./icons.tsx";

@@ -15,7 +15,9 @@ A release build is linked without the symbol table and debug info the linker wou
 ## The compiler
 
 A build compiles the TypeScript with scriptc: the copy `pnpm install` put in `node_modules`, or the
-platform package's own binary when the install script was skipped. Set `NATIVE_SCRIPTC` to a path
+platform package's own binary when the install script was skipped. A build compiles the SDK runtime
+with the app, so it peaks above 4 GB of memory; on a 4 GB machine add swap, or the system may kill
+the compiler (the build says so when that happens). Set `NATIVE_SCRIPTC` to a path
 to compile with another one — a checkout of [scriptc](https://scriptc.dev) or a build of it — without
 installing it over the project:
 

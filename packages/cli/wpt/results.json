@@ -148449,8 +148449,7 @@
   {
    "path": "dom/events/Event-cancelBubble.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "cancelBubble must be false after an event has been dispatched.: assert_false: cancelBubble must be false after an event has been dispatched.: expected false, got true"
+   "status": "pass"
   },
   {
    "path": "dom/events/Event-constants.html",
@@ -148600,8 +148599,8 @@
   {
    "path": "dom/events/Event-dispatch-throwing-multiple-globals.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Event propagation path when an element in it is removed from the DOM: assert_array_equals: targets: expected [object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object],[object Object]"
+   "status": "error",
+   "reason": "script threw: the testharness produced no result"
   },
   {
    "path": "dom/events/Event-dispatch-throwing.html",
@@ -148613,7 +148612,7 @@
    "path": "dom/events/event-global-event-targets.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "window.event is set when dispatching on EventTarget: The \"event\" argument must be an instance of Event. Received an instance of Object (+4 more)"
+   "reason": "window.event is set when dispatching on EventTarget: assert_equals: window.event is restored after dispatch: expected undefined, got [object Object] (+3 more)"
   },
   {
    "path": "dom/events/event-global-is-still-set-when-coercing-beforeunload-result.html",
@@ -148646,14 +148645,14 @@
   {
    "path": "dom/events/Event-init-while-dispatching.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "async_test: fn.call is not a function (+4 more)"
+   "status": "skip",
+   "reason": "script: property 'constructor' is not supported yet"
   },
   {
    "path": "dom/events/Event-initEvent.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "Properties of initEvent(type, true, true): assert_equals: srcElement: expected null, got undefined (+6 more)"
+   "reason": "Calling initEvent must not have an effect during dispatching.: InvalidStateError: Failed to execute 'initEvent' on 'Event': The event has already been dispatched. (+2 more)"
   },
   {
    "path": "dom/events/event-listener-not-fully-active-adopted-node.html",
@@ -148722,8 +148721,7 @@
   {
    "path": "dom/events/Event-timestamp-high-resolution.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Constructed MouseEvent timestamp should be high resolution and have the same time origin as performance.now(): assert_less_than_equal: Event timestamp should be less than performance.now() timestamp taken after its creation: expected 457.2550001144409, got 1794728727428 (+3 more)"
+   "status": "pass"
   },
   {
    "path": "dom/events/Event-timestamp-high-resolution.https.html",
@@ -148814,7 +148812,7 @@
    "path": "dom/events/EventTarget-dispatchEvent.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "If the event's initialized flag is not set, an InvalidStateError must be thrown (BeforeUnloadEvent).: assert_throws: expected \"InvalidStateError\", got \"no exception\" (+21 more)"
+   "reason": "Exceptions from event listeners must not be propagated.: Error"
   },
   {
    "path": "dom/events/EventTarget-this-of-listener.html",
@@ -149119,13 +149117,13 @@
    "path": "dom/events/passive-by-default-non-node.html",
    "kind": "testharness",
    "status": "fail",
-   "reason": "wheel listeners on EventTarget are not passive by default: The \"event\" argument must be an instance of Event. Received an instance of Object (+1 more)"
+   "reason": "wheel listeners on Performance are not passive by default: 'performance.addEventListener' is a Node value that native code does not provide as a value [SC2020 at /Users/cloudos/native-edited/packages/cli/.wpt-work/batch-0/sp10.js:498]"
   },
   {
    "path": "dom/events/passive-by-default.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "touchstart listener is passive by default for Window: assert_equals: defaultPrevented: expected false, got true (+36 more)"
+   "status": "skip",
+   "reason": "script: property 'constructor' is not supported yet"
   },
   {
    "path": "dom/events/pointer-event-document-move.html",

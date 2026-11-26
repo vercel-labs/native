@@ -35,7 +35,7 @@ import type { WebGLContextAttributes } from "./webgl.ts";
 import { StyleDeclaration, styleView } from "./cssom.ts";
 import type { CSSStyleDeclaration } from "./cssom.ts";
 import { hostFileRead, hostSetTitle, hostVideoCanPlay, hostWindowFullscreen, hostWindowFullscreenState } from "./host.ts";
-import { runEditCommand, supportsEditCommand } from "./editing.ts";
+import { queryEditCommandState, runEditCommand, supportsEditCommand } from "./editing.ts";
 import { followLinkHook } from "./link-hook.ts";
 import { runCommandHook } from "./command-hook.ts";
 import { ROW_GROUP, ROW_OPTION, closeSelectPopup, openSelectPopup, selectPopupSerial } from "./select-popup.ts";
@@ -110,6 +110,14 @@ export type { Animation } from "./animation.ts";
 /** The event a listener is running for, as the legacy `window.event` reports it. */
 export let currentEvent: Event | null = null;
 
+/** Makes `event` the one a listener is running for; answers the event that was current before,
+ *  so the caller can put it back when its dispatch ends. */
+export function setCurrentEvent(event: Event | null): Event | null {
+  const prev = currentEvent;
+  currentEvent = event;
+  return prev;
+}
+
 export interface UIEventInit extends EventInit {
   detail?: number;
 }
@@ -118,9 +126,13 @@ export interface UIEventInit extends EventInit {
 export class UIEvent extends Event {
   get [Symbol.toStringTag](): string { return "UIEvent"; }
   readonly detail: number;
+  /** The window an event from a view belongs to; null for one a script constructs, as Chrome's. */
+  readonly view: any;
   constructor(...args: any[]) {
     super(eventTypeArg(args), eventInitArg(args));
-    this.detail = dictLong(eventInitArg(args), "detail", 0);
+    const init = eventInitArg(args);
+    this.detail = dictLong(init, "detail", 0);
+    this.view = init.view === undefined || init.view === null ? null : init.view;
   }
 }
 
@@ -147,6 +159,9 @@ export class MouseEvent extends UIEvent {
   readonly screenY: number;
   readonly clientX: number;
   readonly clientY: number;
+  /** The position in the document: the viewport position plus the page's scroll, as a browser's. */
+  readonly pageX: number;
+  readonly pageY: number;
   readonly movementX: number;
   readonly movementY: number;
   readonly button: number;
@@ -171,6 +186,9 @@ export class MouseEvent extends UIEvent {
     this.screenY = dictDouble(init, "screenY", 0);
     this.clientX = dictDouble(init, "clientX", 0);
     this.clientY = dictDouble(init, "clientY", 0);
+    const scroller = document.scrollingElement;
+    this.pageX = this.clientX + (scroller === null ? 0 : scroller.scrollLeft);
+    this.pageY = this.clientY + (scroller === null ? 0 : scroller.scrollTop);
     this.movementX = dictDouble(init, "movementX", 0);
     this.movementY = dictDouble(init, "movementY", 0);
     this.button = dictLong(init, "button", 0);
@@ -923,11 +941,28 @@ export class ListenerEntry {
   }
 }
 
+/**
+ * HTML's default passive value: a touch or wheel listener registered without an explicit
+ * `passive` on the window, the document, the root element or the body starts out passive, so a
+ * page can't block scrolling on the main thread that way. Windows use the same rule through
+ * Window.addEventListener.
+ */
+export function passiveByDefault(type: string, target: any): boolean {
+  if (type !== "touchstart" && type !== "touchmove" && type !== "wheel" && type !== "mousewheel") return false;
+  if (target instanceof Document) return true;
+  if (target instanceof Element) {
+    const doc = target.ownerDocument;
+    return doc !== null && (target === doc.documentElement || target === doc.body);
+  }
+  return false;
+}
+
 function listenerEntry(listener: EventListenerOrEventListenerObject,
-  options?: ListenerOptions | boolean): ListenerEntry {
+  options?: ListenerOptions | boolean, passiveDefault: boolean = false): ListenerEntry {
   const capture = typeof options === "boolean" ? options : options !== undefined && options.capture === true;
   const once = typeof options === "boolean" || options === undefined ? false : options.once === true;
-  const passive = typeof options === "boolean" || options === undefined ? false : options.passive === true;
+  const passive = typeof options === "boolean" || options === undefined || options.passive === undefined
+    ? passiveDefault : options.passive === true;
   if (typeof listener === "function") return new ListenerEntry(listener, null, capture, once, passive);
   return new ListenerEntry(null, listener, capture, once, passive);
 }
@@ -1100,7 +1135,7 @@ export class EventTarget {
       if (entry.capture === capture &&
         ((entry.fn !== null && entry.fn === listener) || (entry.object !== null && entry.object === listener))) return;
     }
-    list.push(listenerEntry(listener, options));
+    list.push(listenerEntry(listener, options, passiveByDefault(type, this)));
   }
   removeEventListener<K extends keyof GlobalEventHandlersEventMap>(type: K,
     listener: (event: GlobalEventHandlersEventMap[K]) => void, options?: ListenerOptions | boolean): void;
@@ -1122,6 +1157,8 @@ export class EventTarget {
   }
   dispatchEvent(event: Event): boolean {
     if (!(event instanceof Event)) throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
+    if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+    if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
     event.dispatchFlag = true;
     event.propagationStopped = false;
     event.immediateStopped = false;
@@ -1230,7 +1267,13 @@ export class DOMTokenList {
   private changed(): void {
     if (this.owner === null) invalidateStyle();
     else if (this.owner.isConnected) invalidateStyleOf(this.owner);
+    // An element created by script keeps the rules it matched when it was made. A class it gains
+    // later names rules that were never in that set, so ask the style pass to work them out again,
+    // as the id setter does for an id. A compiled element's rules already cover every class a
+    // script can add, since the build keeps them all.
+    if (this.owner !== null && this.owner.dynamic) this.owner.rulesStale = true;
     if (liveHead !== null) refreshLiveCollections();
+    else refreshLabelsIfHeld();
   }
 
   /** Replaces the whole list from a space-separated string (className / class attribute). */
@@ -1628,8 +1671,10 @@ function noteChildList(target: Node, added: Node[], removed: Node[], previousSib
   markLayoutDirty(target);
   // A positioned box taken out grew the scroll extents of the boxes it was in.
   for (const r of removed) if (holdsPositioned(r)) boxChanges.growthStale = true;
-  // The live getElements* lists read the tree, which has just changed.
+  // The live getElements* lists read the tree, which has just changed, and a labels list a
+  // script kept names elements by where they are.
   if (liveHead !== null) refreshLiveCollections();
+  else refreshLabelsIfHeld();
 }
 /** Whether a subtree holds a box incremental layout counts as positioned. */
 function holdsPositioned(n: Node): boolean {
@@ -1658,7 +1703,13 @@ function noteAttribute(target: Element, name: string, oldValue: string | null): 
   }
   notifyAttribute(target, name, oldValue);
   // Only these attributes decide which lists an element belongs to or answers for.
-  if (liveHead !== null && (name === "id" || name === "class" || name === "name")) refreshLiveCollections();
+  if (name === "id" || name === "class" || name === "name") {
+    if (liveHead !== null) refreshLiveCollections();
+    else refreshLabelsIfHeld();
+  } else if (name === "type" || name === "for") {
+    // An input's type decides whether it is labelable, and a label's for= names its control.
+    refreshLabelsIfHeld();
+  }
 }
 function noteCharacterData(target: Node, oldValue: string): void {
   if (OBSERVERS.length > 0) mutationRelay.noteCharacterData(target, oldValue);
@@ -2559,6 +2610,11 @@ export class Node extends EventTarget {
   naturalH = 0;
   /** Width of the content plus padding and the reach of out-of-flow boxes (see scrollWidth). */
   naturalW = 0;
+  /** How much of naturalW and naturalH the transformed-overflow pass added, to take back. */
+  tW = 0;
+  tH = 0;
+  /** The transform values layout last measured the box's painted reach from, -1 before any. */
+  lTransformSig = -1;
   /**
    * Set while the box's own intrinsic width is being measured, so that a min-width or max-width
    * keyword met during that measurement doesn't measure it again and spin.
@@ -2655,6 +2711,14 @@ export class Node extends EventTarget {
   fixedViewport = false;
   /** When this element last scrolled (ms), for showing the overlay scrollbar. */
   lastScroll = -1e9;
+  /**
+   * The lines a line-clamp ancestor still allows this box (CSS Overflow 4): a flow from a
+   * clamped box passes down what is left of its budget, -1 when there is none.
+   */
+  clampBudget = -1;
+  /** Whether the flow goes on past this box, so its last kept line ends in an ellipsis even when
+   *  the line itself fits the budget (CSS Overflow 4's block-ellipsis). */
+  clampEllipsis = false;
   lines: string[] = [];
   lineWidths: number[] = [];
   /** The first line's `text-indent`, which shifts it and narrows it in the content box. */
@@ -3530,7 +3594,7 @@ export class Node extends EventTarget {
       if (entry.capture === capture &&
         ((entry.fn !== null && entry.fn === listener) || (entry.object !== null && entry.object === listener))) return;
     }
-    list.push(listenerEntry(listener, options));
+    list.push(listenerEntry(listener, options, passiveByDefault(type, this)));
   }
   removeEventListener<K extends keyof GlobalEventHandlersEventMap>(type: K,
     listener: (event: GlobalEventHandlersEventMap[K]) => void, options?: ListenerOptions | boolean): void;
@@ -3897,7 +3961,15 @@ export type NodeListOf<T extends Node = Node> = readonly T[];
  * The NodeList constructor, for the instanceof checks pages make. The lists this runtime hands
  * out are plain arrays (a querySelectorAll result is one), so none of them is a NodeList.
  */
-class NodeListCtor {
+/**
+ * The list a DOM property hands out for a NodeList: an array a script can test with
+ * `instanceof NodeList`, which is what the DOM's lists are. Its `item()` is the member the DOM
+ * gives a list besides its indices.
+ */
+class NodeListCtor extends Array<Node> {
+  item(index: number): Node | null {
+    return index >= 0 && index < this.length ? this[index] : null;
+  }
 }
 export const NodeList: any = NodeListCtor;
 
@@ -3931,6 +4003,7 @@ const HTML_NS = "http://www.w3.org/1999/xhtml";
 let liveHead: HTMLCollection | null = null;
 
 function refreshLiveCollections(): void {
+  refreshAllLabels();
   let c: HTMLCollection | null = liveHead;
   while (c !== null) {
     fillCollection(c);
@@ -3941,6 +4014,9 @@ function refreshLiveCollections(): void {
 /** Forgets the collections of the page that just ended (the WPT runner reuses the process). */
 export function clearLiveCollections(): void {
   liveHead = null;
+  // The labels lists a page handed out belong to that page: a runner's next page starts with
+  // none, so a previous page's controls are not retained and refreshed on every mutation.
+  labelLists.clear();
 }
 
 /**
@@ -5149,6 +5225,7 @@ export class Element extends Node {
         noteOtherIdentityChange(this);
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, text);
+        if (key === "for") refreshAllLabels();
       }
     }
   }
@@ -5842,7 +5919,7 @@ export class Element extends Node {
   ensurePseudoBox(kind: number): Element | null {
     if (kind === P.PE_MARKER) return this.ensureMarker();
     if (kind === P.PE_PLACEHOLDER) {
-      if (this.placeholderPseudo === null && this.localName === "input") this.addPseudoChild(kind, []);
+      if (this.placeholderPseudo === null && (this.localName === "input" || this.localName === "textarea")) this.addPseudoChild(kind, []);
       return this.placeholderPseudo;
     }
     const existing = kind === P.PE_BEFORE ? this.beforePseudo : kind === P.PE_AFTER ? this.afterPseudo : null;
@@ -5988,13 +6065,13 @@ export class Element extends Node {
     return want;
   }
 
-  /** Dispatches a bubbling click event starting at this element, as a browser's click() does. */
+  /** Dispatches a bubbling click event starting at this element, as a browser's click() does:
+   *  the click event itself is untrusted, while the input and change events its activation
+   *  sends are trusted, as Chrome's are. */
   click(): void {
     // A disabled control takes neither a click event nor its default action, as in a browser.
     if (inDisabledFormControl(this)) return;
-    if (dispatch(trusted(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true })), this)) {
-      runClickDefault(this);
-    }
+    dispatchClick(this, () => new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }), false);
   }
 
   /**
@@ -6692,7 +6769,7 @@ export class ElementInternals {
   }
 
   /** The labels that name the element. */
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this.host);
   }
 
@@ -7018,7 +7095,8 @@ function collectFormEntries(form: HTMLFormElement, data: FormData): void {
       if (type === "checkbox" || type === "radio") {
         if (node.checked) data.append(name, node.value);
       } else if (type === "file") {
-        for (const file of node.files) data.append(name, file);
+        const files = node.files;
+        if (files !== null) for (const file of files) data.append(name, file);
       } else if (type !== "submit" && type !== "reset" && type !== "button" && type !== "image") {
         data.append(name, node.value);
       }
@@ -7050,13 +7128,15 @@ function numberAttribute(el: Element, name: string, fallback: number): number {
 /** The elements a form lists and a label can name. */
 function isLabelable(el: Element): boolean {
   const n = el.localName;
-  return n === "button" || n === "input" || n === "meter" || n === "output"
+  // An input in the hidden state is listed but not labelable.
+  if (n === "input") return (el as HTMLInputElement).type.toLowerCase() !== "hidden";
+  return n === "button" || n === "meter" || n === "output"
     || n === "progress" || n === "select" || n === "textarea";
 }
 
 /** The elements a form lists, which is the same set plus fieldsets and objects. */
 function isListedElement(el: Element): boolean {
-  return isLabelable(el) || el.localName === "fieldset" || el.localName === "object";
+  return isLabelable(el) || el.localName === "input" || el.localName === "fieldset" || el.localName === "object";
 }
 
 /** The first labelable descendant of `root`, in document order. */
@@ -7069,6 +7149,24 @@ function labelableDescendant(root: Node): HTMLElement | null {
     if (deep !== null) return deep;
   }
   return null;
+}
+
+/** The options a select lists: its descendant options, less the subtrees the HTML form-elements
+ *  rules leave out — an option's own, a datalist's, an hr's, a nested select's, and an optgroup
+ *  inside another optgroup. A wrapper element around them is transparent. */
+function collectSelectOptions(root: Node, out: HTMLOptionElement[], inOptgroup: boolean): void {
+  for (const c of root.kids) {
+    if (!c.isElementNode || c.pseudoKind !== P.PE_NONE) continue;
+    const e = c as Element;
+    if (e instanceof HTMLOptionElement) { out.push(e); continue; }
+    if (e instanceof HTMLSelectElement || e instanceof HTMLDataListElement || e.localName === "hr") continue;
+    if (e.localName === "optgroup") {
+      if (inOptgroup) continue;
+      collectSelectOptions(e, out, true);
+      continue;
+    }
+    collectSelectOptions(e, out, inOptgroup);
+  }
 }
 
 /** Every element under `root`, in document order. */
@@ -7108,15 +7206,42 @@ function formOwnerFor(el: HTMLElement): HTMLFormElement | null {
 }
 
 /** The labels that name `el`: the ones around it, and the ones whose for= gives its id. */
-function labelsFor(el: HTMLElement): HTMLLabelElement[] {
+/** The labels list each element was handed, which stays the same object and stays live. */
+const labelLists = new Map<HTMLElement, NodeListCtor>();
+
+function labelsFor(el: HTMLElement): NodeListCtor {
+  let list = labelLists.get(el);
+  if (list === undefined) {
+    list = new NodeListCtor();
+    labelLists.set(el, list);
+  }
+  fillLabels(el, list);
+  return list;
+}
+
+/** Re-reads the labels of an element that names it, or the label around it. */
+function fillLabels(el: HTMLElement, list: NodeListCtor): void {
+  list.length = 0;
+  if (!isLabelable(el)) return;
   const all: Element[] = [];
   collectElements(document.documentElement, all);
-  const out: HTMLLabelElement[] = [];
   for (const e of all) {
     if (!(e instanceof HTMLLabelElement)) continue;
-    if (e.control === el) out.push(e);
+    if (e.control === el) list.push(e);
   }
-  return out;
+}
+
+/** Brings the labels lists already handed out up to date, when a page holds any. */
+function refreshLabelsIfHeld(): void {
+  if (labelLists.size > 0) refreshAllLabels();
+}
+
+/** Brings every labels list already handed out up to date. */
+function refreshAllLabels(): void {
+  for (const el of labelLists.keys()) {
+    const list = labelLists.get(el);
+    if (list !== undefined) fillLabels(el, list);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -7219,7 +7344,7 @@ export class HTMLButtonElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   get name(): string {
@@ -7815,6 +7940,89 @@ export function openSelectMenu(el: HTMLSelectElement): void {
  * A click's default action on a checkbox or radio: the box ticks, a radio ticks and unchecks the
  * rest of its group, and the "input" and "change" events follow. A disabled control does nothing.
  */
+/** What a click on a checkbox or radio changed, so a canceled click can put it back. */
+interface ClickActivation {
+  el: HTMLInputElement;
+  checked: boolean;
+  indeterminate: boolean;
+  groupPrev: HTMLInputElement | null;
+  /** Whether the click changed the control at all: a radio that was already checked's click
+   *  sends no input or change event. */
+  changed: boolean;
+}
+
+/** The state a click activates on a checkbox or radio, applied before the click event runs. */
+function preClickActivate(target: Node): ClickActivation | null {
+  let n: Node | null = target;
+  while (n !== null) {
+    if (n instanceof HTMLInputElement) {
+      const kind = controlKind(n.type);
+      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
+        const act: ClickActivation = { el: n, checked: n.checked, indeterminate: n.indeterminate, groupPrev: null, changed: false };
+        if (kind === CONTROL_RADIO) {
+          if (!n.checked) {
+            // A radio's click takes the group's checkedness: the one that had it is unchecked
+            // now, so only this radio is left checked.
+            const group: HTMLInputElement[] = [];
+            radioGroup(n, group);
+            for (const o of group) {
+              if (o === n || !o.checked) continue;
+              act.groupPrev = o;
+              o.checked = false;
+            }
+            n.checked = true;
+            act.changed = true;
+          }
+        } else {
+          // A half-checked box goes the rest of the way to checked, and clearing the half state
+          // is a change of its own.
+          const next = n.indeterminate ? true : !n.checked;
+          act.changed = next !== n.checked || n.indeterminate;
+          n.indeterminate = false;
+          n.checked = next;
+        }
+        return act;
+      }
+      return null;
+    }
+    if (n instanceof HTMLButtonElement) return null;
+    n = n.parentNode;
+  }
+  return null;
+}
+
+/** The input and change events a completed click activation sends. */
+function finishClickActivation(act: ClickActivation): void {
+  // A click that left the control as it was — a radio that was already checked — sends nothing.
+  if (!act.changed) return;
+  dispatch(trusted(new Event("input", { bubbles: true })), act.el);
+  dispatch(trusted(new Event("change", { bubbles: true })), act.el);
+}
+
+/** Puts back what a canceled click's pre-activation changed. */
+function cancelClickActivation(act: ClickActivation): void {
+  const el = act.el;
+  if (act.groupPrev !== null) act.groupPrev.checked = true;
+  el.checked = act.checked;
+  el.indeterminate = act.indeterminate;
+}
+
+/**
+ * Dispatches a click at `target` and runs what it activates: a checkbox or radio is toggled
+ * before the click event, the event is dispatched, and a canceled event puts the toggle back.
+ */
+export function dispatchClick(target: Node, makeEvent: () => MouseEvent, user: boolean): boolean {
+  const act = preClickActivate(target);
+  const accepted = dispatch(makeEvent(), target);
+  if (act !== null) {
+    if (accepted) finishClickActivation(act);
+    else cancelClickActivation(act);
+  } else if (accepted) {
+    runClickDefault(target, user);
+  }
+  return accepted;
+}
+
 function activateControl(el: HTMLInputElement): void {
   if (controlDisabled(el)) return;
   if (controlKind(el.type) === CONTROL_RADIO) {
@@ -7939,16 +8147,13 @@ export function runClickDefault(target: Node, user: boolean = false): void {
     if (picker instanceof HTMLInputElement || picker instanceof HTMLButtonElement) break;
     picker = picker.parentNode;
   }
-  // A checkbox or radio ticks when it is clicked, in a form or not. A range took its new value
-  // when the press landed, so the click has nothing left to do.
+  // A checkbox or radio was toggled around its click event (see dispatchClick); a range took its
+  // new value when the press landed, so the click has nothing left to do.
   let box: Node | null = target;
   while (box !== null) {
     if (box instanceof HTMLInputElement) {
       const kind = controlKind(box.type);
-      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
-        activateControl(box);
-        return;
-      }
+      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) return;
       if (kind === CONTROL_RANGE) return;
       break;
     }
@@ -8227,14 +8432,63 @@ function disabledBits(el: Element): number {
   // A disabled fieldset disables the controls inside it, and a disabled option group or select
   // disables the options in it.
   let off = controlDisabled(el as HTMLElement);
-  if (!off && el.localName === "option") {
+  if (!off && el.localName === "option") off = optionDisabled(el as HTMLOptionElement);
+  // An option group is disabled with the select it belongs to, as its options are.
+  if (!off && el.localName === "optgroup") {
     let a = el.parentElement;
-    while (a !== null && !off) {
-      if (a.localName === "optgroup" || a.localName === "select") off = attributeFlag(a, "disabled");
+    while (a !== null) {
+      const n = a.localName;
+      if (n === "select") { off = attributeFlag(a, "disabled"); break; }
+      // A group keeps the state of the select it is directly in: one inside another group, an
+      // option, an hr or a datalist takes after none of them.
+      if (n === "optgroup" || n === "option" || n === "hr" || n === "datalist") break;
       a = a.parentElement;
     }
   }
   return off ? P.S_DISABLED : P.S_ENABLED;
+}
+
+/** Whether an option is disabled: by its own attribute, or by the option group or select the
+ *  first one up the chain past a wrapper. An option nested in an option, an hr or a datalist
+ *  takes after none of them. */
+/** Whether the option or the option group it is in is disabled. The select's own disabled state
+ *  doesn't take part: a disabled select still shows the option it would have chosen. */
+function optionOrGroupDisabled(el: HTMLOptionElement): boolean {
+  if (attributeFlag(el, "disabled")) return true;
+  let group = false;
+  for (let a = el.parentElement; a !== null; a = a.parentElement) {
+    const n = a.localName;
+    if (n === "optgroup") {
+      if (group) return false;
+      group = true;
+      if (attributeFlag(a, "disabled")) return true;
+    } else if (n === "select" || n === "option" || n === "hr" || n === "datalist") {
+      return false;
+    }
+  }
+  return false;
+}
+
+function optionDisabled(el: HTMLOptionElement): boolean {
+  if (attributeFlag(el, "disabled")) return true;
+  // Only the option's own group counts, and a disabled select reaches the options it lists;
+  // an option nested in a second group, an option, an hr or a datalist is not one of them.
+  let groups = 0;
+  let a = el.parentElement;
+  while (a !== null) {
+    const n = a.localName;
+    if (n === "optgroup") {
+      groups++;
+      if (groups > 1) return false;
+      if (attributeFlag(a, "disabled")) return true;
+    } else if (n === "select") {
+      return attributeFlag(a, "disabled");
+    } else if (n === "option" || n === "hr" || n === "datalist") {
+      return false;
+    }
+    a = a.parentElement;
+  }
+  return false;
 }
 
 function requiredBits(el: Element): number {
@@ -8298,12 +8552,26 @@ function validBits(el: Element): number {
   // An out-of-range value fails the field's constraints even though validity only reports the
   // constraints the form code checks, so the range state decides here too.
   if ((rangeBits(el) & P.S_OUT_OF_RANGE) !== 0) return P.S_INVALID;
-  const field = el as HTMLInputElement;
-  return field.validity.valid ? P.S_VALID : P.S_INVALID;
+  // A select and a textarea report constraints of their own: only an input's validity would be
+  // the wrong interface to ask.
+  const valid = el instanceof HTMLInputElement || el instanceof HTMLSelectElement ||
+    el instanceof HTMLTextAreaElement ? el.validity.valid : true;
+  return valid ? P.S_VALID : P.S_INVALID;
 }
 
 function focusWithinBits(el: Element): number {
-  return focusState.el !== null && el.contains(focusState.el) ? P.S_FOCUS_WITHIN : 0;
+  const focused = focusState.el;
+  if (focused === null) return 0;
+  // The focused node lies within every ancestor of the flattened tree: inside a shadow tree or
+  // a slot, that chain runs through the host and past the slot's ancestors, not the DOM's own.
+  let n: Node | null = focused;
+  while (n !== null) {
+    if (n === el) return P.S_FOCUS_WITHIN;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return 0;
 }
 
 /** A box's top edge relative to a scroll container's padding box, in unscrolled content px. */
@@ -8782,6 +9050,10 @@ export class HTMLMetaElement extends HTMLElement {
 
 export class HTMLMeterElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLMeterElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   constructor(id: string = "", text: string = "", rules: readonly number[] = [], states: number = 0, inline: boolean = true) {
     super();
     this.initEl("meter", id, text, rules, states, inline);
@@ -8908,6 +9180,9 @@ export class HTMLOptionElement extends HTMLElement {
     if (this.selectedSet) return this.selectedFlag;
     const s = this.selectElement();
     if (s === null) return this.defaultSelected;
+    // An option the select's list leaves out — one nested in an hr, a datalist or another
+    // option — keeps the selectedness its attribute gives it.
+    if (s.options.indexOf(this) < 0) return this.defaultSelected;
     return s.isSelected(this);
   }
   set selected(value: boolean) {
@@ -8926,7 +9201,9 @@ export class HTMLOptionElement extends HTMLElement {
   get index(): number {
     const s = this.selectElement();
     if (s === null) return 0;
-    return s.options.indexOf(this);
+    // An option the list leaves out sits at index 0, as a detached one does, not at -1.
+    const at = s.options.indexOf(this);
+    return at < 0 ? 0 : at;
   }
   get disabled(): boolean {
     return attributeFlag(this, "disabled");
@@ -8936,7 +9213,10 @@ export class HTMLOptionElement extends HTMLElement {
   }
   get form(): HTMLFormElement | null {
     const s = this.selectElement();
-    return s === null ? null : formOwnerFor(s);
+    // An option the select doesn't list — one nested in an hr, a datalist or another option — has
+    // no form of its own, as the option list says.
+    if (s === null || s.options.indexOf(this) < 0) return null;
+    return formOwnerFor(s);
   }
   /** The select this option is in, or null when it isn't in a select's list. */
   selectElement(): HTMLSelectElement | null {
@@ -8963,6 +9243,10 @@ export class Option extends HTMLOptionElement {
 
 export class HTMLOutputElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLOutputElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   /** The message setCustomValidity() was given, which a failed check reports. */
   private customMessage = "";
   /** Whether a script set the value, which then stops following the element's text. */
@@ -9047,6 +9331,10 @@ export class HTMLPreElement extends HTMLElement {
 
 export class HTMLProgressElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLProgressElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   constructor(id: string = "", text: string = "", rules: readonly number[] = [], states: number = 0, inline: boolean = true) {
     super();
     this.initEl("progress", id, text, rules, states, inline);
@@ -9119,9 +9407,7 @@ export class HTMLSelectElement extends HTMLElement {
   /** The options in the select, including those inside option groups, in document order. */
   get options(): HTMLOptionElement[] {
     const out: HTMLOptionElement[] = [];
-    const all: Element[] = [];
-    collectElements(this, all);
-    for (const e of all) if (e instanceof HTMLOptionElement) out.push(e);
+    collectSelectOptions(this, out, false);
     return out;
   }
   get length(): number {
@@ -9231,7 +9517,7 @@ export class HTMLSelectElement extends HTMLElement {
   set size(value: number) {
     this.setAttribute("size", String(value));
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   /** The option at `index`, or null past the end. */
@@ -9265,6 +9551,19 @@ export class HTMLSelectElement extends HTMLElement {
     const option = this.item(index);
     if (option !== null) this.removeChild(option);
   }
+  /** The placeholder label option: the first option of a drop-down select when its value is
+   *  empty and no option group holds it. A required select fails validation while it shows one. */
+  get placeholderOption(): HTMLOptionElement | null {
+    if (this.multiple || this.size > 1) return null;
+    const options = this.options;
+    if (options.length === 0) return null;
+    const first = options[0];
+    if (first.value !== "") return null;
+    for (let a = first.parentElement; a !== null && a !== this; a = a.parentElement) {
+      if (a.localName === "optgroup") return null;
+    }
+    return first;
+  }
   /** Whether `option` is shown as selected, with the default a browser picks when nothing says. */
   isSelected(option: HTMLOptionElement): boolean {
     const options = this.options;
@@ -9284,7 +9583,7 @@ export class HTMLSelectElement extends HTMLElement {
     }
     if (this.multiple) return option.defaultSelected;
     for (let i = 0; i < options.length; i++) if (options[i].defaultSelected) return index === i;
-    for (let i = 0; i < options.length; i++) if (!options[i].disabled) return index === i;
+    for (let i = 0; i < options.length; i++) if (!optionOrGroupDisabled(options[i])) return index === i;
     return false;
   }
   /** Whether the select takes part in validation: a disabled one, or one a disabled fieldset
@@ -9296,7 +9595,11 @@ export class HTMLSelectElement extends HTMLElement {
   get validity(): ValidityState {
     const state = new ValidityState();
     state.customError = this.customMessage !== "";
-    state.valueMissing = this.willValidate && this.required && this.selectedIndex < 0;
+    if (this.willValidate && this.required) {
+      const placeholder = this.placeholderOption;
+      state.valueMissing = this.selectedIndex < 0 ||
+        (placeholder !== null && this.isSelected(placeholder));
+    }
     return state;
   }
   get validationMessage(): string {
@@ -9854,6 +10157,11 @@ export class HTMLTextAreaElement extends HTMLElement {
   set value(value: any) {
     const text = String(value);
     const old = this.textContent;
+    // Writing the text the field already holds changes nothing, and leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    if (text === old) return;
     this.writeText(text, 0, old.length, text.length);
     this.selectionStart = text.length;
     this.selectionEnd = text.length;
@@ -9952,7 +10260,7 @@ export class HTMLTextAreaElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   /** Which end the selection is anchored at, and so which way a shift-click extends it. */
@@ -10658,18 +10966,14 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  const d = parent.sv[P.P_DISPLAY];
-  if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
-    d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
-  // A display: contents box has no box of its own: its children are items of the container that
-  // does, so a whitespace-only run under it is decided there and an edit must restyle.
-  if (d === P.D_CONTENTS) {
-    for (let a = parent.parentNode; a !== null && a.nodeType === 1; a = a.parentNode) {
-      const ad = (a as Element).sv[P.P_DISPLAY];
-      if (ad === P.D_FLEX || ad === P.D_INLINE_FLEX || ad === P.D_GRID || ad === P.D_INLINE_GRID ||
-        ad === P.D_GRID_LANES || ad === P.D_INLINE_GRID_LANES) return true;
-      if (ad !== P.D_CONTENTS) break;
-    }
+  // A `display: contents` wrapper generates no box, so the text takes part in the formatting
+  // context of the nearest ancestor that does: that box decides whether whitespace renders.
+  let boxed: Node | null = parent;
+  while (boxed !== null && !boxed.isTextNode && boxed.sv[P.P_DISPLAY] === P.D_CONTENTS) boxed = boxed.parentNode;
+  if (boxed !== null) {
+    const d = boxed.sv[P.P_DISPLAY];
+    if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
+      d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   }
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
     if (a.firstLetterPseudo !== null || a.firstLetterFloat !== null) return true;
@@ -11819,7 +12123,32 @@ export function setWindowEventHost(host: WindowEventHost | null): void {
   windowEventHost = host;
 }
 
+/** When a trusted input event last counted as a user gesture. */
+let activationAt = -1;
+/** How long a gesture keeps counting, the way a browser's transient activation does. */
+const ACTIVATION_WINDOW_MS = 5000;
+
+/** Records a user gesture at the input path: a press or a key the host delivered, never an event
+ *  a script dispatched (document.createEvent, element.click() and dispatchEvent are not gestures). */
+export function noteUserActivation(): void {
+  activationAt = performance.now();
+}
+
+/** Spends the current gesture: a transient activation opens at most one window, as a browser's
+ *  does. */
+export function consumeUserActivation(): void {
+  activationAt = -1;
+}
+
+/** Whether the page may open a new window now: a user gesture began within the activation
+ *  window. A window.open() outside one is a popup, which browsers block, so this does too. */
+export function hasTransientActivation(): boolean {
+  return activationAt >= 0 && performance.now() - activationAt <= ACTIVATION_WINDOW_MS;
+}
+
 export function dispatch(event: Event, target: Node): boolean {
+  if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+  if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
   event.dispatchFlag = true;
   event.windowCaptureRan = false;
   event.windowBubbleRan = false;
@@ -11892,6 +12221,10 @@ export function dispatch(event: Event, target: Node): boolean {
     (event.composed && root instanceof ShadowRoot && root.host.isConnected));
   if (reachesWindow) {
     event.windowCaptureRan = true;
+    // The window sits above the document in the path, so its listeners see the target and the
+    // related target the outermost path item shows, as a browser's do.
+    if (shown.length > 0) event.target = shown[shown.length - 1];
+    if (event.pathItems.length > 0) event.relatedNow = event.pathItems[event.pathItems.length - 1].related;
     host!.invokeWindowListeners(event.type, event, true);
   }
   // Capture: from the outermost item inward, the target's own listeners included.
@@ -11917,6 +12250,8 @@ export function dispatch(event: Event, target: Node): boolean {
   // (focus, mouseenter, ...) still reaches its capture listeners there.
   if (reachesWindow && event.bubbles && !event.propagationStopped) {
     event.windowBubbleRan = true;
+    if (shown.length > 0) event.target = shown[shown.length - 1];
+    if (event.pathItems.length > 0) event.relatedNow = event.pathItems[event.pathItems.length - 1].related;
     host!.invokeWindowListeners(event.type, event, false);
   }
   event.eventPhase = Event.NONE;
@@ -11973,24 +12308,49 @@ export const geometry: {
 
 export const focusState = { el: null as Element | null };
 /**
- * Whether the last interaction came from the keyboard. Programmatic focus follows it, which is
- * how a browser decides :focus-visible for a script's focus() call.
+ * The kind of interaction that last reached the page, or null while the user has not touched it.
+ * Programmatic focus follows it, which is how a browser decides :focus-visible for a script's
+ * focus() call: focus a script sets before the user has done anything shows the ring, as does
+ * focus after a key; focus after a pointer does not.
  */
-let lastInputIsKey = false;
+let lastInput: "key" | "pointer" | null = null;
 
 /** Records the kind of interaction that just happened ("key" or "pointer"). */
 export function noteInput(kind: "key" | "pointer"): void {
-  lastInputIsKey = kind === "key";
+  lastInput = kind;
+  // A key from the keyboard switches the page's modality without moving focus, and the element
+  // that has focus starts showing the ring, as Chrome does.
+  if (kind === "key") refreshFocusVisible();
 }
 
-/** Whether the element always shows a focus ring when focused: text fields do. */
+/** A fresh page has no interaction behind it, even when it takes over from another in the same
+ *  process (the WPT runner shows several pages in turn): script focus shows the ring again. */
+export function resetInput(): void {
+  lastInput = null;
+}
+
+/** Whether the element always shows a focus ring when focused: text fields and editable
+ *  content do, whatever brought the focus. */
 function alwaysFocusVisible(el: Element): boolean {
+  if (isContentEditableElement(el)) return true;
   if (el.localName === "textarea") return true;
   if (!(el instanceof HTMLInputElement)) return false;
   const t = el.type;
   return t === "" || t === "text" || t === "search" || t === "url" || t === "tel" || t === "email" ||
     t === "password" || t === "number" || t === "date" || t === "datetime-local" || t === "month" ||
     t === "time" || t === "week";
+}
+
+/** Recomputes the focused element's ring from the interaction behind it and what it now is: a
+ *  key press or a field that became a text field gives it one, and a field that stops being one
+ *  loses it. */
+export function refreshFocusVisible(): void {
+  const el = focusState.el;
+  if (el === null) return;
+  const ring = alwaysFocusVisible(el) || lastInput !== "pointer";
+  const was = el.state;
+  el.state = ring ? el.state | P.S_FOCUS_VISIBLE : el.state & ~P.S_FOCUS_VISIBLE;
+  if (el.state !== was) restyleForState(el, P.S_FOCUS_VISIBLE);
 }
 
 /**
@@ -12027,14 +12387,43 @@ export function setAxGeometryHook(fn: (() => void) | null): void {
   axGeometryHook = fn;
 }
 
+/**
+ * Drops the focus when the element holding it can no longer be rendered (display: none on it or
+ * an ancestor): a browser's focus fixup does the same after the style change that hid it.
+ */
+export function dropFocusIfUnrendered(): boolean {
+  const el = focusState.el;
+  if (el === null || !hiddenByStyle(el)) return false;
+  setFocus(null);
+  return true;
+}
+
+/** Whether the style hides a node: it has no box, or something above it in the flattened tree —
+ *  a slot it was assigned to, the host of its shadow tree — is display: none. */
+function hiddenByStyle(el: Element): boolean {
+  if (isUnrendered(el)) return true;
+  let n: Node | null = el;
+  while (n !== null) {
+    if (n !== el && n instanceof Element && n.sv[P.P_DISPLAY] === P.D_NONE) return true;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return false;
+}
+
 export function setFocus(el: Element | null, visible?: boolean): void {
   const prev = focusState.el;
-  const ring = el !== null && (visible ?? (alwaysFocusVisible(el) || lastInputIsKey));
+  const ring = el !== null && (visible ?? (alwaysFocusVisible(el) || lastInput !== "pointer"));
   if (prev === el) {
     if (el !== null) {
       const was = el.state;
-      el.state = ring ? el.state | P.S_FOCUS_VISIBLE : el.state & ~P.S_FOCUS_VISIBLE;
-      if (el.state !== was) restyleForState(el, P.S_FOCUS_VISIBLE);
+      // Focus did not move, so the modality that decided its ring still stands: only an explicit
+      // request changes it here (a press on the focused element leaves the ring it had).
+      if (visible !== undefined) {
+        el.state = ring ? el.state | P.S_FOCUS_VISIBLE : el.state & ~P.S_FOCUS_VISIBLE;
+        if (el.state !== was) restyleForState(el, P.S_FOCUS_VISIBLE);
+      }
       invalidatePaint();
     }
     return;
@@ -12091,6 +12480,8 @@ export function addToTopLayer(el: Element): void {
   const at = topLayer.indexOf(el);
   if (at >= 0) topLayer.splice(at, 1);
   topLayer.push(el);
+  // The top layer positions the element itself, so its computed style changes with the move.
+  invalidateStyleOf(el);
   invalidatePaint();
 }
 
@@ -12099,6 +12490,7 @@ export function removeFromTopLayer(el: Element): void {
   const at = topLayer.indexOf(el);
   if (at >= 0) {
     topLayer.splice(at, 1);
+    invalidateStyleOf(el);
     invalidatePaint();
   }
 }
@@ -12318,6 +12710,8 @@ function dateApply(el: HTMLInputElement, vals: (number | null)[], active: number
   const next = text === null ? "" : text;
   if (next !== el.val) {
     el.val = next;
+    // A segment edit is the user's own, so the change event a commit sends follows from it.
+    el.userEdited = true;
     noteControlChange(el);
     dispatch(trusted(new InputEvent("input", { bubbles: true })), el);
   } else {
@@ -12444,6 +12838,21 @@ function parseFloatingPointNumber(text: string): number {
   if (i !== s.length) return NaN;
   const n = Number(s);
   return isFinite(n) ? n : NaN;
+}
+
+/** An email field's value: its newlines are stripped and the ends trimmed, and a multiple field
+ *  also trims each address. */
+function sanitizeEmailText(text: string, multiple: boolean): string {
+  const one = text.replace(/[\r\n]/g, "").trim();
+  if (!multiple) return one;
+  const out: string[] = [];
+  for (const a of one.split(",")) out.push(a.trim());
+  return out.join(",");
+}
+
+/** A url field's value: its tabs and newlines are removed and its ends trimmed. */
+function sanitizeUrlText(text: string): string {
+  return text.replace(/[\t\r\n]/g, "").trim();
 }
 
 /** The value a number field keeps of `text`: the number as written, or nothing when it names none. */
@@ -12608,6 +13017,8 @@ export class HTMLInputElement extends HTMLElement {
   anchor = 0;
   /** The value at focus or the last change event, for deciding when "change" fires. */
   committed = "";
+  /** Whether a user's typing changed the value since the last commit. */
+  userEdited = false;
   /** A checkbox's state. The box itself isn't drawn yet, but the property is the value frameworks set. */
   private checkedFlag = false;
   /** A checkbox whose state a script put between checked and unchecked. */
@@ -12690,13 +13101,23 @@ export class HTMLInputElement extends HTMLElement {
       noteControlChange(this);
       return;
     }
-    // A whole-value write is a replace of the field's text to a live value range; writing the
-    // same text changes nothing.
-    if (v !== this.val) moveValueRanges(this, 0, this.val.length, v.length);
-    this.val = v;
-    this.selStart = v.length;
-    this.selEnd = v.length;
-    this.anchor = v.length;
+    // A whole-value write is a replace of the field's text to a live value range. Writing the
+    // text the field already holds changes nothing, and in particular leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    let text = String(v);
+    // An email or url field keeps only what its value sanitization allows.
+    const fieldType = this.type.toLowerCase();
+    if (fieldType === "email" || fieldType === "url") {
+      text = fieldType === "email" ? sanitizeEmailText(text, this.multiple) : sanitizeUrlText(text);
+    }
+    if (text === this.val) return;
+    moveValueRanges(this, 0, this.val.length, text.length);
+    this.val = text;
+    this.selStart = text.length;
+    this.selEnd = text.length;
+    this.anchor = text.length;
     // A value decides whether a placeholder shows, whether the field is valid, and its range.
     noteControlChange(this);
   }
@@ -12843,6 +13264,8 @@ export class HTMLInputElement extends HTMLElement {
     const declared = stepAttr === null ? 1 : Number(stepAttr);
     const step = isFinite(declared) && declared > 0 ? declared : 1;
     if (min > max) return;
+    // An empty field counts as zero, as the stepping algorithm has it; its bounds then clamp the
+    // result, so an unbounded field steps from zero and a bounded one lands on its bound.
     let current = this.val === "" ? (t === "range" ? spec.value : 0) : Number(this.val);
     if (isNaN(current)) current = t === "range" ? spec.value : 0;
     if (current < min || current > max) return;
@@ -12934,18 +13357,49 @@ export class HTMLInputElement extends HTMLElement {
   set accept(v: string) {
     this.setAttribute("accept", v);
   }
-  /** The files the field holds. Nothing opens a picker here, so this stays empty unless set. */
-  get files(): readonly File[] {
-    return this.fileList;
+  /** The files the field holds, which only a file field has: nothing opens a picker here, so
+   *  this stays empty unless a script sets it. */
+  get files(): readonly File[] | null {
+    return this.type.toLowerCase() === "file" ? this.fileList : null;
   }
   set files(list: readonly File[]) {
     this.fileList = list.slice();
   }
+  /** The datalist the list attribute names, or null when it names none. */
+  get list(): HTMLDataListElement | null {
+    const id = this.getAttribute("list");
+    if (id === null || id === "") return null;
+    // The list is the one in the tree the field is in: a field inside a shadow tree, a detached
+    // fragment, a detached element's subtree or another document finds the datalist there rather
+    // than one in the page around it.
+    const root = this.getRootNode();
+    let el: Element | null = null;
+    if (root instanceof DocumentFragment || root instanceof Document) {
+      el = root.getElementById(id);
+    } else if (root instanceof Element) {
+      // A detached subtree's root is the element the field was built in: look through it.
+      if (root.id === id) el = root;
+      else {
+        const all: Element[] = [];
+        collectElements(root, all);
+        for (const c of all) if (c.id === id) { el = c; break; }
+      }
+    }
+    return el instanceof HTMLDataListElement ? el : null;
+  }
+  /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
+  get defaultIndeterminate(): boolean {
+    return attributeFlag(this, "indeterminate");
+  }
+  set defaultIndeterminate(v: boolean) {
+    setAttributeFlag(this, "indeterminate", v);
+  }
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
-    return labelsFor(this);
+  get labels(): NodeListCtor | null {
+    // An input in the hidden state has none; its retained list is emptied.
+    return this.type.toLowerCase() === "hidden" ? null : labelsFor(this);
   }
   get textLength(): number {
     return this.val.length;
@@ -13066,6 +13520,7 @@ export class HTMLInputElement extends HTMLElement {
     const e = this.selEnd;
     moveValueRanges(this, s, e - s, text.length);
     this.val = this.val.slice(0, s) + text + this.val.slice(e);
+    this.userEdited = true;
     this.moveCaret(s + text.length, false);
     noteControlChange(this);
     if (axChangeHook !== null) axChangeHook();
@@ -13092,7 +13547,23 @@ export class HTMLInputElement extends HTMLElement {
       } else if (String(value).trim().toLowerCase() === "number") {
         this.val = sanitizeNumberText(this.val);
         noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
+        noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "url") {
+        this.val = sanitizeUrlText(this.val);
+        noteControlChange(this);
       }
+      // A field that becomes a text field while focused starts showing the ring a text field
+      // has, and one that stops being one loses it: :focus-visible follows the type change.
+      if (focusState.el === this) refreshFocusVisible();
+    } else if (name === "multiple") {
+      super.setAttribute(name, value);
+      if (this.type.toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
+        noteControlChange(this);
+      }
+      refreshAllLabels();
     } else if (name === "checked") {
       super.setAttribute(name, value);
       this.checked = true;
@@ -13179,12 +13650,13 @@ export class HTMLInputElement extends HTMLElement {
     return this.checkValidity();
   }
 
-  /** Fires "change" if the value differs from the last committed value. */
+  /** Fires "change" when a user's edit changed the value; a value a script set sends none. */
   commit(): void {
-    if (this.val !== this.committed) {
-      this.committed = this.val;
-      dispatch(trusted(new Event("change", { bubbles: true })), this);
-    }
+    const edited = this.userEdited;
+    const changed = this.val !== this.committed;
+    this.committed = this.val;
+    this.userEdited = false;
+    if (edited && changed) dispatch(trusted(new Event("change", { bubbles: true })), this);
   }
 }
 
@@ -13468,13 +13940,33 @@ export class HTMLTemplateElement extends HTMLElement {
  * has no DOMException class, so the error's message carries the name, as the other DOM errors
  * here do.
  */
+/** A selector a page wrote with its right tokens left off: the selector parser a browser runs
+ *  closes the blocks and strings that ran to the end of the text, and matches with them closed. */
+function closeSelectorAtEof(text: string): string {
+  const opens: string[] = [];
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") { i++; continue; }
+    if (quote !== "") { if (ch === quote) quote = ""; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "[") opens.push("]");
+    else if (ch === "(") opens.push(")");
+    else if (ch === "]" || ch === ")") opens.pop();
+  }
+  let out = text;
+  if (quote !== "") out += quote;
+  for (let k = opens.length - 1; k >= 0; k--) out += opens[k];
+  return out;
+}
+
 function parseSelectorArg(selector: string, method: string, owner: string): Selector[] {
   const where = `Failed to execute '${method}' on '${owner}': `;
   if (selector.trim() === "") {
     throw new Error("SyntaxError: " + where + "The provided selector is empty.");
   }
   const out: Selector[] = [];
-  for (const part of splitTopLevel(selector, ",")) {
+  for (const part of splitTopLevel(closeSelectorAtEof(selector), ",")) {
     const text = part.trim();
     // One selector of the list. A :is()/:where() expands into several selectors that mean the
     // same thing together, and a selector naming nothing parses to none of them.
@@ -14684,7 +15176,9 @@ export class Selection {
   private collapsedOffset = 0;
 
   get rangeCount(): number {
-    return this.ranges.length;
+    // A caret is one collapsed range in a browser; a collapsed selection here keeps its point in
+    // collapsedPoint, and still reports the range a script can read.
+    return this.ranges.length > 0 ? this.ranges.length : (this.collapsedPoint !== null ? 1 : 0);
   }
   get isCollapsed(): boolean {
     return this.ranges.length === 0 || (this.ranges.length === 1 && this.ranges[0].collapsed);
@@ -14710,6 +15204,9 @@ export class Selection {
     return this.collapsedOffset;
   }
   getRangeAt(i: number): Range {
+    if (this.ranges.length === 0 && i === 0 && this.collapsedPoint !== null) {
+      return new Range(this.collapsedPoint, this.collapsedOffset, this.collapsedPoint, this.collapsedOffset);
+    }
     return this.ranges[i];
   }
   addRange(range: Range): void {
@@ -15026,6 +15523,13 @@ export class FontFaceSet extends EventTarget {
   }
 }
 
+/** Marks an event createEvent() made: it stays uninitialized until initEvent() sets its type and
+ *  flags, and dispatching it before then is an InvalidStateError. */
+function uninitialized(event: Event): Event {
+  event.initialized = false;
+  return event;
+}
+
 export class Document extends Node {
   get [Symbol.toStringTag](): string { return "Document"; }
   documentElement: HTMLElement = newElementFor("html", "", "", [], 0, false);
@@ -15228,6 +15732,20 @@ export class Document extends Node {
 
   /** Whether execCommand() knows a command, which for these it always does. */
   queryCommandSupported(command: string): boolean {
+    return supportsEditCommand(String(command));
+  }
+
+  /**
+   * Whether the caret or selection is in a command's state, as a toolbar asks: the bold, italic
+   * and underline tags, the two lists, and a link. False when the selection isn't in an editing
+   * host.
+   */
+  queryCommandState(command: string): boolean {
+    return queryEditCommandState(String(command));
+  }
+
+  /** Whether a command can run now; the editing commands above all can. */
+  queryCommandEnabled(command: string): boolean {
     return supportsEditCommand(String(command));
   }
 
@@ -15590,21 +16108,21 @@ export class Document extends Node {
     // The legacy interface table, and nothing else: only the names below are createable, and
     // each makes an event of the interface it names.
     const name = String(interfaceName).toLowerCase();
-    if (name === "event" || name === "events" || name === "htmlevents" || name === "svgevents") return new Event("");
-    if (name === "beforeunloadevent") return new BeforeUnloadEvent("");
-    if (name === "compositionevent") return new CompositionEvent("");
-    if (name === "customevent") return new CustomEvent("");
-    if (name === "devicemotionevent") return new DeviceMotionEvent("");
-    if (name === "deviceorientationevent") return new DeviceOrientationEvent("");
-    if (name === "dragevent") return new DragEvent("");
-    if (name === "focusevent") return new FocusEvent("");
-    if (name === "hashchangeevent") return new HashChangeEvent("");
-    if (name === "keyboardevent") return new KeyboardEvent("");
-    if (name === "messageevent") return new MessageEvent("");
-    if (name === "mouseevent" || name === "mouseevents") return new MouseEvent("");
-    if (name === "storageevent") return new StorageEvent("");
-    if (name === "textevent") return new TextEvent("");
-    if (name === "uievent" || name === "uievents") return new UIEvent("");
+    if (name === "event" || name === "events" || name === "htmlevents" || name === "svgevents") return uninitialized(new Event(""));
+    if (name === "beforeunloadevent") return uninitialized(new BeforeUnloadEvent(""));
+    if (name === "compositionevent") return uninitialized(new CompositionEvent(""));
+    if (name === "customevent") return uninitialized(new CustomEvent(""));
+    if (name === "devicemotionevent") return uninitialized(new DeviceMotionEvent(""));
+    if (name === "deviceorientationevent") return uninitialized(new DeviceOrientationEvent(""));
+    if (name === "dragevent") return uninitialized(new DragEvent(""));
+    if (name === "focusevent") return uninitialized(new FocusEvent(""));
+    if (name === "hashchangeevent") return uninitialized(new HashChangeEvent(""));
+    if (name === "keyboardevent") return uninitialized(new KeyboardEvent(""));
+    if (name === "messageevent") return uninitialized(new MessageEvent(""));
+    if (name === "mouseevent" || name === "mouseevents") return uninitialized(new MouseEvent(""));
+    if (name === "storageevent") return uninitialized(new StorageEvent(""));
+    if (name === "textevent") return uninitialized(new TextEvent(""));
+    if (name === "uievent" || name === "uievents") return uninitialized(new UIEvent(""));
     throw new Error(`NotSupportedError: Failed to execute 'createEvent' on 'Document': The provided event type ('${String(interfaceName)}') is invalid.`);
   }
 
@@ -15729,8 +16247,17 @@ function findById(el: Node, id: string): Element | null {
 }
 
 /** A node just put into the tree: parse the <style> elements it holds, or the one it feeds. */
+/** Marks the elements of a freshly inserted subtree to resolve their rules again: a document's
+ *  author rules stop at a shadow boundary, so a subtree that moves between trees changes what
+ *  applies to it. */
+function markTreeStale(node: Element): void {
+  if (node.dynamic) node.rulesStale = true;
+  for (const k of node.kids) if (k instanceof Element) markTreeStale(k);
+}
+
 function refreshAdded(node: Node): void {
   if (node.nodeType === 1) {
+    markTreeStale(node as Element);
     if (CUSTOM_DEFS > 0) {
       // A defined tag makes the node an instance of its class before its callbacks run, and the
       // elements that are in the document report themselves connected once the subtree is in.
