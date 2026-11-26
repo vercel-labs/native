@@ -414,6 +414,9 @@ function pruneRunnerCache(): void {
   const entries: { path: string; size: number; at: number }[] = [];
   let total = 0;
   for (const name of readdirSync(RUNNER_CACHE)) {
+    // A copy another run is writing is renamed into place when it is complete; pruning it
+    // mid-flight would make that run's rename fail.
+    if (name.indexOf(".tmp") >= 0) continue;
     const path = join(RUNNER_CACHE, name);
     try {
       const st = statSync(path);
@@ -425,8 +428,12 @@ function pruneRunnerCache(): void {
   const max = Math.max(256, Number(process.env.NATIVE_WPT_CACHE_MB ?? 8192)) * 1024 * 1024;
   if (total <= max) return;
   entries.sort((a, b) => a.at - b.at);
+  // A runner another run selected moments ago may still be copied: leave recent entries alone on
+  // this pass, and the next run prunes them.
+  const cutoff = Date.now() - 10 * 60 * 1000;
   for (const entry of entries) {
     if (total <= max) break;
+    if (entry.at > cutoff) continue;
     try {
       rmSync(entry.path, { force: true });
       total -= entry.size;
@@ -837,7 +844,13 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
     let cached = useCache || store ? runnerKey(gen.main, gen.files) : "";
     const copyCached = (): boolean => {
       if (cached === "" || !existsSync(cached)) return false;
-      copyFileSync(cached, exe);
+      // Another run prunes the shared cache while this one selects a hit: losing that race is a
+      // cache miss for this batch, not a failure of the run.
+      try {
+        copyFileSync(cached, exe);
+      } catch {
+        return false;
+      }
       chmodSync(exe, 0o755);
       cacheStats.hits++;
       reused = true;
