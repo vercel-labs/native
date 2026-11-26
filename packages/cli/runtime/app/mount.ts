@@ -75,6 +75,8 @@ export interface AppTables {
   /** The encoding the page's own markup declares (a meta charset), lowercased. */
   charset?: string;
   ruleClasses: string[][];
+  /** Class-prefix conditions on each rule's subject compound (".foo-*"). */
+  ruleClassPrefixes: string[][];
   ruleStates: number[];
   /** True for a rule whose declarations set a custom property (or hold a var()). */
   ruleCustoms?: boolean[];
@@ -143,6 +145,7 @@ export interface AppTables {
   chainTag: string[][];
   chainId: string[][];
   chainClasses: string[][][];
+  chainClassPrefixes: string[][][];
   chainStates: number[][];
   chainNthStart: number[][][];
   chainNthEnd: number[][][];
@@ -325,6 +328,7 @@ export function applyTables(t: AppTables): void {
   resetDisabledSheets();
   resetAppendedSubtreeCheck();
   tables.ruleClasses = t.ruleClasses;
+  tables.ruleClassPrefixes = t.ruleClassPrefixes;
   tables.ruleStates = t.ruleStates;
   tables.ruleCustoms = t.ruleCustoms === undefined ? [] : t.ruleCustoms;
   tables.ruleNthStart = t.ruleNthStart;
@@ -359,6 +363,7 @@ export function applyTables(t: AppTables): void {
   tables.chainTag = t.chainTag;
   tables.chainId = t.chainId;
   tables.chainClasses = t.chainClasses;
+  tables.chainClassPrefixes = t.chainClassPrefixes;
   tables.chainStates = t.chainStates;
   tables.chainNthStart = t.chainNthStart;
   tables.chainNthEnd = t.chainNthEnd;

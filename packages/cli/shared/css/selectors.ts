@@ -17,6 +17,7 @@ export function encodeCompound(c: Compound): string {
   if (c.id !== null) tokens.push("i" + c.id);
   if (c.root) tokens.push("r");
   for (const k of c.classes) tokens.push("c" + k);
+  for (const k of c.classPrefixes ?? []) tokens.push("p" + k);
   if (c.states !== 0) tokens.push("s" + c.states);
   if (c.nthStart.length > 0) tokens.push("a" + c.nthStart.join(","));
   if (c.nthEnd.length > 0) tokens.push("z" + c.nthEnd.join(","));
@@ -225,7 +226,7 @@ function parseAttr(text: string): string | null {
 
 /** One simple selector of a compound, already decoded. */
 interface Simple {
-  kind: "tag" | "id" | "class" | "attr" | "pseudo" | "host" | "slotted";
+  kind: "tag" | "id" | "class" | "classPrefix" | "attr" | "pseudo" | "host" | "slotted";
   name: string;
   arg: string | null;
 }
@@ -309,8 +310,17 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
       if (pseudo !== P.PE_NONE || !flush()) return null;
       const id = readIdent(text, i + 1);
       if (id === null) return null;
-      simples.push({ kind: ch === "#" ? "id" : "class", name: id[0], arg: null });
-      i = id[1];
+      // A class name followed by "*" is a class-prefix selector (".foo-*"): it names a class
+      // that starts with the name. The star has to close the name.
+      let end = id[1];
+      let isPrefix = false;
+      if (ch === "." && text[end] === "*") {
+        isPrefix = true;
+        end++;
+        if (end < text.length && /[-a-zA-Z0-9_\u0080-\uffff]/.test(text[end])) return null;
+      }
+      simples.push({ kind: isPrefix ? "classPrefix" : ch === "#" ? "id" : "class", name: id[0], arg: null });
+      i = end;
       continue;
     }
     if (ch === "[") {
@@ -590,6 +600,7 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
   };
   const langs = (a.lang ?? []).concat(b.lang ?? []);
   const notSels = (a.notSels ?? []).concat(b.notSels ?? []);
+  const prefixes = (a.classPrefixes ?? []).concat(b.classPrefixes ?? []);
   return {
     tag: a.tag !== null ? a.tag : b.tag,
     tagNs: a.tagNs !== undefined ? a.tagNs : b.tagNs,
@@ -598,6 +609,7 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
     dir: a.dir !== undefined ? a.dir : b.dir,
     scope: a.scope === true || b.scope === true ? true : undefined,
     classes: a.classes.concat(b.classes),
+    classPrefixes: prefixes.length > 0 ? prefixes : undefined,
     states: a.states | b.states,
     empty: a.empty || b.empty,
     nthStart: a.nthStart.concat(b.nthStart),
@@ -858,6 +870,10 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       spec += 10000;
     } else if (s.kind === "class") {
       c.classes.push(s.name);
+      spec += 100;
+    } else if (s.kind === "classPrefix") {
+      if (c.classPrefixes === undefined) c.classPrefixes = [];
+      c.classPrefixes.push(s.name);
       spec += 100;
     } else if (s.kind === "attr") {
       c.attrs.push(s.name);
