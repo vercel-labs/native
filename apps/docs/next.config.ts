@@ -27,6 +27,9 @@ const config: NextConfig = {
   ...(inMonorepo ? { transpilePackages: ["@vercel/geistdocs"] } : {}),
   cacheComponents: true,
   partialPrefetching: true,
+  outputFileTracingIncludes: {
+    "/[lang]/og/[...slug]": ["./app/og/*.ttf", "./app/og/labs-logo.svg"],
+  },
 
   rewrites() {
     if (!envFavicon) {
