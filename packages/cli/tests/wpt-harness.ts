@@ -43,6 +43,11 @@ test(function () {
   assert_equals(text, "don't lose aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest", "the double-quoted text keeps the name");
 }, "an apostrophe in a double-quoted string is text");
 test(function () {
+  var matched = false;
+  if (!matched) /aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest") && (matched = true);
+  assert_true(matched, "the regular expression after an if condition keeps its text");
+}, "a regular expression right after an if condition");
+test(function () {
   var pattern = /aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/;
   assert_true(pattern.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest"), "the regular expression keeps its text");
 }, "a regular expression keeps its own text");

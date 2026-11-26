@@ -599,20 +599,17 @@ function identChar(ch: string): boolean {
 const REGEX_KEYWORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete",
   "void", "do", "else", "yield", "await", "case", "throw"]);
 
-/** Whether a slash after the code copied so far begins a regular expression rather than a
- *  division: after an opening bracket, an operator, or one of the keywords above. */
-function regexAllowedAfter(out: string): boolean {
+/** The keywords whose parenthesized condition may be followed by a regular expression:
+ *  `if (x) /re/.test(y)` is valid JavaScript, and the slash after the ")" is not a division. */
+const CONDITION_KEYWORDS = new Set(["if", "while", "for", "with"]);
+
+/** The word that ends the code copied so far, for telling `if (` from a call. */
+function wordBefore(out: string): string {
   let j = out.length - 1;
   while (j >= 0 && (out[j] === " " || out[j] === "\t" || out[j] === "\n" || out[j] === "\r")) j--;
-  if (j < 0) return true;
-  const ch = out[j];
-  if (identChar(ch)) {
-    let k = j;
-    while (k >= 0 && identChar(out[k])) k--;
-    return REGEX_KEYWORDS.has(out.slice(k + 1, j + 1));
-  }
-  if (ch === ".") return false;
-  return "(,=:[!&|?{};+-*%~^<>".indexOf(ch) >= 0;
+  let k = j;
+  while (k >= 0 && identChar(out[k])) k--;
+  return out.slice(k + 1, j + 1);
 }
 
 /** The end of the regular expression that starts at `start`, or `start` when the slash is a
@@ -653,6 +650,12 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
   // inside a template's text).
   const modes: string[] = ["code"];
   const braces: number[] = [0];
+  // The parens inside code, 1 when the "(" opened an if/while/for/with condition: the ")" that
+  // closes that one may be followed by a regular expression, as `if (x) /re/.test(y)` is.
+  const parens: number[] = [];
+  // Whether a regular expression may start at the next slash: after an operator or an opening
+  // bracket, and not after a value.
+  let regexOk = true;
   let i = 0;
   while (i < text.length) {
     const mode = modes[modes.length - 1];
@@ -687,28 +690,56 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
       i = stop;
       continue;
     }
-    if (ch === "/" && regexAllowedAfter(out)) {
+    if (ch === "/" && regexOk) {
       const stop = regexEnd(text, i);
-      if (stop > i) { out += text.slice(i, stop); i = stop; continue; }
+      if (stop > i) { out += text.slice(i, stop); i = stop; regexOk = false; continue; }
     }
-    if (ch === "'" || ch === '"') { out += ch; modes.push(ch); i++; continue; }
-    if (ch === "`") { out += ch; modes.push("template"); i++; continue; }
-    if (ch === "{") { braces[braces.length - 1]++; out += ch; i++; continue; }
+    if (ch === "'" || ch === '"') { out += ch; modes.push(ch); i++; regexOk = false; continue; }
+    if (ch === "`") { out += ch; modes.push("template"); i++; regexOk = false; continue; }
+    if (ch === "{") { braces[braces.length - 1]++; out += ch; i++; regexOk = true; continue; }
     if (ch === "}") {
       if (braces[braces.length - 1] > 0) braces[braces.length - 1]--;
       else if (modes.length > 1) { modes.pop(); braces.pop(); }
       out += ch;
       i++;
+      regexOk = true;
       continue;
     }
-    if (text.startsWith(name, i) && (i === 0 || (!identChar(text[i - 1]) && text[i - 1] !== ".")) &&
-      (i + name.length >= text.length || !identChar(text[i + name.length]))) {
-      out += replacement;
-      i += name.length;
+    if (ch === "(") {
+      parens.push(CONDITION_KEYWORDS.has(wordBefore(out)) ? 1 : 0);
+      out += ch;
+      i++;
+      regexOk = true;
       continue;
     }
+    if (ch === ")") {
+      out += ch;
+      i++;
+      regexOk = parens.length > 0 && parens.pop() === 1;
+      continue;
+    }
+    if (ch === "]") { out += ch; i++; regexOk = false; continue; }
+    if (ch === "/") { out += ch; i++; regexOk = true; continue; }
+    if (identChar(ch)) {
+      if (text.startsWith(name, i) && (i === 0 || text[i - 1] !== ".") &&
+        (i + name.length >= text.length || !identChar(text[i + name.length]))) {
+        out += replacement;
+        i += name.length;
+        regexOk = false;
+        continue;
+      }
+      let j = i;
+      while (j < text.length && identChar(text[j])) j++;
+      const word = text.slice(i, j);
+      out += word;
+      i = j;
+      regexOk = REGEX_KEYWORDS.has(word);
+      continue;
+    }
+    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") { out += ch; i++; continue; }
     out += ch;
     i++;
+    regexOk = true;
   }
   return out;
 }
