@@ -1172,6 +1172,11 @@ export class DOMTokenList {
   private changed(): void {
     if (this.owner === null) invalidateStyle();
     else if (this.owner.isConnected) invalidateStyleOf(this.owner);
+    // An element created by script keeps the rules it matched when it was made. A class it gains
+    // later names rules that were never in that set, so ask the style pass to work them out again,
+    // as the id setter does for an id. A compiled element's rules already cover every class a
+    // script can add, since the build keeps them all.
+    if (this.owner !== null && this.owner.dynamic) this.owner.rulesStale = true;
     if (liveHead !== null) refreshLiveCollections();
   }
 
@@ -10567,11 +10572,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
