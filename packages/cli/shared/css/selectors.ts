@@ -227,7 +227,13 @@ interface Simple {
 /** A complex selector inside :is()/:where(): its subject compound and the ancestors above it. */
 interface Frag { subject: Scan; chain: { scan: Scan; comb: number }[] }
 
-interface ScanGroup { where: boolean; args: Frag[] }
+interface ScanGroup {
+  where: boolean;
+  args: Frag[];
+  /** The specificity the group adds, when it stands for one pseudo-class rather than its
+   *  arguments (":link" reads the markup as "a[href], area[href]" but weighs 10, not 11). */
+  spec?: number;
+}
 
 /** A compound before :is()/:where() are expanded: its simple selectors, groups and :not()s. */
 interface Scan {
@@ -429,7 +435,15 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
               // A complex argument (`:not(.a .b)`, `:not(span + span)`) is matched as a selector
               // of its own; the runtime resolves it against the element like any other.
               const list = parseSelector(a, dom);
-              if (list === null || list.length === 0) return null;
+              if (list === null) return null;
+              // An argument that names nothing (`:not(:visited div)`) asks nothing of the element,
+              // so the :not() is true; it still weighs the argument's specificity.
+              if (list.length === 0) {
+                const spec = complexSpec(a);
+                if (spec === null) return null;
+                max = Math.max(max, spec);
+                continue;
+              }
               let argSpec = 0;
               for (const sel of list) {
                 if (sel.pseudo !== P.PE_NONE) return null;
@@ -462,6 +476,15 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
           }
           groups.push({ where: name === "where", args: frags });
         }
+      } else if (name === "any-link" || name === "link") {
+        // A link is an <a> or <area> with an href; :link is that set without the visited ones,
+        // which a page can't tell apart here, so both name the same elements. The group weighs
+        // one pseudo-class, as either name does.
+        if (arg !== null) return null;
+        const a = scanFrag("a[href]");
+        const area = scanFrag("area[href]");
+        if (a === null || area === null) return null;
+        groups.push({ where: false, args: [a, area], spec: 100 });
       } else {
         simples.push({ kind: "pseudo", name, arg });
       }
@@ -635,6 +658,10 @@ function scanSpec(scan: Scan): number {
   spec += hasSpec;
   for (const g of scan.groups) {
     if (g.where) continue;
+    if (g.spec !== undefined) {
+      spec += g.spec;
+      continue;
+    }
     let max = 0;
     for (const a of g.args) {
       let s = scanSpec(a.subject);
@@ -642,6 +669,19 @@ function scanSpec(scan: Scan): number {
       max = Math.max(max, s);
     }
     spec += max;
+  }
+  return spec;
+}
+
+/** The specificity of a complex selector's text, or null when a compound of it doesn't parse. */
+function complexSpec(text: string): number | null {
+  const parts = splitComplex(text);
+  if (parts === null) return null;
+  let spec = 0;
+  for (const c of parts.compounds) {
+    const s = scanCompound(c, false);
+    if (s === null) return null;
+    spec += scanSpec(s);
   }
   return spec;
 }
@@ -808,6 +848,10 @@ export function scanNamespaces(src: string): Map<string, string> {
 /** The pseudo-classes whose names this parser knows, so a bad argument to one is an error. */
 const KNOWN_PSEUDO = /^(root|scope|empty|hover|active|focus|nth-child|nth-last-child|nth-of-type|nth-last-of-type|first-child|last-child|only-child|first-of-type|last-of-type|only-of-type)$/;
 
+/** Pseudo-classes every browser has that this build can't tell which elements match (a page's
+ *  visited links): a sheet may name them, and their rules stand and match nothing. */
+const KNOWN_NEVER_PSEUDO = /^(visited)$/;
+
 function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
   const c: Compound = { tag: null, id: null, root: false, classes: [], states: 0, nthStart: [], nthEnd: [], attrs: [], nots: [], has: [] };
   let spec = 0;
@@ -867,9 +911,14 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       if (verdict === "invalid") { parseSawInvalid = true; return null; }
       if (verdict === null) {
         // A DOM selector may use a pseudo-class this runtime doesn't implement: it is valid and
-        // matches nothing. A misspelled argument to one it does know is still an error.
+        // matches nothing. A style sheet may too when the name is one every browser has, like
+        // :visited, whose elements a page's own history decides and this build can't tell: the
+        // rule stands and matches nothing rather than taking the other selectors of its list
+        // with it. A misspelled argument to a name it does know is still an error.
         const ofArg = s.arg !== null && /\bof\b/i.test(s.arg);
-        if (!dom || (KNOWN_PSEUDO.test(s.name) && !ofArg)) return null;
+        if (dom) {
+          if (KNOWN_PSEUDO.test(s.name) && !ofArg) return null;
+        } else if (!KNOWN_NEVER_PSEUDO.test(s.name)) return null;
         never = true;
       }
       spec += 100;
