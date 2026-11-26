@@ -1,6 +1,6 @@
 // Compiled app tables, mounting them as a DOM, and the style/layout/paint frame pipeline.
 
-import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
+import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
 import { setDocumentMode } from "../quirk.ts";
 import { setPageCharset } from "../dom.ts";
 import { clearPaintDamage, layoutEpoch, stateUsage, takeStyleRoots, paintMarkTrace } from "../invalidation.ts";
@@ -805,6 +805,8 @@ export function frame(): void {
   // A layout that moves boxes moves the accessibility tree with them.
   const moves = dirty.layout || dirty.style;
   flushStyleAndLayout();
+  // A focused element that the style change hid loses the focus before anything observes it.
+  if (dropFocusIfUnrendered()) flushStyleAndLayout();
   // Sizes and positions are final for this frame, so the observers hear about them after the
   // layout pass.
   deliverResizeObservers();
