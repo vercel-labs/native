@@ -20,10 +20,15 @@ const PAGE = `<!doctype html>
 #inherit { padding: 10px; all: inherit; }
 #logical { padding-top: inherit; padding-block-start: inherit; }
 #after { color: rgb(1, 2, 3); all: initial; color: rgb(4, 5, 6); }
+/* The initial value of display is inline, for display: initial and for all: initial. */
+#disp { display: initial; }
+#disp2 { all: initial; }
+#disp3 { display: initial; }
 </style></head><body>
 <div style="color: rgb(0, 0, 255); padding: 7px">
   <div id="initial">a</div><div id="unset">b</div><div id="inherit">c</div>
   <div id="logical">d</div><div id="after">e</div>
+  <span id="disp">f</span><span id="disp2">g</span><div id="disp3">h</div>
 </div>
 <script>
 function style(id: string): CSSStyleDeclaration {
@@ -33,6 +38,7 @@ for (const id of ["initial", "unset", "inherit", "logical", "after"]) {
   console.log(id + " color=" + style(id).color);
   console.log(id + " pad=" + style(id).paddingTop);
 }
+console.log("disp value=" + style("disp").display + " " + style("disp2").display + " " + style("disp3").display);
 console.log("supports value=" + (CSS.supports("all: unset") ? "yes" : "no"));
 </script>
 </body></html>`;
@@ -67,6 +73,8 @@ const want: [string, string][] = [
   ["logical pad", "7px"],
   ["after color", "rgb(4, 5, 6)"],
   ["after pad", "0"],
+  // A div is block through the UA sheet; `display: initial` asks for the CSS initial, inline.
+  ["disp value", "inline inline inline"],
   ["supports value", "yes"],
 ];
 for (const [key, value] of want) {

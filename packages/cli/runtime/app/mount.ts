@@ -1,6 +1,6 @@
 // Compiled app tables, mounting them as a DOM, and the style/layout/paint frame pipeline.
 
-import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
+import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
 import { setDocumentMode } from "../quirk.ts";
 import { setPageCharset } from "../dom.ts";
 import { clearPaintDamage, layoutEpoch, stateUsage, takeStyleRoots, paintMarkTrace } from "../invalidation.ts";
@@ -75,6 +75,8 @@ export interface AppTables {
   /** The encoding the page's own markup declares (a meta charset), lowercased. */
   charset?: string;
   ruleClasses: string[][];
+  /** Class-prefix conditions on each rule's subject compound (".foo-*"). */
+  ruleClassPrefixes: string[][];
   ruleStates: number[];
   /** True for a rule whose declarations set a custom property (or hold a var()). */
   ruleCustoms?: boolean[];
@@ -143,6 +145,7 @@ export interface AppTables {
   chainTag: string[][];
   chainId: string[][];
   chainClasses: string[][][];
+  chainClassPrefixes: string[][][];
   chainStates: number[][];
   chainNthStart: number[][][];
   chainNthEnd: number[][][];
@@ -325,6 +328,7 @@ export function applyTables(t: AppTables): void {
   resetDisabledSheets();
   resetAppendedSubtreeCheck();
   tables.ruleClasses = t.ruleClasses;
+  tables.ruleClassPrefixes = t.ruleClassPrefixes;
   tables.ruleStates = t.ruleStates;
   tables.ruleCustoms = t.ruleCustoms === undefined ? [] : t.ruleCustoms;
   tables.ruleNthStart = t.ruleNthStart;
@@ -359,6 +363,7 @@ export function applyTables(t: AppTables): void {
   tables.chainTag = t.chainTag;
   tables.chainId = t.chainId;
   tables.chainClasses = t.chainClasses;
+  tables.chainClassPrefixes = t.chainClassPrefixes;
   tables.chainStates = t.chainStates;
   tables.chainNthStart = t.chainNthStart;
   tables.chainNthEnd = t.chainNthEnd;
@@ -805,6 +810,8 @@ export function frame(): void {
   // A layout that moves boxes moves the accessibility tree with them.
   const moves = dirty.layout || dirty.style;
   flushStyleAndLayout();
+  // A focused element that the style change hid loses the focus before anything observes it.
+  if (dropFocusIfUnrendered()) flushStyleAndLayout();
   // Sizes and positions are final for this frame, so the observers hear about them after the
   // layout pass.
   deliverResizeObservers();

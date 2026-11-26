@@ -17,6 +17,7 @@ export function encodeCompound(c: Compound): string {
   if (c.id !== null) tokens.push("i" + c.id);
   if (c.root) tokens.push("r");
   for (const k of c.classes) tokens.push("c" + k);
+  for (const k of c.classPrefixes ?? []) tokens.push("p" + k);
   if (c.states !== 0) tokens.push("s" + c.states);
   if (c.nthStart.length > 0) tokens.push("a" + c.nthStart.join(","));
   if (c.nthEnd.length > 0) tokens.push("z" + c.nthEnd.join(","));
@@ -45,12 +46,18 @@ export function compoundStates(c: Compound): number {
   return s;
 }
 
+/** The selector text of a `:has()` argument, without its combinator and subject markers. */
+function hasArgumentBody(raw: string): string {
+  const at = raw.indexOf("\u0003");
+  const body = at < 0 ? raw : raw.slice(at + 1);
+  return body.charAt(0) === "\u0005" ? body.slice(1) : body;
+}
+
 /** Every state bit the selectors of a :has() argument list mention. */
 export function hasStates(list: readonly string[]): number {
   let s = 0;
   for (const raw of list) {
-    const at = raw.indexOf("\u0003");
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    const body = hasArgumentBody(raw);
     const sels = parseSelector(body);
     if (sels === null) continue;
     for (const sel of sels) {
@@ -219,7 +226,7 @@ function parseAttr(text: string): string | null {
 
 /** One simple selector of a compound, already decoded. */
 interface Simple {
-  kind: "tag" | "id" | "class" | "attr" | "pseudo" | "host" | "slotted";
+  kind: "tag" | "id" | "class" | "classPrefix" | "attr" | "pseudo" | "host" | "slotted";
   name: string;
   arg: string | null;
 }
@@ -233,6 +240,9 @@ interface ScanGroup {
   /** The most specific item the forgiving list dropped because it can match nothing here
    *  (":visited"): it adds no alternative, but its weight still counts. */
   dropped?: number;
+  /** The specificity the group adds, when it stands for one pseudo-class rather than its
+   *  arguments (":link" reads the markup as "a[href], area[href]" but weighs 10, not 11). */
+  spec?: number;
 }
 
 /** A compound before :is()/:where() are expanded: its simple selectors, groups and :not()s. */
@@ -343,8 +353,17 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
       if (pseudo !== P.PE_NONE || !flush()) return null;
       const id = readIdent(text, i + 1);
       if (id === null) return null;
-      simples.push({ kind: ch === "#" ? "id" : "class", name: id[0], arg: null });
-      i = id[1];
+      // A class name followed by "*" is a class-prefix selector (".foo-*"): it names a class
+      // that starts with the name. The star has to close the name.
+      let end = id[1];
+      let isPrefix = false;
+      if (ch === "." && text[end] === "*") {
+        isPrefix = true;
+        end++;
+        if (end < text.length && /[-a-zA-Z0-9_\u0080-\uffff]/.test(text[end])) return null;
+      }
+      simples.push({ kind: isPrefix ? "classPrefix" : ch === "#" ? "id" : "class", name: id[0], arg: null });
+      i = end;
       continue;
     }
     if (ch === "[") {
@@ -449,8 +468,19 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
           // A relative selector starts with an optional combinator, then a complex selector.
           const lead = /^([>+~])?\s*([\s\S]*)$/.exec(a);
           const body = lead === null ? "" : lead[2].trim();
-          if (body === "" || scanFrag(body, dom, shadow) === null) return null;
-          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + body);
+          const frag = body === "" ? null : scanFrag(body, dom, shadow);
+          if (frag === null) return null;
+          // `:has(> :is(.a > .b))`: the leading combinator relates the compound's own subject to
+          // the anchor, while the :is() argument's chain sits above that subject. The marker tells
+          // the runtime matcher to test the relation on the subject rather than on the leftmost
+          // compound of the argument's chain.
+          const parts = splitComplex(body);
+          let onSubject = false;
+          if (parts !== null && parts.compounds.length === 1) {
+            const variants = expandScan(frag.subject, dom);
+            onSubject = variants !== null && variants.some((v) => v.chain.length > 0);
+          }
+          has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + (onSubject ? "\u0005" : "") + body);
         }
         i = j;
         continue;
@@ -470,7 +500,13 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
               // A complex argument (`:not(.a .b)`, `:not(span + span)`) is matched as a selector
               // of its own; the runtime resolves it against the element like any other.
               const list = parseSelector(a, dom);
-              if (list === null || list.length === 0) return null;
+              if (list === null) return null;
+              // An argument that names nothing (`:not(:visited div)`) asks nothing of the element,
+              // so the :not() is true; it still weighs the argument's specificity.
+              if (list.length === 0) {
+                max = Math.max(max, parsedSpec(a, dom));
+                continue;
+              }
               let argSpec = 0;
               for (const sel of list) {
                 if (sel.pseudo !== P.PE_NONE) return null;
@@ -513,6 +549,18 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
           }
           groups.push({ where: name === "where", args: frags, dropped });
         }
+      } else if (name === "any-link" || name === "link") {
+        // A link is an <a> or <area> with an href; :link is that set without the visited ones,
+        // which a page can't tell apart here, so both name the same elements. The group weighs
+        // one pseudo-class, as either name does.
+        if (arg !== null) return null;
+        // Any namespace: a document's default namespace belongs to the author's markup, and
+        // :link names the HTML anchors whatever it says (the parser applies it to bare type
+        // selectors, which these synthetic ones are not meant to be).
+        const a = scanFrag("*|a[href]");
+        const area = scanFrag("*|area[href]");
+        if (a === null || area === null) return null;
+        groups.push({ where: false, args: [a, area], spec: 100 });
       } else {
         simples.push({ kind: "pseudo", name, arg });
       }
@@ -617,7 +665,10 @@ function expandFrag(frag: Frag, dom: boolean = false): Variant[] | null {
 function mergeCompound(a: Compound, b: Compound): Compound | null {
   if (a.tag !== null && b.tag !== null && a.tag !== b.tag) return null;
   if (a.id !== null && b.id !== null && a.id !== b.id) return null;
-  if (a.tagNs !== undefined && b.tagNs !== undefined && a.tagNs !== b.tagNs) return null;
+  // "*" asks for any namespace, so it merges with any other: ":link" reads as "*|a[href]" and
+  // an author's "a:any-link" in a namespaced sheet still names its own namespace's anchors.
+  if (a.tagNs !== undefined && b.tagNs !== undefined && a.tagNs !== b.tagNs &&
+    a.tagNs !== "*" && b.tagNs !== "*") return null;
   /** The two compounds' "of S" filters, one entry per condition of both, in order. */
   const ofs = (which: "start" | "end"): string[] | undefined => {
     const an = which === "start" ? a.nthStart.length : a.nthEnd.length;
@@ -632,14 +683,16 @@ function mergeCompound(a: Compound, b: Compound): Compound | null {
   };
   const langs = (a.lang ?? []).concat(b.lang ?? []);
   const notSels = (a.notSels ?? []).concat(b.notSels ?? []);
+  const prefixes = (a.classPrefixes ?? []).concat(b.classPrefixes ?? []);
   return {
     tag: a.tag !== null ? a.tag : b.tag,
-    tagNs: a.tagNs !== undefined ? a.tagNs : b.tagNs,
+    tagNs: a.tagNs === "*" ? b.tagNs : a.tagNs !== undefined ? a.tagNs : b.tagNs,
     id: a.id !== null ? a.id : b.id,
     root: a.root || b.root,
     dir: a.dir !== undefined ? a.dir : b.dir,
     scope: a.scope === true || b.scope === true ? true : undefined,
     classes: a.classes.concat(b.classes),
+    classPrefixes: prefixes.length > 0 ? prefixes : undefined,
     states: a.states | b.states,
     empty: a.empty || b.empty,
     nthStart: a.nthStart.concat(b.nthStart),
@@ -690,15 +743,22 @@ function scanSpec(scan: Scan): number {
       if (ofAt !== null) {
         let max = 0;
         for (const part of splitTopLevel(s.arg.slice(ofAt.index + ofAt[0].length).trim(), ",")) {
-          const list = parseSelector(part.trim());
-          if (list !== null) for (const sel of list) max = Math.max(max, sel.specificity);
+          const text = part.trim();
+          const list = parseSelector(text);
+          if (list !== null && list.length > 0) {
+            for (const sel of list) max = Math.max(max, sel.specificity);
+            continue;
+          }
+          // A selector that can match nothing here (:visited) still weighs what it says. The
+          // weight comes from the parse done here, never a second pass over the text.
+          max = Math.max(max, parsedSpec(text, false));
         }
         spec += max;
       }
     } else spec += 100;
   }
   for (const a of scan.has) {
-    const body = a.slice(a.indexOf("\u0003") + 1);
+    const body = hasArgumentBody(a);
     const frag = scanFrag(body);
     if (frag === null) continue;
     let argSpec = 0;
@@ -708,6 +768,10 @@ function scanSpec(scan: Scan): number {
   spec += hasSpec;
   for (const g of scan.groups) {
     if (g.where) continue;
+    if (g.spec !== undefined) {
+      spec += g.spec;
+      continue;
+    }
     let max = g.dropped ?? 0;
     for (const a of g.args) {
       let s = scanSpec(a.subject);
@@ -718,6 +782,7 @@ function scanSpec(scan: Scan): number {
   }
   return spec;
 }
+
 
 interface Built { compound: Compound; specificity: number; never: boolean; chain: BuiltLink[] }
 
@@ -885,6 +950,10 @@ export function scanNamespaces(src: string): Map<string, string> {
 /** The pseudo-classes whose names this parser knows, so a bad argument to one is an error. */
 const KNOWN_PSEUDO = /^(root|scope|empty|hover|active|focus|nth-child|nth-last-child|nth-of-type|nth-last-of-type|first-child|last-child|only-child|first-of-type|last-of-type|only-of-type)$/;
 
+/** Pseudo-classes every browser has that this build can't tell which elements match (a page's
+ *  visited links): a sheet may name them, and their rules stand and match nothing. */
+const KNOWN_NEVER_PSEUDO = /^(visited)$/;
+
 function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
   const c: Compound = { tag: null, id: null, root: false, classes: [], states: 0, nthStart: [], nthEnd: [], attrs: [], nots: [], has: [] };
   let spec = 0;
@@ -908,8 +977,10 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       }
       if (name !== "*") c.tag = name;
       if (ns !== undefined) {
-        if (c.tagNs !== undefined && c.tagNs !== ns) never = true;
-        c.tagNs = ns;
+        // "*" asks for any namespace, so it fits whatever the compound already names; two
+        // different namespaces can't both hold.
+        if (c.tagNs !== undefined && c.tagNs !== ns && c.tagNs !== "*" && ns !== "*") never = true;
+        else if (c.tagNs === undefined || c.tagNs === "*") c.tagNs = ns;
       }
       spec += 1;
     } else if (s.kind === "id") {
@@ -918,6 +989,10 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       spec += 10000;
     } else if (s.kind === "class") {
       c.classes.push(s.name);
+      spec += 100;
+    } else if (s.kind === "classPrefix") {
+      if (c.classPrefixes === undefined) c.classPrefixes = [];
+      c.classPrefixes.push(s.name);
       spec += 100;
     } else if (s.kind === "attr") {
       c.attrs.push(s.name);
@@ -944,9 +1019,14 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
       if (verdict === "invalid") { parseSawInvalid = true; return null; }
       if (verdict === null) {
         // A DOM selector may use a pseudo-class this runtime doesn't implement: it is valid and
-        // matches nothing. A misspelled argument to one it does know is still an error.
+        // matches nothing. A style sheet may too when the name is one every browser has, like
+        // :visited, whose elements a page's own history decides and this build can't tell: the
+        // rule stands and matches nothing rather than taking the other selectors of its list
+        // with it. A misspelled argument to a name it does know is still an error.
         const ofArg = s.arg !== null && /\bof\b/i.test(s.arg);
-        if (!dom || (KNOWN_PSEUDO.test(s.name) && !ofArg)) return null;
+        if (dom) {
+          if (KNOWN_PSEUDO.test(s.name) && !ofArg) return null;
+        } else if (!KNOWN_NEVER_PSEUDO.test(s.name)) return null;
         never = true;
       }
       spec += 100;
@@ -956,7 +1036,7 @@ function buildCompound(simples: Simple[], dom: boolean = false): Built | null {
 }
 
 /** A compound expanded over its :is()/:where() arguments; [] means it can never match. */
-function parseCompoundVariants(text: string, dom: boolean, shadow: boolean = false): { variants: Built[]; pseudo: number; pseudoName: string } | null {
+function parseCompoundVariants(text: string, dom: boolean, shadow: boolean = false): { variants: Built[]; pseudo: number; pseudoName: string; spec: number } | null {
   const scan = scanCompound(text, false, true, dom, shadow);
   if (scan === null) return null;
   // ::slotted(...) makes its argument the subject: the rule styles the nodes the sheet's tree
@@ -985,7 +1065,7 @@ function parseCompoundVariants(text: string, dom: boolean, shadow: boolean = fal
       out.push({ compound: b.compound, specificity: spec, never: false, chain: [] });
     }
     if (out.length === 0) return null;
-    return { variants: out, pseudo: P.PE_NONE, pseudoName: "" };
+    return { variants: out, pseudo: P.PE_NONE, pseudoName: "", spec };
   }
   const variants = expandScan(scan, dom);
   if (variants === null) return null;
@@ -1000,7 +1080,7 @@ function parseCompoundVariants(text: string, dom: boolean, shadow: boolean = fal
     b.compound.has = v.has;
     out.push({ compound: b.compound, specificity: spec, never: false, chain: v.chain });
   }
-  return { variants: out, pseudo: scan.pseudo, pseudoName: scan.pseudoName };
+  return { variants: out, pseudo: scan.pseudo, pseudoName: scan.pseudoName, spec };
 }
 
 /** Splits a complex selector into its compounds and the combinators between them. */
@@ -1085,25 +1165,65 @@ export function selectorWasInvalid(): boolean {
   return parseSawInvalid;
 }
 
-export function parseSelector(text: string, dom: boolean = false, shadow: boolean = false): Selector[] | null {
+/**
+ * Selector texts parsed during the outer call, so an argument a nested :is()/:not() asks about
+ * more than once is parsed once: a deeply nested argument is otherwise re-parsed at every level
+ * (and by the specificity pass on top of that).
+ */
+const parseMemo = new Map<string, { list: Selector[] | null; invalid: boolean; spec: number }>();
+
+export function parseSelector(text: string, dom: boolean = false, shadow: boolean = false,
+  specOut?: { spec: number }): Selector[] | null {
   const outer = parseDepth === 0;
-  if (outer) parseSawInvalid = false;
+  if (outer) {
+    parseSawInvalid = false;
+    parseMemo.clear();
+  } else {
+    const hit = parseMemo.get((shadow ? "s" : "") + (dom ? "d" : "") + text);
+    if (hit !== undefined) {
+      if (hit.invalid) parseSawInvalid = true;
+      if (specOut !== undefined) specOut.spec = hit.spec;
+      return hit.list;
+    }
+  }
+  // A cap on the nesting: past it the selector is unreadable to a browser as well, and no page
+  // gets to make the parser walk a wall of nested arguments.
+  if (parseDepth > 64) return null;
   parseDepth++;
-  const out = parseSelectorInner(text, dom, shadow);
+  // Every parse records the text's weight, whether or not this call asked for it: a later call
+  // that does (a specificity pass) reads it from the memo.
+  const spec = specOut !== undefined ? specOut : { spec: 0 };
+  const out = parseSelectorInner(text, dom, shadow, spec);
   parseDepth--;
+  if (!outer) {
+    parseMemo.set((shadow ? "s" : "") + (dom ? "d" : "") + text,
+      { list: out, invalid: parseSawInvalid, spec: spec.spec });
+  }
   return out;
 }
 
-function parseSelectorInner(text: string, dom: boolean = false, shadow: boolean = false): Selector[] | null {
+/** A selector text's specificity, taken from the parse that reads it; text that names nothing
+ *  here still weighs what it says (":not(:visited div)" counts the pseudo-class). */
+function parsedSpec(text: string, dom: boolean): number {
+  const out = { spec: 0 };
+  parseSelector(text, dom, false, out);
+  return out.spec;
+}
+
+function parseSelectorInner(text: string, dom: boolean = false, shadow: boolean = false,
+  specOut?: { spec: number }): Selector[] | null {
   if (text.trim() === "") return null;
   const parts = splitComplex(text);
   if (parts === null) return null;
   const sets: Built[][] = [];
   const pseudos: number[] = [];
   const pseudoNames: string[] = [];
+  // The text's own weight, compound by compound: a compound that names nothing still counts.
+  let specSum = 0;
   for (const c of parts.compounds) {
     const v = parseCompoundVariants(c, dom, shadow);
     if (v === null) return null;
+    specSum += v.spec;
     sets.push(v.variants);
     pseudos.push(v.pseudo);
     pseudoNames.push(v.pseudoName);
@@ -1245,6 +1365,7 @@ function parseSelectorInner(text: string, dom: boolean = false, shadow: boolean 
     combos = next;
     if (combos.length > 64) return null;
   }
+  if (specOut !== undefined) specOut.spec = specSum;
   const out: Selector[] = [];
   for (const combo of combos) {
     if (combo.subject === null) continue;
