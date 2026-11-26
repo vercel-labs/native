@@ -160,6 +160,9 @@ export function rowLength(el: Node, v: number, u: number): number {
 }
 
 export function display(el: Node): number {
+  // A ::backdrop is painted by the top layer in the box its own style gives it, not laid out
+  // with its element: it never takes part in the flow, as in a browser.
+  if (el.pseudoKind === P.PE_BACKDROP) return P.D_NONE;
   // A box's used display is read many times by one paint or layout pass; answer once per
   // version of the box's own style, which a pass or an attribute write moves.
   if (el.dispGen === el.styleGen) return el.dispVal;

@@ -410,6 +410,8 @@ incremental.on = incremental.verify || !envOff("NATIVE_INCREMENTAL_LAYOUT");
 const SIGN_FULL = 0;
 const SIGN_NONE = 1;
 const SIGN_SET = 2;
+/** The properties a transform is painted by: the overflow pass reads their values. */
+const transformSigProps = [P.P_TRANSFORM, P.P_TRANSLATE, P.P_ROTATE, P.P_SCALE, P.P_TRANSFORM_ORIGIN];
 const signKind: number[] = [];
 for (let p = 0; p < P.PROP_COUNT; p++) signKind.push(SIGN_FULL);
 signKind[P.P_OPACITY] = SIGN_NONE;
@@ -540,6 +542,15 @@ export function noteLayoutInputs(el: Node): void {
     // Only the out-of-flow pass reads an inset's value: it places the box again.
     el.lInsets = ins;
     notePlacementChanged(el);
+  }
+  // A transform lays nothing out, but the reach a box paints at grows its ancestors' scroll
+  // extents: a changed transform (or origin) has to measure them again, so it asks for a pass.
+  let t = 0x510e527f | 0;
+  for (const p of transformSigProps) t = Math.imul(t ^ (sv[p] + 1) ^ (su[p] << 16), 0x01000193);
+  if (t !== el.lTransformSig) {
+    const known = el.lTransformSig !== -1;
+    el.lTransformSig = t;
+    if (known) dirty.layout = true;
   }
   const kids = el.kids;
   let c = Math.imul(0x3c6ef372 ^ kids.length, 0x01000193);

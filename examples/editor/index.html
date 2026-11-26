@@ -1,0 +1,76 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=1080, height=820">
+    <title>Draft</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <header class="bar">
+      <span class="mark">D</span>
+      <input id="title" class="title" value="Workshop notes" spellcheck="false">
+      <span id="saved" class="saved">Saved</span>
+    </header>
+
+    <div class="toolbar">
+      <button id="undo" class="tool" type="button" title="Undo">↶</button>
+      <button id="redo" class="tool" type="button" title="Redo">↷</button>
+      <span class="gap"></span>
+      <select id="block" class="block" title="Paragraph style">
+        <option value="p">Paragraph</option>
+        <option value="h1">Heading 1</option>
+        <option value="h2">Heading 2</option>
+        <option value="blockquote">Quote</option>
+        <option value="pre">Code</option>
+      </select>
+      <span class="gap"></span>
+      <button id="bold" class="tool" type="button" title="Bold">B</button>
+      <button id="italic" class="tool" type="button" title="Italic">I</button>
+      <button id="underline" class="tool" type="button" title="Underline">U</button>
+      <button id="ul" class="tool" type="button" title="Bulleted list">•</button>
+      <button id="ol" class="tool" type="button" title="Numbered list">1.</button>
+      <button id="clear" class="tool" type="button" title="Clear formatting">⌫</button>
+      <span class="gap"></span>
+      <button id="link-open" class="tool wide" type="button">Link</button>
+      <span class="grow"></span>
+      <span id="selection-info" class="status">caret</span>
+      <span id="format-state" class="status mono">plain</span>
+    </div>
+
+    <main class="page">
+      <article id="doc" class="doc" contenteditable="true" spellcheck="false">
+        <h1>Workshop notes</h1>
+        <p>Everything here stays on this machine. Select a sentence and try the <strong>B</strong>, <em>I</em> and list buttons, or paste a link over a selection.</p>
+        <h2>Today</h2>
+        <ul>
+          <li>Measure the drawer again</li>
+          <li>Cut the back panel</li>
+          <li>Sand the edges</li>
+        </ul>
+        <blockquote>Measure twice, cut once, then measure once more.</blockquote>
+        <p>End with a short note in the margin.</p>
+      </article>
+    </main>
+
+    <footer class="foot">
+      <span id="word-count">0 words</span>
+      <span id="char-count">0 characters</span>
+      <span class="hint">Cmd+B / I / U · Cmd+S saves · Esc closes the link dialog</span>
+    </footer>
+
+    <dialog id="link-dialog" class="dialog">
+      <h2>Add a link</h2>
+      <label class="field">
+        <span>Address</span>
+        <input id="link-url" type="text" placeholder="https://example.com">
+      </label>
+      <div class="actions">
+        <button id="link-cancel" class="ghost" type="button">Cancel</button>
+        <button id="link-apply" class="primary" type="button">Add link</button>
+      </div>
+    </dialog>
+
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>

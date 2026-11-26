@@ -3,7 +3,7 @@
 import * as P from "../shared/props.ts";
 import { firstLetterLength } from "../shared/css/first-letter.ts";
 import { autoInsetPx } from "../shared/css/anim.ts";
-import { Element, HTMLElement, HTMLCanvasElement, HTMLDialogElement, HTMLVideoElement, HTMLInputElement, HTMLOptionElement, HTMLSelectElement, HTMLTextAreaElement, EMPTY_LINE, DOMRect, document, focusState, controlKind, CONTROL_NONE, buttonInputType, isInTopLayer, topLayerElements, rangeStreamSpan, langOf, boxKids, dateKind, dateFieldView, editingHostFor } from "./dom.ts";
+import { Element, HTMLElement, HTMLCanvasElement, HTMLDialogElement, HTMLVideoElement, HTMLInputElement, HTMLMeterElement, HTMLOptionElement, HTMLProgressElement, HTMLSelectElement, HTMLTextAreaElement, EMPTY_LINE, DOMRect, document, focusState, controlKind, CONTROL_NONE, buttonInputType, isInTopLayer, topLayerElements, rangeStreamSpan, langOf, boxKids, dateKind, dateFieldView, editingHostFor } from "./dom.ts";
 import type { Node, Text, ValueRangeGeometry } from "./dom.ts";
 import { lineHeightPx, fontKey, isFlexContainer, isGridContainer, lastLineAlign, lineAlign, isRtl, isLanesContainer, usedWritingMode } from "./style.ts";
 import { hostBegin, hostCompositorOn, hostDamageBegin, hostDamageCanMerge, hostPresentDamage, hostVerifyDamage, hostClipPushShape, hostFillRect, hostVideoDraw, hostFillLine, hostFillRing, hostFillPoly, hostClipPushPoly, hostFillRoundRect, hostFillRoundRing, hostText, hostTextShadow, hostPresent, hostClipPush, hostClipPushRound, hostClipPop, hostCanvasDraw, hostShadowOuter, hostShadowInset, hostTransformPush, hostTransformPushIndexed, hostStatePop, hostEffectPush, hostEffectPushIndexed, hostEffectPop, hostMaskPop, hostPerspectivePush, hostPerspectivePop, hostLayerPush, hostLayerPop } from "./host.ts";
@@ -11,7 +11,7 @@ import { drawImagePath, orientedImage } from "./images.ts";
 import { viewport, measure, isOutOfFlow, baselineOffset, fontMetrics, textWidth, letterSpacingPx, wordSpacingPx, FRAG_TEXT, absolutePosition, containingBlock } from "./layout.ts";
 import { itemTextSpacing, trailingSeparators } from "./layout/inline.ts";
 import { layoutPasses } from "./layout/box.ts";
-import { paintControl } from "./controls.ts";
+import { paintControl, paintMeter, paintProgress } from "./controls.ts";
 import { paintDatePicker } from "./date-picker.ts";
 import { borderBottom, borderLeft, borderPx, borderRight, borderTop, clipMargin, display, clipsX, clipsY, flattenContents, isBfcRoot, isFloat, isReplaced, isSvgElement, len, objectSize, propagatesBodyOverflow, viewportOverflowX, viewportOverflowY, viewportScrollsX, viewportScrollsY } from "./layout/box-model.ts";
 import { paintSvg } from "./svg.ts";
@@ -409,6 +409,31 @@ export function dateIconContains(el: HTMLInputElement, px: number, py: number): 
   const box = dateIconBox(el, p[0], p[1]);
   const size = box[2];
   return px >= box[0] && px <= box[0] + size && py >= box[1] && py <= box[1] + size;
+}
+
+/**
+ * Wraps placeholder text into the field's content width at its words, as a line box would. A
+ * textarea's placeholder is drawn with white-space: pre-wrap, so a line break in it starts a new
+ * line instead of joining the words around it.
+ */
+function wrapPlaceholder(style: Node, text: string, width: number): string[] {
+  const lines: string[] = [];
+  const paragraphs = text.replace(/\r\n?/g, "\n").split("\n");
+  for (const paragraph of paragraphs) {
+    const words = paragraph.split(/[ \t\f]+/).filter((word) => word !== "");
+    let line = "";
+    for (const word of words) {
+      const next = line === "" ? word : line + " " + word;
+      if (line !== "" && textWidth(style, next) > width) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = next;
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
 }
 
 function paintInput(el: HTMLInputElement, x: number, y: number, opacity: number): void {
@@ -2448,6 +2473,26 @@ function paintInlineContent(el: Node, x: number, y: number, opacity: number, scr
     hostTransformPush(el.serial, P.PK_TRANSFORM, 0, 1, -1, 0, vlr ? cx : cx + el.contentW, cy);
   }
 
+  // A textarea draws its placeholder while it holds no text, wrapped into the content width and
+  // in the font ::placeholder gives it, as a browser does; a text input draws its own above. An
+  // empty textarea may have no laid-out lines, so this runs before that block.
+  if (!vturn && el.sv[P.P_FONT_SIZE] > 0 && el instanceof HTMLTextAreaElement && el.value === "" && el.placeholder !== "") {
+    const ph = el.placeholderPseudo;
+    const styled = ph !== null && ph.declaredProps !== null && ph.declaredProps[P.P_COLOR] !== 0;
+    const phStyle: Node = styled ? ph! : el;
+    const phColor = styled
+      ? withOpacity(ph!.sv[P.P_COLOR], opacity * ph!.sv[P.P_OPACITY])
+      : withOpacity(el.sv[P.P_COLOR], opacity * 0.5);
+    const phSize = styled ? ph!.sv[P.P_FONT_SIZE] : el.sv[P.P_FONT_SIZE];
+    const phWeight = styled ? fontKey(ph!) : fontKey(el);
+    const phLines = wrapPlaceholder(phStyle, el.placeholder, el.contentW);
+    const phLh = lineHeightPx(el);
+    const phLeft = x - scrollX + el.contentX;
+    const phTop = y - scrollY + el.contentY;
+    for (let i = 0; i < phLines.length; i++) {
+      hostText(phLines[i], phLeft, phTop + i * phLh, phLh, phSize, phWeight, phColor, letterSpacingPx(el), wordSpacingPx(el), 0, 0);
+    }
+  }
   // A zero font size draws no glyph; see the fragment loop above for why.
   if (el.lines.length > 0 && el.sv[P.P_FONT_SIZE] > 0) {
     const lh = lineHeightPx(el);
@@ -2965,6 +3010,8 @@ function paintBox(el: Node, x: number, y: number, parentOpacity: number, skipBg:
     else paintControl(el, x, y, opacity);
   }
   if (draw && el instanceof HTMLSelectElement) paintSelectLabel(el, x, y, opacity);
+  if (draw && el instanceof HTMLMeterElement) paintMeter(el, x, y, opacity);
+  else if (draw && el instanceof HTMLProgressElement) paintProgress(el, x, y, opacity);
 
   // Inline content is what Appendix E puts after the floats: held back for them when nothing
   // here clips it, painted where it stands otherwise.
@@ -3595,7 +3642,9 @@ function paintTopLayer(): void {
   if (layer.length === 0) return;
   paintingTopLayer = true;
   for (const el of layer) {
-    if (el instanceof Element) paintBackdrop(el);
+    // Only a modal dialog draws a ::backdrop: a popover on the top layer has none, and a dialog
+    // the page doesn't render draws neither itself nor its backdrop.
+    if (el instanceof HTMLDialogElement && el.isModal && display(el) !== P.D_NONE) paintBackdrop(el);
     paintContext(el, el.x, el.y, 1, false);
   }
   paintingTopLayer = false;
@@ -3613,14 +3662,65 @@ function paintBackdrop(el: Element): void {
     for (const kid of boxKids(el)) if (kid.pseudoKind === P.PE_BACKDROP) backdrop = kid;
     if (backdrop === null) return;
   }
+  // A backdrop the author hides is not drawn; one positioned and sized by its own style is
+  // drawn in that box, which is the whole viewport for the sheet's fixed inset:0.
+  if (backdrop.sv[P.P_DISPLAY] === P.D_NONE) return;
+  let bx = 0;
+  let by = 0;
+  let bw = viewport.w;
+  let bh = viewport.h;
+  // A backdrop is always a positioned box, whatever position its style says (static and relative
+  // compute to absolute in the top layer), so its insets and size decide the box: an inset of
+  // auto is resolved against the opposite one, as CSS Position resolves any out-of-flow box.
+  {
+    const leftAuto = backdrop.su[P.P_LEFT] === P.U_AUTO;
+    const topAuto = backdrop.su[P.P_TOP] === P.U_AUTO;
+    const rightAuto = backdrop.su[P.P_RIGHT] === P.U_AUTO;
+    const bottomAuto = backdrop.su[P.P_BOTTOM] === P.U_AUTO;
+    const wAuto = backdrop.su[P.P_WIDTH] === P.U_AUTO;
+    const hAuto = backdrop.su[P.P_HEIGHT] === P.U_AUTO;
+    const left = leftAuto ? 0 : len(backdrop, P.P_LEFT, viewport.w);
+    const right = rightAuto ? 0 : len(backdrop, P.P_RIGHT, viewport.w);
+    const top = topAuto ? 0 : len(backdrop, P.P_TOP, viewport.h);
+    const bottom = bottomAuto ? 0 : len(backdrop, P.P_BOTTOM, viewport.h);
+    const w = wAuto ? 0 : len(backdrop, P.P_WIDTH, viewport.w);
+    const h = hAuto ? 0 : len(backdrop, P.P_HEIGHT, viewport.h);
+    if (!leftAuto && !rightAuto) {
+      bx = left;
+      bw = wAuto ? viewport.w - left - right : w;
+    } else if (!leftAuto) {
+      bx = left;
+      bw = wAuto ? viewport.w - left : w;
+    } else if (!rightAuto) {
+      bw = wAuto ? viewport.w - right : w;
+      bx = viewport.w - right - bw;
+    } else {
+      // Both sides are auto: the box keeps its static position at the viewport's corner.
+      bw = wAuto ? viewport.w : w;
+    }
+    if (!topAuto && !bottomAuto) {
+      by = top;
+      bh = hAuto ? viewport.h - top - bottom : h;
+    } else if (!topAuto) {
+      by = top;
+      bh = hAuto ? viewport.h - top : h;
+    } else if (!bottomAuto) {
+      bh = hAuto ? viewport.h - bottom : h;
+      by = viewport.h - bottom - bh;
+    } else {
+      bh = hAuto ? viewport.h : h;
+    }
+    if (bw < 0) bw = 0;
+    if (bh < 0) bh = 0;
+  }
   const color = backdrop.sv[P.P_BACKGROUND_COLOR];
   const opacity = backdrop.sv[P.P_OPACITY];
   const filters = elementFilter(backdrop);
   const behind = elementBackdropFilter(backdrop);
   const layered = filters.length > 0 || behind.length > 0;
-  if (layered) hostEffectPush(backdrop.serial, P.PK_EFFECT, 0, 0, viewport.w, viewport.h, filterSpec(backdrop, filters, behind));
+  if (layered) hostEffectPush(backdrop.serial, P.PK_EFFECT, bx, by, bw, bh, filterSpec(backdrop, filters, behind));
   if ((color & 255) * opacity >= 1) {
-    hostFillRect(0, 0, viewport.w, viewport.h, 0, withOpacity(color, opacity));
+    hostFillRect(bx, by, bw, bh, 0, withOpacity(color, opacity));
   }
   if (layered) hostEffectPop();
 }
