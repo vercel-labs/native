@@ -22,7 +22,7 @@ import { evalExpr, exprHasCq, exprHasPercent } from "../shared/css/length-exprs.
 import { longhandIds } from "../shared/css/shorthands.ts";
 import { hasVar, substituteVars, wideKeyword } from "../shared/css/vars.ts";
 import { fitsSyntax } from "../shared/css/syntax.ts";
-import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
+import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, isInTopLayer, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
 import { textRunDependence } from "./text-runs.ts";
 import { animatedFontSize, elementMoves, noteComputed } from "./animation.ts";
 import { rootFontSize } from "./root-size.ts";
@@ -2681,6 +2681,12 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     if (el.pseudoKind === P.PE_NONE) syncScrollMarkers(el);
   }
   el.wasInline = false;
+  // CSS Position 4: an element in the top layer is positioned there whatever its style says, so
+  // a static or relative position computes to absolute.
+  if (!el.isTextNode && el.pseudoKind === P.PE_NONE && isInTopLayer(el) &&
+    (sv[P.P_POSITION] === P.POS_STATIC || sv[P.P_POSITION] === P.POS_RELATIVE)) {
+    sv[P.P_POSITION] = P.POS_ABSOLUTE;
+  }
   // An absolutely positioned box is blockified (except for a flex container, which stays flex).
   if (!el.isTextNode && (sv[P.P_POSITION] === P.POS_ABSOLUTE || sv[P.P_POSITION] === P.POS_FIXED)) {
     if (isInlineLevelDisplay(sv[P.P_DISPLAY])) {

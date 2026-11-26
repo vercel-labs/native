@@ -12360,6 +12360,8 @@ export function addToTopLayer(el: Element): void {
   const at = topLayer.indexOf(el);
   if (at >= 0) topLayer.splice(at, 1);
   topLayer.push(el);
+  // The top layer positions the element itself, so its computed style changes with the move.
+  invalidateStyleOf(el);
   invalidatePaint();
 }
 
@@ -12368,6 +12370,7 @@ export function removeFromTopLayer(el: Element): void {
   const at = topLayer.indexOf(el);
   if (at >= 0) {
     topLayer.splice(at, 1);
+    invalidateStyleOf(el);
     invalidatePaint();
   }
 }
