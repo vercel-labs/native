@@ -110,6 +110,14 @@ export type { Animation } from "./animation.ts";
 /** The event a listener is running for, as the legacy `window.event` reports it. */
 export let currentEvent: Event | null = null;
 
+/** Makes `event` the one a listener is running for; answers the event that was current before,
+ *  so the caller can put it back when its dispatch ends. */
+export function setCurrentEvent(event: Event | null): Event | null {
+  const prev = currentEvent;
+  currentEvent = event;
+  return prev;
+}
+
 export interface UIEventInit extends EventInit {
   detail?: number;
 }
@@ -925,11 +933,28 @@ export class ListenerEntry {
   }
 }
 
+/**
+ * HTML's default passive value: a touch or wheel listener registered without an explicit
+ * `passive` on the window, the document, the root element or the body starts out passive, so a
+ * page can't block scrolling on the main thread that way. Windows use the same rule through
+ * Window.addEventListener.
+ */
+export function passiveByDefault(type: string, target: any): boolean {
+  if (type !== "touchstart" && type !== "touchmove" && type !== "wheel" && type !== "mousewheel") return false;
+  if (target instanceof Document) return true;
+  if (target instanceof Element) {
+    const doc = target.ownerDocument;
+    return doc !== null && (target === doc.documentElement || target === doc.body);
+  }
+  return false;
+}
+
 function listenerEntry(listener: EventListenerOrEventListenerObject,
-  options?: ListenerOptions | boolean): ListenerEntry {
+  options?: ListenerOptions | boolean, passiveDefault: boolean = false): ListenerEntry {
   const capture = typeof options === "boolean" ? options : options !== undefined && options.capture === true;
   const once = typeof options === "boolean" || options === undefined ? false : options.once === true;
-  const passive = typeof options === "boolean" || options === undefined ? false : options.passive === true;
+  const passive = typeof options === "boolean" || options === undefined || options.passive === undefined
+    ? passiveDefault : options.passive === true;
   if (typeof listener === "function") return new ListenerEntry(listener, null, capture, once, passive);
   return new ListenerEntry(null, listener, capture, once, passive);
 }
@@ -1102,7 +1127,7 @@ export class EventTarget {
       if (entry.capture === capture &&
         ((entry.fn !== null && entry.fn === listener) || (entry.object !== null && entry.object === listener))) return;
     }
-    list.push(listenerEntry(listener, options));
+    list.push(listenerEntry(listener, options, passiveByDefault(type, this)));
   }
   removeEventListener<K extends keyof GlobalEventHandlersEventMap>(type: K,
     listener: (event: GlobalEventHandlersEventMap[K]) => void, options?: ListenerOptions | boolean): void;
@@ -1124,6 +1149,8 @@ export class EventTarget {
   }
   dispatchEvent(event: Event): boolean {
     if (!(event instanceof Event)) throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
+    if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+    if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
     event.dispatchFlag = true;
     event.propagationStopped = false;
     event.immediateStopped = false;
@@ -3492,7 +3519,7 @@ export class Node extends EventTarget {
       if (entry.capture === capture &&
         ((entry.fn !== null && entry.fn === listener) || (entry.object !== null && entry.object === listener))) return;
     }
-    list.push(listenerEntry(listener, options));
+    list.push(listenerEntry(listener, options, passiveByDefault(type, this)));
   }
   removeEventListener<K extends keyof GlobalEventHandlersEventMap>(type: K,
     listener: (event: GlobalEventHandlersEventMap[K]) => void, options?: ListenerOptions | boolean): void;
@@ -12029,6 +12056,8 @@ export function hasTransientActivation(): boolean {
 }
 
 export function dispatch(event: Event, target: Node): boolean {
+  if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+  if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
   event.dispatchFlag = true;
   event.windowCaptureRan = false;
   event.windowBubbleRan = false;
@@ -15348,6 +15377,13 @@ export class FontFaceSet extends EventTarget {
   }
 }
 
+/** Marks an event createEvent() made: it stays uninitialized until initEvent() sets its type and
+ *  flags, and dispatching it before then is an InvalidStateError. */
+function uninitialized(event: Event): Event {
+  event.initialized = false;
+  return event;
+}
+
 export class Document extends Node {
   get [Symbol.toStringTag](): string { return "Document"; }
   documentElement: HTMLElement = newElementFor("html", "", "", [], 0, false);
@@ -15928,21 +15964,21 @@ export class Document extends Node {
     // The legacy interface table, and nothing else: only the names below are createable, and
     // each makes an event of the interface it names.
     const name = String(interfaceName).toLowerCase();
-    if (name === "event" || name === "events" || name === "htmlevents" || name === "svgevents") return new Event("");
-    if (name === "beforeunloadevent") return new BeforeUnloadEvent("");
-    if (name === "compositionevent") return new CompositionEvent("");
-    if (name === "customevent") return new CustomEvent("");
-    if (name === "devicemotionevent") return new DeviceMotionEvent("");
-    if (name === "deviceorientationevent") return new DeviceOrientationEvent("");
-    if (name === "dragevent") return new DragEvent("");
-    if (name === "focusevent") return new FocusEvent("");
-    if (name === "hashchangeevent") return new HashChangeEvent("");
-    if (name === "keyboardevent") return new KeyboardEvent("");
-    if (name === "messageevent") return new MessageEvent("");
-    if (name === "mouseevent" || name === "mouseevents") return new MouseEvent("");
-    if (name === "storageevent") return new StorageEvent("");
-    if (name === "textevent") return new TextEvent("");
-    if (name === "uievent" || name === "uievents") return new UIEvent("");
+    if (name === "event" || name === "events" || name === "htmlevents" || name === "svgevents") return uninitialized(new Event(""));
+    if (name === "beforeunloadevent") return uninitialized(new BeforeUnloadEvent(""));
+    if (name === "compositionevent") return uninitialized(new CompositionEvent(""));
+    if (name === "customevent") return uninitialized(new CustomEvent(""));
+    if (name === "devicemotionevent") return uninitialized(new DeviceMotionEvent(""));
+    if (name === "deviceorientationevent") return uninitialized(new DeviceOrientationEvent(""));
+    if (name === "dragevent") return uninitialized(new DragEvent(""));
+    if (name === "focusevent") return uninitialized(new FocusEvent(""));
+    if (name === "hashchangeevent") return uninitialized(new HashChangeEvent(""));
+    if (name === "keyboardevent") return uninitialized(new KeyboardEvent(""));
+    if (name === "messageevent") return uninitialized(new MessageEvent(""));
+    if (name === "mouseevent" || name === "mouseevents") return uninitialized(new MouseEvent(""));
+    if (name === "storageevent") return uninitialized(new StorageEvent(""));
+    if (name === "textevent") return uninitialized(new TextEvent(""));
+    if (name === "uievent" || name === "uievents") return uninitialized(new UIEvent(""));
     throw new Error(`NotSupportedError: Failed to execute 'createEvent' on 'Document': The provided event type ('${String(interfaceName)}') is invalid.`);
   }
 
