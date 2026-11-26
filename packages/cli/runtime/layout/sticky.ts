@@ -31,6 +31,18 @@ function scrollerOf(el: Node): [Node | null, boolean] {
  */
 function containingBox(el: Node): Node | null {
   if (isTableInternal(display(el))) {
+    // A cell is kept in its row: when the row, or a group above it, sticks, the row carries the
+    // cell with it (its sticky shift is added to every descendant), and the cell itself must not
+    // shift again — bounding it by the row does that, where bounding it by a multi-row group
+    // added the group's offset a second time.
+    const row = display(el) === P.D_TABLE_CELL ? el.parentElement : null;
+    if (row !== null) {
+      for (let a: Node | null = row; a !== null; a = a.parentElement) {
+        const d = display(a);
+        if (d === P.D_TABLE || d === P.D_INLINE_TABLE) break;
+        if (a.sv[P.P_POSITION] === P.POS_STICKY) return row;
+      }
+    }
     for (let a = el.parentElement; a !== null; a = a.parentElement) {
       const d = display(a);
       // A sticky ancestor already carries this part with it (a row that sticks takes its cells
