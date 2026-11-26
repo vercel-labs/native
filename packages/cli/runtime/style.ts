@@ -42,6 +42,10 @@ import { frameTimes } from "./frame-times.ts";
 
 export class StyleTables {
   ruleClasses: string[][] = [];
+  /** Class-prefix conditions on each rule's subject compound (".foo-*"). */
+  ruleClassPrefixes: string[][] = [];
+  /** The same condition on the ancestor compounds of each rule's chain. */
+  chainClassPrefixes: string[][][] = [];
   ruleStates: number[] = [];
   /** True for a rule whose declarations set a custom property (or hold a var()). */
   ruleCustoms: boolean[] = [];
@@ -394,6 +398,17 @@ function attrMatches(el: Element, enc: string): boolean {
   return false;
 }
 
+/** Whether a class token matches a class-prefix selector: it starts with the prefix, something
+ *  follows it, and what follows is not another "-" (the separator ends the prefix). */
+export function classPrefixFits(el: Element, prefix: string): boolean {
+  const names = el.classList.tokens();
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i];
+    if (n.length > prefix.length && n.startsWith(prefix) && n.charAt(prefix.length) !== "-") return true;
+  }
+  return false;
+}
+
 /** Does the element match one compound encoded for a :not() condition? */
 function encodedMatches(el: Element, enc: string): boolean {
   if (enc === "") return true; // :not(*) matches every element
@@ -417,6 +432,8 @@ function encodedMatches(el: Element, enc: string): boolean {
       if (el.id !== v) return false;
     } else if (kind === "c") {
       if (!el.classList.contains(v)) return false;
+    } else if (kind === "p") {
+      if (!classPrefixFits(el, v)) return false;
     } else if (kind === "s") {
       const s = Number(v);
       if ((s & P.S_FORM_STATES) !== 0) refreshFormState(el, s);
@@ -474,17 +491,57 @@ function hasApplies(el: Element, list: readonly string[]): boolean {
   for (const raw of list) {
     const at = raw.indexOf("\u0003");
     const lead = at < 0 ? "" : raw.slice(0, at);
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    let body = at < 0 ? raw : raw.slice(at + 1);
+    // A leading \u0005 marks an argument whose leading combinator relates the :is() compound's
+    // own subject to the anchor (`:has(> :is(.a > .b))`).
+    const onSubject = body.charAt(0) === "\u0005";
+    if (onSubject) body = body.slice(1);
     const comb = lead === ">" ? COMB_CHILD : lead === "+" ? COMB_ADJACENT
       : lead === "~" ? COMB_GENERAL : COMB_DESCENDANT;
-    if (hasOne(el, comb, body)) return true;
+    if (hasOne(el, comb, body, onSubject)) return true;
   }
   return list.length === 0;
 }
 
-function hasOne(anchor: Element, comb: number, body: string): boolean {
+function hasOne(anchor: Element, comb: number, body: string, onSubject: boolean = false): boolean {
   const sels = parsedHas(body);
   if (sels === null) return false;
+  if (onSubject) {
+    // The related element is the argument's subject: `:has(> :is(.a > .b))` wants a child that
+    // matches `.b`, with `.a` above it. Its chain is a constraint on ancestors, not the anchor
+    // relation.
+    const at = (c: Element): boolean => {
+      for (const sel of sels) {
+        if (!compoundFits(c, sel)) continue;
+        if (!relatedTo(c, anchor, comb)) continue;
+        if (chainMatchesPlain(sel.chain, 0, c)) return true;
+      }
+      return false;
+    };
+    if (comb === COMB_ADJACENT) {
+      const s = anchor.nextElementSibling;
+      return s !== null && at(s);
+    }
+    if (comb === COMB_GENERAL) {
+      for (let s = anchor.nextElementSibling; s !== null; s = s.nextElementSibling) if (at(s)) return true;
+      return false;
+    }
+    if (comb === COMB_CHILD) {
+      for (const k of anchor.kids) if (k instanceof Element && at(k)) return true;
+      return false;
+    }
+    let found = false;
+    const walk = (n: Node): void => {
+      if (found) return;
+      for (const k of n.kids) {
+        if (!(k instanceof Element)) continue;
+        if (at(k)) { found = true; return; }
+        walk(k);
+      }
+    };
+    walk(anchor);
+    return found;
+  }
   const tryAt = (c: Element): boolean => {
     for (const sel of sels) {
       if (!compoundFits(c, sel)) continue;
@@ -523,6 +580,29 @@ function hasOne(anchor: Element, comb: number, body: string): boolean {
 function subtreeMatches(el: Element, f: (c: Element) => boolean): boolean {
   if (f(el)) return true;
   for (const kid of el.kids) if (kid instanceof Element && subtreeMatches(kid, f)) return true;
+  return false;
+}
+
+/** Does the element's ancestor/sibling chain match, with no relation to an anchor at its end? */
+function chainMatchesPlain(chain: ChainLink[], k: number, el: Element): boolean {
+  if (k === chain.length) return true;
+  const c = chain[k].comb;
+  if (c === COMB_ADJACENT) {
+    const s = el.previousElementSibling;
+    return s !== null && compoundFits(s, chain[k]) && chainMatchesPlain(chain, k + 1, s);
+  }
+  if (c === COMB_GENERAL) {
+    for (let s = el.previousElementSibling; s !== null; s = s.previousElementSibling) {
+      if (compoundFits(s, chain[k]) && chainMatchesPlain(chain, k + 1, s)) return true;
+    }
+    return false;
+  }
+  let a = el.parentElement;
+  while (a !== null) {
+    if (compoundFits(a, chain[k]) && chainMatchesPlain(chain, k + 1, a)) return true;
+    if (c === COMB_CHILD) return false;
+    a = a.parentElement;
+  }
   return false;
 }
 
@@ -576,6 +656,9 @@ function linkMatches(rule: number, k: number, el: Element): boolean {
     ? tables.chainNthEndOf[rule][k] : NO_OF;
   if (!nthApplies(el, tables.chainNthStart[rule][k], tables.chainNthEnd[rule][k], chainStartOf, chainEndOf)) return false;
   for (const c of tables.chainClasses[rule][k]) if (!el.classList.contains(c)) return false;
+  const chainPrefixes = rule < tables.chainClassPrefixes.length && k < tables.chainClassPrefixes[rule].length
+    ? tables.chainClassPrefixes[rule][k] : undefined;
+  if (chainPrefixes !== undefined) for (const p of chainPrefixes) if (!classPrefixFits(el, p)) return false;
   for (const a of tables.chainAttrs[rule][k]) if (!attrMatches(el, a)) return false;
   if (!langApplies(el, rule < tables.chainLang.length && k < tables.chainLang[rule].length
     ? tables.chainLang[rule][k] : NO_LANG)) return false;
@@ -682,6 +765,9 @@ function resolveDynamicRules(el: Element): void {
   const placeholder: number[] = [];
   const carriers = new Map<number, number[]>();
   let states = 0;
+  // A document's author rules style the document's own elements, not a shadow tree's: the rules
+  // that tree's sheets carry are matched when the sheet is read (see selectorFitsSheet).
+  const inShadow = shadowRootOf(el) !== null;
   for (let c = 0; c < candidates.length; c++) {
     const i = candidates[c];
     const tag = tables.dynTags[i];
@@ -689,6 +775,7 @@ function resolveDynamicRules(el: Element): void {
     if (tag !== "" && tag !== el.localName) continue;
     if (id !== "" && id !== el.id) continue;
     const r = tables.dynRules[i];
+    if (inShadow && !tables.ruleUa[r]) continue;
     const pseudo = tables.dynPseudo[i];
     if (pseudo === P.PE_NONE) rules.push(r);
     else if (pseudo === P.PE_BEFORE) before.push(r);
@@ -1689,6 +1776,8 @@ function ruleApplies(el: Element, rule: number): boolean {
   // The subject's own tests come first: a rule that names a class this element doesn't have — the
   // common case — costs one lookup rather than the media, container and scope lookups below.
   for (const c of tables.ruleClasses[rule]) if (!test.classList.contains(c)) return false;
+  const prefixes = rule < tables.ruleClassPrefixes.length ? tables.ruleClassPrefixes[rule] : undefined;
+  if (prefixes !== undefined) for (const p of prefixes) if (!classPrefixFits(test, p)) return false;
   if (!ruleMediaHolds(rule)) return false;
   // A rule inside @container applies while a matching ancestor container's size says so. The
   // generated box of a pseudo-element asks about the containers around the element that makes it.
@@ -2572,7 +2661,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     applyCounters(el);
   }
   // Generated content: the pseudo-element's text comes from `content`, and one whose content
-  // is none isn't generated at all, so it gets no box. A marker draws the list marker instead.
+  // is none isn't generated at all, so it gets no box. A marker draws the list marker instead,
+  // and a ::backdrop is no generated content either: the top layer paints its box.
   if (el instanceof Element) {
     if (!runningPrepass) {
       if (el.pseudoKind === P.PE_MARKER) applyMarker(el);
@@ -2580,7 +2670,7 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
         el.pseudoKind !== P.PE_FIRST_LINE && el.pseudoKind !== P.PE_FIRST_LETTER &&
         el.pseudoKind !== P.PE_SELECTION && el.pseudoKind !== P.PE_HIGHLIGHT &&
         el.pseudoKind !== P.PE_TARGET_TEXT && el.pseudoKind !== P.PE_SCROLL_MARKER &&
-        el.pseudoKind !== P.PE_SCROLL_MARKER_GROUP) applyContent(el);
+        el.pseudoKind !== P.PE_SCROLL_MARKER_GROUP && el.pseudoKind !== P.PE_BACKDROP) applyContent(el);
     }
     // Every list item has a marker box, including one that only became a list item at runtime.
     if (sv[P.P_DISPLAY] === P.D_LIST_ITEM && el.markerPseudo === null) el.ensureMarker();
@@ -2599,8 +2689,15 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
       sv[P.P_DISPLAY] = blockified(sv[P.P_DISPLAY]);
     }
   }
+  // The formatting context a box takes part in comes from the nearest ancestor that generates a
+  // box: a `display: contents` wrapper generates none, so its children are the outer container's
+  // own items and floats.
+  let boxParent: Node | null = parent;
+  while (boxParent !== null && !boxParent.isTextNode && boxParent.sv[P.P_DISPLAY] === P.D_CONTENTS) {
+    boxParent = boxParent.parentElement;
+  }
   // A float is block-level, whatever its display was. It has no effect on a flex item.
-  if (!el.isTextNode && sv[P.P_FLOAT] !== P.FL_NONE && (parent === null || !isFlexContainer(parent))) {
+  if (!el.isTextNode && sv[P.P_FLOAT] !== P.FL_NONE && (boxParent === null || !isFlexContainer(boxParent))) {
     const d = sv[P.P_DISPLAY];
     // One that was inline-level belongs to the inline content it sits in, not to the block flow
     // around it (CSS 2.1 9.5).
@@ -2618,15 +2715,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     // in an anonymous table (CSS 2.1 9.7, 17.2.1).
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
-  // A text node is no box of its own: inheriting `display: contents` from the box it sits in
-  // would leave it with nothing to lay out or paint it, so its text is inline there.
-  if (el.isTextNode && sv[P.P_DISPLAY] === P.D_CONTENTS) sv[P.P_DISPLAY] = P.D_INLINE;
-  // Flex and grid items are blockified; whitespace-only text in one isn't rendered. A display:
-  // contents box generates no box, so what it holds are items of the container the contents boxes
-  // are flattened into — the item parent is the nearest ancestor that generates a box.
-  let itemParent = parent;
-  while (itemParent !== null && itemParent.sv[P.P_DISPLAY] === P.D_CONTENTS) itemParent = itemParent.parentElement;
-  if (itemParent !== null && (isFlexContainer(itemParent) || isGridContainer(itemParent) || isLanesContainer(itemParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
+  if (boxParent !== null && (isFlexContainer(boxParent) || isGridContainer(boxParent) || isLanesContainer(boxParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
@@ -2836,6 +2926,11 @@ function ensureChainIndex(): void {
     if (r < tables.chainId.length) {
       for (const id of tables.chainId[r]) if (id !== "") { ancestorChainsTestMore = true; break; }
     }
+    if (r < tables.chainClassPrefixes.length) {
+      // A class prefix on an ancestor names no class to index, so any class change has to be
+      // checked against it.
+      for (const link of tables.chainClassPrefixes[r]) if (link.length > 0) { ancestorChainsTestMore = true; break; }
+    }
     if (r < tables.chainAttrs.length) {
       for (const attrs of tables.chainAttrs[r]) if (attrs.length > 0) { ancestorChainsTestMore = true; break; }
     }
@@ -2859,6 +2954,23 @@ function ensureChainIndex(): void {
   }
 }
 
+/** True when a generated box of `el` has a rule that tests the identity `el` just changed: the
+ *  subject of a pseudo-element rule is the element that generates the box (see ruleApplies), so
+ *  a class or attribute write there can start or stop matching one of its rules. */
+function pseudoRulesTestIdentity(el: Element, ident: IdentityChange): boolean {
+  const classes = ident.classes;
+  for (const c of el.kids) {
+    if (!(c instanceof Element) || c.pseudoKind === P.PE_NONE) continue;
+    for (const r of c.rules) {
+      if (classes !== null && classes.length > 0) {
+        for (const k of tables.ruleClasses[r]) if (classes.indexOf(k) >= 0) return true;
+      }
+      if (ident.other && r < tables.ruleAttrs.length && tables.ruleAttrs[r].length > 0) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * True when the change to `el` can alter what a rule matches in its descendants: a class the page
  * names on an ancestor, an id or attribute test, a moved state a `:nth-*` or state rule below it
@@ -2873,6 +2985,9 @@ function descendantsCanSeeChange(el: Element, ident: IdentityChange, stateDelta:
   if (identityMoved && runtimeRulesExist()) return true;
   // A filter or a complex :not() argument can look at the element from a descendant's rule too.
   if (identityMoved && sideLookingRulesExist()) return true;
+  // A generated box is styled by the element that makes it, so a write here can move a rule its
+  // ::before, ::after or ::backdrop tests this element's classes or attributes in.
+  if (identityMoved && pseudoRulesTestIdentity(el, ident)) return true;
   // A filtered ancestor compound matches through its descendants' positions, so a restyled root
   // can change what a rule below it matches even when the root's own style did not move.
   if (chainNthOfRulesExist()) return true;
@@ -3439,7 +3554,9 @@ function autoDirection(el: Element): number {
  */
 function applyDirHint(el: Element): void {
   let dir = el.getAttribute("dir");
-  if (dir === null && el.localName === "bdi") dir = "auto";
+  // A <bdi> is auto unless its dir names a direction: an invalid value is ignored, so the
+  // element keeps the auto default rather than inheriting.
+  if (el.localName === "bdi" && (dir === null || !/^(ltr|rtl|auto)$/i.test(dir.trim()))) dir = "auto";
   if (dir === null) return;
   const v = dir.trim().toLowerCase();
   let rtl: boolean;
@@ -3804,6 +3921,8 @@ function selectorFitsSheet(el: Element, sel: Selector, root: any): boolean {
     return slot !== null && shadowRootOf(slot) === root && compoundFits(el, sel);
   }
   if (root !== null && !insideShadowTree(el, root)) return false;
+  // A document's sheet styles the document's own elements, not the trees its elements host.
+  if (root === null && shadowRootOf(el) !== null) return false;
   return selectorFits(el, sel);
 }
 
@@ -3861,7 +3980,10 @@ function runtimeMatches(test: Element, pseudo: number): RuntimeMatch[] {
  */
 function elementDirection(el: Element): number {
   const dir = el.getAttribute("dir");
-  const value = dir !== null ? dir.trim().toLowerCase() : (el.localName === "bdi" ? "auto" : "");
+  let value = dir !== null ? dir.trim().toLowerCase() : "";
+  // A <bdi> is auto unless its dir names a direction: an invalid value is ignored, as browsers
+  // ignore it, so the element takes its direction from its contents.
+  if (el.localName === "bdi" && value !== "rtl" && value !== "ltr" && value !== "auto") value = "auto";
   if (value === "rtl") return P.DIR_RTL;
   if (value === "ltr") return P.DIR_LTR;
   if (value === "auto") {
@@ -3902,6 +4024,7 @@ function compoundFits(el: Element, c: Compound, scope: Element | null = null): b
   // parseSelector has already turned :scope into :root.
   if (c.scope === true && el !== (scope === null ? document.documentElement : scope)) return false;
   for (const k of c.classes) if (!el.classList.contains(k)) return false;
+  if (c.classPrefixes !== undefined) for (const p of c.classPrefixes) if (!classPrefixFits(el, p)) return false;
   if ((c.states & P.S_FORM_STATES) !== 0) refreshFormState(el, c.states);
   if ((c.states & el.state) !== c.states) return false;
   if (!nthApplies(el, c.nthStart, c.nthEnd, c.nthStartOf ?? NO_OF, c.nthEndOf ?? NO_OF)) return false;

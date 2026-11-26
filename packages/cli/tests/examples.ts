@@ -254,6 +254,27 @@ const EXAMPLES: { [name: string]: Example } = {
     steps: "frame 0 | wait 200 | print #count | click #add | type A small site | click #field-url | type https://example.com | click #save | wait 200 | print #count",
     want: ["8 places", "9 places"],
   },
+  pulse: {
+    open: "frame 0 | frame 16",
+    // The metrics tick on a timer; `wait` lets the timer and the state update land.
+    steps: "frame 0 | frame 16 | print #tick | wait 2200 | print #tick | click #pause | frame 16 | print #live-state | wait 1500 | print #tick",
+    want: ["tick 0", "tick 2", "Paused", "tick 2"],
+  },
+  quarry: {
+    open: "frame 0 | frame 16",
+    // A save with valid defaults, the appearance tab's range at its default size, then the reset
+    // dialog.
+    steps: "frame 0 | frame 16 | click #save | frame 16 | print #saved | click #tab-appearance | frame 16 | print #text-size | click #tab-advanced | frame 16 | click #reset-open | frame 100 | print #reset-dialog | click #reset-confirm | frame 100 | print #saved",
+    want: ["Saved just now", "16", "Restore every default?This puts the profile, appearance, notifications and privacy settings back to their defaults. Forwarding addresses are cleared too.CancelRestore defaults", "Defaults restored"],
+  },
+  editor: {
+    open: "frame 0 | frame 16",
+    // The sample draft's counts, then the link dialog: a URL with nothing selected says what it
+    // needs. (A selection's toolbar state depends on the selectionchange change that lands in
+    // another branch.)
+    steps: "frame 0 | frame 16 | print #word-count | click #link-open | frame 16 | click #link-url | type https://example.com | click #link-apply | frame 16 | print #saved",
+    want: ["54 words", "Select a word first"],
+  },
 };
 
 const APP = "../../examples";
