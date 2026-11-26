@@ -5751,7 +5751,7 @@ export class Element extends Node {
   ensurePseudoBox(kind: number): Element | null {
     if (kind === P.PE_MARKER) return this.ensureMarker();
     if (kind === P.PE_PLACEHOLDER) {
-      if (this.placeholderPseudo === null && this.localName === "input") this.addPseudoChild(kind, []);
+      if (this.placeholderPseudo === null && (this.localName === "input" || this.localName === "textarea")) this.addPseudoChild(kind, []);
       return this.placeholderPseudo;
     }
     const existing = kind === P.PE_BEFORE ? this.beforePseudo : kind === P.PE_AFTER ? this.afterPseudo : null;
@@ -10567,11 +10567,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {

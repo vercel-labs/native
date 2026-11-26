@@ -411,6 +411,24 @@ export function dateIconContains(el: HTMLInputElement, px: number, py: number): 
   return px >= box[0] && px <= box[0] + size && py >= box[1] && py <= box[1] + size;
 }
 
+/** Wraps placeholder text into the field's content width at its words, as a line box would. */
+function wrapPlaceholder(style: Node, text: string, width: number): string[] {
+  const lines: string[] = [];
+  const words = text.split(/\s+/).filter((word) => word !== "");
+  let line = "";
+  for (const word of words) {
+    const next = line === "" ? word : line + " " + word;
+    if (line !== "" && textWidth(style, next) > width) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line !== "") lines.push(line);
+  return lines.length === 0 ? [""] : lines;
+}
+
 function paintInput(el: HTMLInputElement, x: number, y: number, opacity: number): void {
   // A button input shows a label, not text to edit: it never scrolls and has no caret.
   if (buttonInputType(el.type)) {
@@ -2448,6 +2466,26 @@ function paintInlineContent(el: Node, x: number, y: number, opacity: number, scr
     hostTransformPush(el.serial, P.PK_TRANSFORM, 0, 1, -1, 0, vlr ? cx : cx + el.contentW, cy);
   }
 
+  // A textarea draws its placeholder while it holds no text, wrapped into the content width and
+  // in the font ::placeholder gives it, as a browser does; a text input draws its own above. An
+  // empty textarea may have no laid-out lines, so this runs before that block.
+  if (!vturn && el.sv[P.P_FONT_SIZE] > 0 && el instanceof HTMLTextAreaElement && el.value === "" && el.placeholder !== "") {
+    const ph = el.placeholderPseudo;
+    const styled = ph !== null && ph.declaredProps !== null && ph.declaredProps[P.P_COLOR] !== 0;
+    const phStyle: Node = styled ? ph! : el;
+    const phColor = styled
+      ? withOpacity(ph!.sv[P.P_COLOR], opacity * ph!.sv[P.P_OPACITY])
+      : withOpacity(el.sv[P.P_COLOR], opacity * 0.5);
+    const phSize = styled ? ph!.sv[P.P_FONT_SIZE] : el.sv[P.P_FONT_SIZE];
+    const phWeight = styled ? fontKey(ph!) : fontKey(el);
+    const phLines = wrapPlaceholder(phStyle, el.placeholder, el.contentW);
+    const phLh = lineHeightPx(el);
+    const phLeft = x - scrollX + el.contentX;
+    const phTop = y - scrollY + el.contentY;
+    for (let i = 0; i < phLines.length; i++) {
+      hostText(phLines[i], phLeft, phTop + i * phLh, phLh, phSize, phWeight, phColor, letterSpacingPx(el), wordSpacingPx(el), 0, 0);
+    }
+  }
   // A zero font size draws no glyph; see the fragment loop above for why.
   if (el.lines.length > 0 && el.sv[P.P_FONT_SIZE] > 0) {
     const lh = lineHeightPx(el);
