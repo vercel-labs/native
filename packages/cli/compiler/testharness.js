@@ -181,7 +181,10 @@ function __hRunAction(a) {
     var q = __hActionPoint(a);
     __hPointerX = q.x;
     __hPointerY = q.y;
-    wheel(__hPointerX, __hPointerY, a.deltaY === undefined ? 0 : a.deltaY, a.deltaX === undefined ? 0 : a.deltaX);
+    // WebDriver's deltas are the DOM's: a positive deltaY scrolls down, a positive deltaX right.
+    // The runtime's wheel takes the host's sign, where a positive delta moves the content back, so
+    // the two are negated on the way in, as the headless `wheel` step does.
+    wheel(__hPointerX, __hPointerY, a.deltaY === undefined ? 0 : -a.deltaY, a.deltaX === undefined ? 0 : -a.deltaX);
     return;
   }
 }
@@ -216,6 +219,9 @@ function __hRunActions(actions) {
         }
         t++;
         if (t < ticks) setTimeout(step, wait > 0 ? wait : 16);
+        // The last tick's pause holds the sequence too: WebDriver's perform waits for it, so
+        // send() settles once the requested delay has gone by.
+        else if (wait > 0) setTimeout(resolve, wait);
         else resolve();
       }
       step();
