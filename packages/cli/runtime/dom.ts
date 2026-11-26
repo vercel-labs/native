@@ -15654,8 +15654,17 @@ function findById(el: Node, id: string): Element | null {
 }
 
 /** A node just put into the tree: parse the <style> elements it holds, or the one it feeds. */
+/** Marks the elements of a freshly inserted subtree to resolve their rules again: a document's
+ *  author rules stop at a shadow boundary, so a subtree that moves between trees changes what
+ *  applies to it. */
+function markTreeStale(node: Element): void {
+  if (node.dynamic) node.rulesStale = true;
+  for (const k of node.kids) if (k instanceof Element) markTreeStale(k);
+}
+
 function refreshAdded(node: Node): void {
   if (node.nodeType === 1) {
+    markTreeStale(node as Element);
     if (CUSTOM_DEFS > 0) {
       // A defined tag makes the node an instance of its class before its callbacks run, and the
       // elements that are in the document report themselves connected once the subtree is in.
