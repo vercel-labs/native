@@ -3,6 +3,7 @@
 // (shared/css/), so a script-set declaration and a style attribute compile alike.
 
 import { document, Element, Node, ShadowRoot } from "./dom.ts";
+import { parseSelector, splitTopLevel } from "../shared/css/selectors.ts";
 import { highlights } from "./highlights.ts";
 import * as P from "../shared/props.ts";
 import { WC_LIST_AUTO, WC_LIST_CONTENTS, WC_LIST_SCROLL_POSITION, willChangeRows } from "../shared/css/willchange.ts";
@@ -3064,18 +3065,23 @@ function supportsCondition(text: string): boolean {
     for (const p of all) if (!supportsCondition(p)) return false;
     return true;
   }
-  if (t.startsWith("(") && t.endsWith(")")) {
-    const inner = t.slice(1, t.length - 1).trim();
-    const colon = inner.indexOf(":");
-    if (colon < 0) return supportsCondition(inner);
-    return supportsDeclaration(inner.slice(0, colon), inner.slice(colon + 1));
+  if (t.startsWith("(") && t.endsWith(")")) return supportsCondition(t.slice(1, t.length - 1).trim());
+  // `selector(<list>)` asks whether every selector in the list parses here: a page detects
+  // :focus-visible and friends with it. Its argument holds colons of its own, so this comes
+  // before the lone-declaration case below reads one as a property/value split.
+  const selFn = /^selector\s*\(/i.exec(t);
+  if (selFn !== null && t.endsWith(")")) {
+    const inner = t.slice(selFn[0].length, -1).trim();
+    if (inner === "") return false;
+    for (const part of splitTopLevel(inner, ",")) {
+      if (part.trim() === "" || parseSelector(part.trim()) === null) return false;
+    }
+    return true;
   }
   // A lone declaration needs no parentheses: CSS.supports("display: flex") asks the same
   // question as the two-argument form, as browsers answer it.
   const colon = t.indexOf(":");
   if (colon >= 0) return supportsDeclaration(t.slice(0, colon), t.slice(colon + 1));
-  // selector() asks whether a selector parses; the build-time parser isn't here, and no
-  // supported condition needs it.
   return false;
 }
 

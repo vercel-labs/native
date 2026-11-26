@@ -644,7 +644,8 @@ export class CSSMediaRule {
     if (at < 0 || at > this.cssRules.length) {
       throw new Error("IndexSizeError: rule index " + at + " is out of range");
     }
-    const parsed = parseRulesText(String(rule), this.media.mediaText);
+    // A rule inserted with an empty block is still a rule: its selector has to be readable back.
+    const parsed = parseRulesText(String(rule), this.media.mediaText, true);
     if (parsed.rules.length !== 1) throw new Error("SyntaxError: insertRule() takes exactly one rule");
     const rule0 = parsed.rules[0];
     this.rules.splice(at, 0, rule0);
@@ -795,7 +796,7 @@ export class CSSStyleSheet {
       this.rebuildRules();
       return at;
     }
-    const parsed = parseRulesText(text, this.media.mediaText);
+    const parsed = parseRulesText(text, this.media.mediaText, true);
     if (parsed.rules.length + parsed.counters.length !== 1) {
       throw new Error("SyntaxError: insertRule() takes exactly one rule");
     }
@@ -1066,14 +1067,14 @@ function queryText(query: string): string {
 }
 
 /** Parses a sheet, or the text insertRule() was given, into rules. */
-export function parseRulesText(src: string, media: string): { rules: SheetRule[]; counters: CounterRule[] } {
+export function parseRulesText(src: string, media: string, keepEmpty: boolean = false): { rules: SheetRule[]; counters: CounterRule[] } {
   // Comments are blanked out, keeping offsets and newlines, as the compiler does.
   src = src.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "));
   // XHTML viewers wrap sheets in CDATA sections, which the XML parser removes before CSS sees it.
   src = src.replace(/<!\[CDATA\[/g, (m) => " ".repeat(m.length)).replace(/\]\]>/g, (m) => " ".repeat(m.length));
   const rules: SheetRule[] = [];
   const counters: CounterRule[] = [];
-  parseBlock(src, media, "", rules, counters);
+  parseBlock(src, media, "", rules, counters, keepEmpty);
   return { rules, counters };
 }
 
@@ -1129,7 +1130,7 @@ function registerKeyframes(name: string, body: string): void {
 }
 
 function parseBlock(src: string, media: string, container: string, out: SheetRule[],
-  counters: CounterRule[]): void {
+  counters: CounterRule[], keepEmpty: boolean = false): void {
   let i = 0;
   while (i < src.length) {
     while (i < src.length && /\s/.test(src[i])) i++;
@@ -1218,7 +1219,7 @@ function parseBlock(src: string, media: string, container: string, out: SheetRul
     for (const d of parseDeclarationBlock(body, fonts, undefined, content)) {
       for (const x of d.decls) decls.push(x);
     }
-    if (decls.length === 0) continue;
+    if (decls.length === 0 && !keepEmpty) continue;
     out.push({ selectors, decls, media, container, selectorText, cssText: selectorText + " { " + body.trim() + " }", pos: i });
   }
 }
