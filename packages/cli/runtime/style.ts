@@ -22,7 +22,7 @@ import { evalExpr, exprHasCq, exprHasPercent } from "../shared/css/length-exprs.
 import { longhandIds } from "../shared/css/shorthands.ts";
 import { hasVar, substituteVars, wideKeyword } from "../shared/css/vars.ts";
 import { fitsSyntax } from "../shared/css/syntax.ts";
-import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
+import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, isInTopLayer, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
 import { textRunDependence } from "./text-runs.ts";
 import { animatedFontSize, elementMoves, noteComputed } from "./animation.ts";
 import { rootFontSize } from "./root-size.ts";
@@ -2591,6 +2591,12 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     if (el.pseudoKind === P.PE_NONE) syncScrollMarkers(el);
   }
   el.wasInline = false;
+  // CSS Position 4: an element in the top layer is positioned there whatever its style says, so
+  // a static or relative position computes to absolute.
+  if (!el.isTextNode && el.pseudoKind === P.PE_NONE && isInTopLayer(el) &&
+    (sv[P.P_POSITION] === P.POS_STATIC || sv[P.P_POSITION] === P.POS_RELATIVE)) {
+    sv[P.P_POSITION] = P.POS_ABSOLUTE;
+  }
   // An absolutely positioned box is blockified (except for a flex container, which stays flex).
   if (!el.isTextNode && (sv[P.P_POSITION] === P.POS_ABSOLUTE || sv[P.P_POSITION] === P.POS_FIXED)) {
     if (isInlineLevelDisplay(sv[P.P_DISPLAY])) {
@@ -2618,15 +2624,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     // in an anonymous table (CSS 2.1 9.7, 17.2.1).
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
-  // A text node is no box of its own: inheriting `display: contents` from the box it sits in
-  // would leave it with nothing to lay out or paint it, so its text is inline there.
-  if (el.isTextNode && sv[P.P_DISPLAY] === P.D_CONTENTS) sv[P.P_DISPLAY] = P.D_INLINE;
-  // Flex and grid items are blockified; whitespace-only text in one isn't rendered. A display:
-  // contents box generates no box, so what it holds are items of the container the contents boxes
-  // are flattened into — the item parent is the nearest ancestor that generates a box.
-  let itemParent = parent;
-  while (itemParent !== null && itemParent.sv[P.P_DISPLAY] === P.D_CONTENTS) itemParent = itemParent.parentElement;
-  if (itemParent !== null && (isFlexContainer(itemParent) || isGridContainer(itemParent) || isLanesContainer(itemParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
+  if (parent !== null && (isFlexContainer(parent) || isGridContainer(parent) || isLanesContainer(parent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
