@@ -268,12 +268,15 @@ const PE_OTHER = -1;
  * Parses one :is()/:where() argument, which may be a complex selector: `.a > .b` there means the
  * element matches `.b` and its parent matches `.a`, so the argument carries a chain of its own.
  */
-function scanFrag(text: string): Frag | null {
+function scanFrag(text: string, dom: boolean = false, shadow: boolean = false): Frag | null {
   const parts = splitComplex(text);
   if (parts === null) return null;
   const scans: Scan[] = [];
   for (const c of parts.compounds) {
-    const s = scanCompound(c, false);
+    // An argument is read the same way the selector around it is: a DOM selector keeps the
+    // pseudo-classes a sheet can't match (:visited), so an item that names nothing here stays
+    // valid instead of turning the argument into a parse failure.
+    const s = scanCompound(c, false, false, dom, shadow);
     if (s === null) return null;
     scans.push(s);
   }
@@ -299,7 +302,9 @@ const scanMemo = new Map<string, Scan | null>();
 
 /** Parses a compound (no combinators) into simple selectors, :is()/:where() and :not(). */
 function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false, dom: boolean = false, shadow: boolean = false): Scan | null {
-  const key = (inNot ? "n" : "") + (allowPseudo ? "p" : "") + (dom ? "d" : "") + (shadow ? "s" : "") + text;
+  // The flags stay in fixed-width fields of their own: a text that begins with the letters they
+  // would have used can never be read as flags, nor flags as part of the text.
+  const key = `${inNot ? 1 : 0}${allowPseudo ? 1 : 0}${dom ? 1 : 0}${shadow ? 1 : 0}:${text}`;
   const hit = scanMemo.get(key);
   if (hit !== undefined) return hit;
   if (scanMemo.size > 4096) scanMemo.clear();
@@ -444,7 +449,7 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
           // A relative selector starts with an optional combinator, then a complex selector.
           const lead = /^([>+~])?\s*([\s\S]*)$/.exec(a);
           const body = lead === null ? "" : lead[2].trim();
-          if (body === "" || scanFrag(body) === null) return null;
+          if (body === "" || scanFrag(body, dom, shadow) === null) return null;
           has.push((lead === null || lead[1] === undefined ? "" : lead[1]) + "\u0003" + body);
         }
         i = j;
@@ -496,7 +501,7 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
           let dropped = 0;
           for (const a of args) {
             if (a === "") continue;
-            const f = scanFrag(a);
+            const f = scanFrag(a, dom, shadow);
             if (f === null || !fragBuilds(f, dom)) {
               // A malformed item is dropped by every browser and weighs nothing; one that is
               // valid but can match nothing here (:visited) adds no alternative, yet :is() still

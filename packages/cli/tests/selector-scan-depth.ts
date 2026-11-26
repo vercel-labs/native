@@ -22,6 +22,16 @@ const spec = (text: string): number => {
 };
 check("a malformed :is() item weighs nothing", spec(":is(#id:nth-child(foo), .a)") === 100, String(spec(":is(#id:nth-child(foo), .a)")));
 check("a :visited item keeps its weight", spec(":is(#x:visited, .a)") === 10100, String(spec(":is(#x:visited, .a)")));
+// A valid item that matches nothing (an empty nested list) still weighs what it says, and a DOM
+// selector's :visited inside :not() is valid there, so the item is kept.
+const list = parseSelector(":is(#id:is(), .a)", true) ?? [];
+check("an empty nested list keeps the item's weight", list.length === 1 && list[0].specificity === 10000, JSON.stringify(list.map((x) => x.specificity)));
+const kept = parseSelector(":is(#id:not(:visited), .a)", true) ?? [];
+check(":not(:visited) stays valid in a DOM selector", kept.length === 2 && kept[0].specificity === 10100, JSON.stringify(kept.map((x) => x.specificity)));
+
+// Flag-like argument names never read as parser flags: the cache key keeps them apart.
+const tags = (parseSelector(":is(p, q, nd, sd, ps)", true) ?? []).map((x) => x.tag).join(",");
+check("flag-like names scan as names", tags === "p,q,nd,sd,ps", tags);
 
 // The scan cache follows the namespace prefixes a sheet declares, never an older set.
 setSelectorNamespaces(new Map([["", "http://www.w3.org/2000/svg"]]));
