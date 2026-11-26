@@ -2708,6 +2708,16 @@ function styleDescendants(el: Node, parent: Node | null, prepassEntry: PrepassNo
   // parent's layout (which flattens contents boxes away) sees it.
   if (!runningPrepass && el instanceof Element && el.ownText !== "" && el.sv[P.P_DISPLAY] === P.D_CONTENTS) {
     materializeText(el);
+  } else if (!runningPrepass && el instanceof Element && el.ownTextNode !== null &&
+    el.ownTextNode.parentNode === el && (el.pseudoKind === P.PE_BEFORE || el.pseudoKind === P.PE_AFTER)) {
+    // The generated box no longer generates contents: put the text it had materialized back into
+    // its own text, so a changed `content` (or a switch back to `display: inline`) is not left
+    // behind in a child node.
+    el.ownText = el.ownTextNode.ownText;
+    const at = el.kids.indexOf(el.ownTextNode);
+    if (at >= 0) el.kids.splice(at, 1);
+    el.ownTextNode.parentNode = null;
+    el.ownTextNode = null;
   }
   for (const c of el.kids) {
     if (slotted !== null && slotted.indexOf(c) >= 0) continue;
