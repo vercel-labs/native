@@ -228,9 +228,11 @@ const EXAMPLES: { [name: string]: Example } = {
   },
   "data-table": {
     open: "frame 0 | frame 16",
-    // The filter narrows 3000 invoices to the 750 overdue ones; the first of them is INV-1002.
-    steps: "frame 0 | frame 16 | click #filter-overdue | frame 16 | print #result-count | click #row-INV-1002 | frame 16 | print #selected",
-    want: ["750 of 3000 rows", "Selected INV-1002"],
+    // Sorting by Due twice puts the latest date first (INV-1103), the filter narrows 3000
+    // invoices to the 750 overdue ones (the first is INV-1002), and a search that matches nothing
+    // leaves the arrow keys with nothing to move to instead of throwing.
+    steps: "frame 0 | frame 16 | click #sort-due | frame 16 | click #sort-due | frame 16 | print #row-INV-1103 | click #sort-invoice | frame 16 | click #filter-overdue | frame 16 | print #result-count | click #row-INV-1002 | frame 16 | print #selected | click #search | type zzzzzzzz | frame 16 | print #result-count | click #rows | frame 16 | key ArrowDown | frame 16 | print #selected",
+    want: ["INV-1103KLKestrel LabsDraft$3,476.57Dec 27, 2027Priya", "750 of 3000 rows", "Selected INV-1002", "0 of 3000 rows", "Selected INV-1002"],
   },
   kanban: {
     open: "frame 0 | frame 16",
@@ -241,9 +243,10 @@ const EXAMPLES: { [name: string]: Example } = {
   chat: {
     open: "frame 0 | frame 16",
     // Enter sends; the reply streams from a timer, so the count is read once the two messages are
-    // in the thread (the text keeps arriving after that).
-    steps: "frame 0 | frame 16 | click #composer | type How did the deploy go? | key Enter | wait 500 | print #message-count",
-    want: ["5 messages"],
+    // in the thread (the text keeps arriving after that). New conversation adds an empty thread
+    // instead of reopening Release notes.
+    steps: "frame 0 | frame 16 | click #composer | type How did the deploy go? | key Enter | wait 500 | print #message-count | click #new-thread | frame 16 | print #message-count",
+    want: ["5 messages", "0 messages"],
   },
   places: {
     open: "frame 0 | wait 200",

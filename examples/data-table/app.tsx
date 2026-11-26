@@ -15,6 +15,7 @@ interface Invoice {
   status: string;
   amount: number;
   due: string;
+  dueOrder: number;
   owner: string;
 }
 
@@ -41,6 +42,7 @@ function makeInvoices(count: number): Invoice[] {
       status: STATUSES[i % STATUSES.length],
       amount: ((i * 7919) % 480000) + 12000,
       due: MONTHS[month] + " " + String(day) + ", " + String(year),
+      dueOrder: (year * 10000) + ((month + 1) * 100) + day,
       owner: OWNERS[i % OWNERS.length],
     });
   }
@@ -72,7 +74,8 @@ function compare(a: Invoice, b: Invoice, key: string): number {
   if (key === "amount") return a.amount - b.amount;
   if (key === "invoice") return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   if (key === "client") return a.client < b.client ? -1 : a.client > b.client ? 1 : 0;
-  return a.due < b.due ? -1 : a.due > b.due ? 1 : 0;
+  if (key === "due") return a.dueOrder - b.dueOrder;
+  return 0;
 }
 
 function App() {
@@ -135,9 +138,13 @@ function App() {
   }
 
   function selectNext(delta: number): void {
+    // A search can leave no rows at all, and then an arrow key has nothing to move to.
+    if (sorted.length === 0) return;
     const index = selected === null ? -1 : sorted.findIndex((row) => row.id === selected);
     const next = Math.max(0, Math.min(sorted.length - 1, index + delta));
-    setSelected(sorted[next].id);
+    const row = sorted[next];
+    if (row === undefined) return;
+    setSelected(row.id);
     const top = next * ROW_H;
     if (listRef.current !== null) {
       const view = listRef.current;
@@ -157,9 +164,16 @@ function App() {
     }
   }
 
+  function csvCell(value: string): string {
+    // A comma, a quote or a line break inside a value has to be quoted, and a quote doubled, or
+    // the fields after it land in the wrong columns.
+    if (value.indexOf(",") < 0 && value.indexOf("\"") < 0 && value.indexOf("\n") < 0) return value;
+    return "\"" + value.split("\"").join("\"\"") + "\"";
+  }
+
   function exportCsv(): void {
     const lines = ["Invoice,Client,Status,Amount,Due,Owner"];
-    for (const row of sorted) lines.push([row.id, row.client, row.status, money(row.amount), row.due, row.owner].join(","));
+    for (const row of sorted) lines.push([row.id, row.client, row.status, money(row.amount), row.due, row.owner].map(csvCell).join(","));
     navigator.clipboard.writeText(lines.join("\n")).then(() => {
       setNotice("Copied " + String(sorted.length) + " rows");
     }).catch(() => {
@@ -171,6 +185,7 @@ function App() {
     const active = sortKey === key;
     return (
       <button
+        id={"sort-" + key}
         type="button"
         onClick={() => toggleSort(key)}
         className={"flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wider " + (alignRight ? "justify-end " : "") + (active ? "text-slate-800" : "text-slate-500 hover:text-slate-700")}

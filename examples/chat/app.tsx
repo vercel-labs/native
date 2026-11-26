@@ -117,6 +117,12 @@ function App() {
     };
   }, []);
 
+  // Every change to a thread - a message, a streamed reply, the count after Clear - is written
+  // back, so reloading the app shows the conversation the user left.
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(threads));
+  }, [threads]);
+
   function onScroll(event: any): void {
     const el = event.target;
     stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
@@ -172,6 +178,14 @@ function App() {
     startStream(threadId, replyId, replyFor(text));
   }
 
+  function newThread(): void {
+    const id = "t-" + String(Date.now());
+    const fresh: Thread = { id: id, title: "New conversation", subtitle: "Wren · workspace assistant", messages: [] };
+    setThreads([fresh, ...threads]);
+    setActiveId(id);
+    stickToBottom.current = true;
+  }
+
   function clearThread(): void {
     stopStream();
     setThreads(threads.map((thread) => {
@@ -193,7 +207,7 @@ function App() {
           </div>
         </div>
         <div className="px-4 pb-3">
-          <button type="button" id="new-thread" onClick={() => { setActiveId("t-release"); stickToBottom.current = true; }} className="flex w-full items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-[12.5px] font-medium text-slate-300 hover:bg-white/10">
+          <button type="button" id="new-thread" onClick={newThread} className="flex w-full items-center gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-[12.5px] font-medium text-slate-300 hover:bg-white/10">
             <span className="text-[15px] leading-none">+</span> New conversation
           </button>
         </div>
