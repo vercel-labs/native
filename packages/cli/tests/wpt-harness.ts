@@ -39,6 +39,10 @@ test(function () {
   assert_equals(text, "5", "the interpolation calls the long name");
 }, "a long name inside a template interpolation");
 test(function () {
+  var text = "don't lose aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest";
+  assert_equals(text, "don't lose aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest", "the double-quoted text keeps the name");
+}, "an apostrophe in a double-quoted string is text");
+test(function () {
   var pattern = /aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/;
   assert_true(pattern.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest"), "the regular expression keeps its text");
 }, "a regular expression keeps its own text");

@@ -663,10 +663,11 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
       i++;
       continue;
     }
-    if (mode === "string") {
+    if (mode === "'" || mode === '"') {
+      // A string ends at the quote that opened it: an apostrophe inside "…" is text, not the end.
       out += ch;
       if (ch === "\\" && i + 1 < text.length) { out += text[i + 1]; i += 2; continue; }
-      if (ch === "'" || ch === '"') modes.pop();
+      if (ch === mode) modes.pop();
       i++;
       continue;
     }
@@ -690,7 +691,7 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
       const stop = regexEnd(text, i);
       if (stop > i) { out += text.slice(i, stop); i = stop; continue; }
     }
-    if (ch === "'" || ch === '"') { out += ch; modes.push("string"); i++; continue; }
+    if (ch === "'" || ch === '"') { out += ch; modes.push(ch); i++; continue; }
     if (ch === "`") { out += ch; modes.push("template"); i++; continue; }
     if (ch === "{") { braces[braces.length - 1]++; out += ch; i++; continue; }
     if (ch === "}") {
