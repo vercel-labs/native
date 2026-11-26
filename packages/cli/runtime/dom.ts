@@ -5801,7 +5801,7 @@ export class Element extends Node {
   ensurePseudoBox(kind: number): Element | null {
     if (kind === P.PE_MARKER) return this.ensureMarker();
     if (kind === P.PE_PLACEHOLDER) {
-      if (this.placeholderPseudo === null && this.localName === "input") this.addPseudoChild(kind, []);
+      if (this.placeholderPseudo === null && (this.localName === "input" || this.localName === "textarea")) this.addPseudoChild(kind, []);
       return this.placeholderPseudo;
     }
     const existing = kind === P.PE_BEFORE ? this.beforePseudo : kind === P.PE_AFTER ? this.afterPseudo : null;

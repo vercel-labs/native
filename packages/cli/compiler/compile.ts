@@ -1370,7 +1370,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     if (before) addPseudo(idx, P.PE_BEFORE);
     // A text field's ::placeholder carries the style its placeholder text is drawn with. The box
     // itself never lays out or paints; the field reads the style when it draws the text.
-    const placeholder = localTag === "input" && hasPseudoRule(el, P.PE_PLACEHOLDER);
+    const placeholder = (localTag === "input" || localTag === "textarea") && hasPseudoRule(el, P.PE_PLACEHOLDER);
     if (placeholder) addPseudo(idx, P.PE_PLACEHOLDER);
     // A dialog's ::backdrop is painted by the top layer, never in the flow; the UA sheet gives it
     // display: none so that it takes no room here.
