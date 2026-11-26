@@ -171,7 +171,10 @@ function meterBarColor(el: HTMLMeterElement): number {
   const high = el.high;
   const optimum = el.optimum;
   const value = el.value;
-  const zone = (v: number): number => v >= high ? 2 : v >= low ? 1 : 0;
+  // A meter's zones are the spec's: below low, the low-to-high band (high included), and above
+  // high. A value exactly at high is still in the band, which is why a default <meter
+  // value=max> draws green rather than the band above it.
+  const zone = (v: number): number => v > high ? 2 : v >= low ? 1 : 0;
   const good = zone(optimum);
   const at = zone(value);
   if (at === good) return METER_GOOD;
