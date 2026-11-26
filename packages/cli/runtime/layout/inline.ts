@@ -1881,11 +1881,15 @@ function clampLines(el: Node, lines: Line[], clamp: number, innerW: number, inde
     lines.length = 0;
     return lines;
   }
-  if (lines.length <= room) return lines;
-  lines.length = room;
+  // The run may fill the budget exactly: nothing is cut, but a flow that goes on past it still
+  // ends the last line it keeps with an ellipsis.
+  const exact = lines.length === room;
+  if (lines.length < room) return lines;
+  if (exact && !el.clampEllipsis) return lines;
+  if (!exact) lines.length = room;
   // block-ellipsis: no-ellipsis keeps the lines and leaves the last one as it is.
   if (el.sv[P.P_BLOCK_ELLIPSIS] === P.BE_NO_ELLIPSIS) {
-    lines[room - 1].forced = false;
+    if (!exact) lines[room - 1].forced = false;
     return lines;
   }
   const li = room - 1;
@@ -1974,7 +1978,10 @@ export function layoutInlinePieces(el: Node, pieces: Piece[], innerW: number, pl
     }
     let clamp = el.sv[P.P_LINE_CLAMP];
     if (clamp < 0) clamp = autoClamp(el);
+    // A clamped ancestor's budget caps the count: the lines past it make nothing at all.
+    if (el.clampBudget >= 0 && (clamp <= 0 || el.clampBudget < clamp)) clamp = el.clampBudget;
     if (clamp > 0) lines = clampLines(el, lines, clamp, innerW, indent, avails);
+    else if (clamp === 0 && el.clampBudget === 0) lines.length = 0;
     // Where each cleared line has to start: below the floats its break clears, in the run's own
     // coordinates. The floats are all placed before the run is laid out, so they don't move.
     const clears: number[] = [];

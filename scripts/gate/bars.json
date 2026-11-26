@@ -100,6 +100,8 @@
       "three-hero": 0.964
     },
     "calibratedSource": "ns-webgl-parity, same Chrome flags and 16 ms frame stepping",
+    "timingSensitive": ["canvas-particles", "css-motion"],
+    "timingSensitiveNote": "css-motion: the page animates its own content in over ~2 s of wall time, and a headless Chrome capture does not advance those animations at the rate its virtual-time budget implies — at 10 s of budget its headline is still half faded and its second line still at opacity 0 — while native steps its frame clock to the final state. canvas-particles: the seeded field is identical in both engines, and so are the primitives (radial gradients under a scale and sub-pixel fillRect both probe equal), but every mote moves each frame: a one-or-two-pixel difference in accumulated motion moves most of the differing pixels, so the score moves a point or two run to run. Not judged against the bar.",
     "notes": {
       "player": "clock-sensitive: 96.9% when native is compared after a single 300 ms jump"
     }
