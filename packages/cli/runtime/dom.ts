@@ -6977,7 +6977,8 @@ function collectFormEntries(form: HTMLFormElement, data: FormData): void {
       if (type === "checkbox" || type === "radio") {
         if (node.checked) data.append(name, node.value);
       } else if (type === "file") {
-        for (const file of node.files) data.append(name, file);
+        const files = node.files;
+        if (files !== null) for (const file of files) data.append(name, file);
       } else if (type !== "submit" && type !== "reset" && type !== "button" && type !== "image") {
         data.append(name, node.value);
       }
@@ -12687,6 +12688,21 @@ function parseFloatingPointNumber(text: string): number {
   return isFinite(n) ? n : NaN;
 }
 
+/** An email field's value: its newlines are stripped and the ends trimmed, and a multiple field
+ *  also trims each address. */
+function sanitizeEmailText(text: string, multiple: boolean): string {
+  const one = text.replace(/[\r\n]/g, "").trim();
+  if (!multiple) return one;
+  const out: string[] = [];
+  for (const a of one.split(",")) out.push(a.trim());
+  return out.join(",");
+}
+
+/** A url field's value: its tabs and newlines are removed and its ends trimmed. */
+function sanitizeUrlText(text: string): string {
+  return text.replace(/[\t\r\n]/g, "").trim();
+}
+
 /** The value a number field keeps of `text`: the number as written, or nothing when it names none. */
 function sanitizeNumberText(text: string): string {
   if (text === "") return "";
@@ -12938,8 +12954,13 @@ export class HTMLInputElement extends HTMLElement {
     // page put it, as a browser does; a framework that controls a field rewrites its value after
     // every keystroke, and moving the caret to the end there would send the next character to the
     // end of the field.
-    const text = String(v);
-    if (text === this.value) return;
+    let text = String(v);
+    // An email or url field keeps only what its value sanitization allows.
+    const fieldType = this.type.toLowerCase();
+    if (fieldType === "email" || fieldType === "url") {
+      text = fieldType === "email" ? sanitizeEmailText(text, this.multiple) : sanitizeUrlText(text);
+    }
+    if (text === this.val) return;
     moveValueRanges(this, 0, this.val.length, text.length);
     this.val = text;
     this.selStart = text.length;
@@ -13091,6 +13112,8 @@ export class HTMLInputElement extends HTMLElement {
     const declared = stepAttr === null ? 1 : Number(stepAttr);
     const step = isFinite(declared) && declared > 0 ? declared : 1;
     if (min > max) return;
+    // An empty field counts as zero, as the stepping algorithm has it; its bounds then clamp the
+    // result, so an unbounded field steps from zero and a bounded one lands on its bound.
     let current = this.val === "" ? (t === "range" ? spec.value : 0) : Number(this.val);
     if (isNaN(current)) current = t === "range" ? spec.value : 0;
     if (current < min || current > max) return;
@@ -13182,12 +13205,42 @@ export class HTMLInputElement extends HTMLElement {
   set accept(v: string) {
     this.setAttribute("accept", v);
   }
-  /** The files the field holds. Nothing opens a picker here, so this stays empty unless set. */
-  get files(): readonly File[] {
-    return this.fileList;
+  /** The files the field holds, which only a file field has: nothing opens a picker here, so
+   *  this stays empty unless a script sets it. */
+  get files(): readonly File[] | null {
+    return this.type.toLowerCase() === "file" ? this.fileList : null;
   }
   set files(list: readonly File[]) {
     this.fileList = list.slice();
+  }
+  /** The datalist the list attribute names, or null when it names none. */
+  get list(): HTMLDataListElement | null {
+    const id = this.getAttribute("list");
+    if (id === null || id === "") return null;
+    // The list is the one in the tree the field is in: a field inside a shadow tree, a detached
+    // fragment, a detached element's subtree or another document finds the datalist there rather
+    // than one in the page around it.
+    const root = this.getRootNode();
+    let el: Element | null = null;
+    if (root instanceof DocumentFragment || root instanceof Document) {
+      el = root.getElementById(id);
+    } else if (root instanceof Element) {
+      // A detached subtree's root is the element the field was built in: look through it.
+      if (root.id === id) el = root;
+      else {
+        const all: Element[] = [];
+        collectElements(root, all);
+        for (const c of all) if (c.id === id) { el = c; break; }
+      }
+    }
+    return el instanceof HTMLDataListElement ? el : null;
+  }
+  /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
+  get defaultIndeterminate(): boolean {
+    return attributeFlag(this, "indeterminate");
+  }
+  set defaultIndeterminate(v: boolean) {
+    setAttributeFlag(this, "indeterminate", v);
   }
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
@@ -13341,6 +13394,18 @@ export class HTMLInputElement extends HTMLElement {
         noteControlChange(this);
       } else if (String(value).trim().toLowerCase() === "number") {
         this.val = sanitizeNumberText(this.val);
+        noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
+        noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "url") {
+        this.val = sanitizeUrlText(this.val);
+        noteControlChange(this);
+      }
+    } else if (name === "multiple") {
+      super.setAttribute(name, value);
+      if (this.type.toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
         noteControlChange(this);
       }
       refreshAllLabels();
