@@ -35,7 +35,7 @@ import type { WebGLContextAttributes } from "./webgl.ts";
 import { StyleDeclaration, styleView } from "./cssom.ts";
 import type { CSSStyleDeclaration } from "./cssom.ts";
 import { hostFileRead, hostSetTitle, hostVideoCanPlay, hostWindowFullscreen, hostWindowFullscreenState } from "./host.ts";
-import { runEditCommand, supportsEditCommand } from "./editing.ts";
+import { queryEditCommandState, runEditCommand, supportsEditCommand } from "./editing.ts";
 import { followLinkHook } from "./link-hook.ts";
 import { runCommandHook } from "./command-hook.ts";
 import { ROW_GROUP, ROW_OPTION, closeSelectPopup, openSelectPopup, selectPopupSerial } from "./select-popup.ts";
@@ -14587,7 +14587,9 @@ export class Selection {
   private collapsedOffset = 0;
 
   get rangeCount(): number {
-    return this.ranges.length;
+    // A caret is one collapsed range in a browser; a collapsed selection here keeps its point in
+    // collapsedPoint, and still reports the range a script can read.
+    return this.ranges.length > 0 ? this.ranges.length : (this.collapsedPoint !== null ? 1 : 0);
   }
   get isCollapsed(): boolean {
     return this.ranges.length === 0 || (this.ranges.length === 1 && this.ranges[0].collapsed);
@@ -14613,6 +14615,9 @@ export class Selection {
     return this.collapsedOffset;
   }
   getRangeAt(i: number): Range {
+    if (this.ranges.length === 0 && i === 0 && this.collapsedPoint !== null) {
+      return new Range(this.collapsedPoint, this.collapsedOffset, this.collapsedPoint, this.collapsedOffset);
+    }
     return this.ranges[i];
   }
   addRange(range: Range): void {
@@ -15131,6 +15136,20 @@ export class Document extends Node {
 
   /** Whether execCommand() knows a command, which for these it always does. */
   queryCommandSupported(command: string): boolean {
+    return supportsEditCommand(String(command));
+  }
+
+  /**
+   * Whether the caret or selection is in a command's state, as a toolbar asks: the bold, italic
+   * and underline tags, the two lists, and a link. False when the selection isn't in an editing
+   * host.
+   */
+  queryCommandState(command: string): boolean {
+    return queryEditCommandState(String(command));
+  }
+
+  /** Whether a command can run now; the editing commands above all can. */
+  queryCommandEnabled(command: string): boolean {
     return supportsEditCommand(String(command));
   }
 

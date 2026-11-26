@@ -5,6 +5,7 @@
 
 import { Element, InputEvent, Node, Range, Text, document, dispatch, trusted } from "./dom.ts";
 import { invalidatePaint } from "./invalidation.ts";
+import { noteHostEdit } from "./editing-history.ts";
 
 /** Whether a point is inside the host (at any depth). */
 export function pointInside(host: Element, node: Node | null | undefined): boolean {
@@ -152,6 +153,11 @@ export function insertTextInto(host: Element, text: string): boolean {
     sel.collapse(host, 0);
     range = new Range(host, 0, host, 0);
   }
+  // The snapshot carries the selection the change starts from, so an undo can put the caret
+  // back where the typing began.
+  noteHostEdit(host,
+    offsetOfPoint(host, range.startContainer, range.startOffset),
+    offsetOfPoint(host, range.endContainer, range.endOffset));
   if (!range.collapsed) range.deleteContents();
   const node = document.createTextNode(text);
   range.insertNode(node);
@@ -171,7 +177,10 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
   const inputType = forward ? "deleteContentForward" : "deleteContentBackward";
   if (range !== null && !range.collapsed) {
     if (!beforeInput(host, inputType, null)) return false;
-    const at = offsetOfPoint(host, range.startContainer, range.startOffset);
+    const fromAt = offsetOfPoint(host, range.startContainer, range.startOffset);
+    const toAt = offsetOfPoint(host, range.endContainer, range.endOffset);
+    noteHostEdit(host, fromAt, toAt);
+    const at = fromAt;
     range.deleteContents();
     const point = pointAtOffset(host, at);
     if (point !== null) selectPoint(point); else sel.collapse(host, 0);
@@ -199,6 +208,7 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
     to = at;
   }
   if (!beforeInput(host, inputType, null)) return false;
+  noteHostEdit(host, from, to);
   const a = pointAtOffset(host, from);
   const b = pointAtOffset(host, to);
   if (a === null || b === null) return false;
