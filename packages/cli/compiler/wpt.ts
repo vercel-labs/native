@@ -279,6 +279,8 @@ interface BatchOutput {
   built?: boolean;
   /** True when the runner died before its first page began: the program itself, not a page. */
   startup?: boolean;
+  /** The build directories this batch made, for its caller to remove once it has the results. */
+  dirs?: string[];
 }
 
 interface ExecResult { status: number | null; stdout: string; stderr: string; signal: string | null }
@@ -761,11 +763,16 @@ function writeMain(dir: string, keys: string[], layout: boolean[], test: boolean
  * the pages whose scripts didn't compile (with the error), which stay skips.
  */
 async function runBatchOne(index: number, jobs: Job[], outDir: string, hostObjs: string[]): Promise<BatchOutput> {
+  const dir = join(WORK, `batch-${index}`);
   try {
-    return await runBatchInDir(join(WORK, `batch-${index}`), jobs, outDir, hostObjs);
+    const result = await runBatchInDir(dir, jobs, outDir, hostObjs);
+    // The directory's page sources, compiled runner and object files have given the batch
+    // everything it reports; the caller removes it once the results are in hand, so that a run of
+    // a large directory doesn't leave a gigabyte or more a batch behind.
+    return { ...result, dirs: [dir] };
   } finally {
     // The build directory is done with, and so is the checker daemon it started for it.
-    reapCheckerServers(join(WORK, `batch-${index}`));
+    reapCheckerServers(dir);
   }
 }
 
@@ -960,7 +967,8 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
   for (const m of [a.outputs, b.outputs]) for (const [k, v] of m) outputs.set(k, v);
   const failures = new Map(first.failures);
   for (const m of [a.failures, b.failures]) for (const [k, v] of m) failures.set(k, v);
-  return { outputs, failures, built: true };
+  const dirs = [...(first.dirs ?? []), ...(a.dirs ?? []), ...(b.dirs ?? [])];
+  return { outputs, failures, built: true, dirs };
 }
 
 function compareImages(a: string, b: string, fuzzy: Test["fuzzy"], mismatch: boolean): { pass: boolean; detail: string; pixels: number } {
@@ -1154,6 +1162,9 @@ async function run(args: string[]): Promise<void> {
       const batch = await runBatch(b, all.slice(b * batchSize, (b + 1) * batchSize), outDir, hostObjs);
       for (const [k, v] of batch.outputs) outputs.set(k, v);
       for (const [k, v] of batch.failures) scriptFailures.set(k, v);
+      // The results are in hand, so the batch's build trees are done with: nothing later in the
+      // run reads them (a runner reused by a later batch comes from the build cache).
+      for (const d of batch.dirs ?? []) rmSync(d, { recursive: true, force: true });
       finished++;
       progress();
     }
