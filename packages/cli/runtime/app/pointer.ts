@@ -500,6 +500,16 @@ export function pressElement(el: Element): void {
   if (el.isConnected && !inDisabledFormControl(el)) dispatchClick(el, () => mouseEvent("click", x, y, 1), true);
 }
 
+/** The WPT harness's hover: the pointer rests over an element, as a mouse moved onto it leaves
+ *  it, without pressing anything. */
+export function hoverElement(el: Element): void {
+  if (!el.isConnected) return;
+  const r = el.getBoundingClientRect();
+  pointer.x = r.x + r.width / 2;
+  pointer.y = r.y + r.height / 2;
+  updateHover(el);
+}
+
 /** An accessibility client's request for an element's menu: contextmenu at its centre, as the
  *  second button would send. */
 export function contextMenuFor(el: Element): void {

@@ -701,10 +701,11 @@ function writePageModules(dir: string, job: Job): string[] {
     // The page's scripts share this module scope, so the harness's keyboard driver (which
     // testharness.js calls) is bound here rather than exposed as a global an app would get.
     let loader = `import { __nativeSendKeys, actionKey } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/keyboard.ts")))}; `;
-    // test_driver.Actions drives the same input path the host's pointer and wheel use.
+    // test_driver's clicks, hovers and Actions drive the same pointer and wheel path the host
+    // uses, so a press focuses what it hits and the pointer stays where it was left.
     loader += `import { pointerDown, pointerUp, pointerMove } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/pointer.ts")))}; `;
     loader += `import { wheel } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/scroll.ts")))}; `;
-    // Actions hit-test where the page is now: lay it out first, as a browser has before input.
+    // Input hit-tests where the page is now: lay it out first, as a browser has before input.
     loader += `import { frame } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/mount.ts")))}; `;
     if (handlers.length > 0) {
       loader += `import { attachHandler } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app.ts")))}; `;

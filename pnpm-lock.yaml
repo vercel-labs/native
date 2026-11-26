@@ -142,12 +142,6 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
-  examples/animation:
-    devDependencies:
-      '@native-sdk/cli':
-        specifier: workspace:*
-        version: link:../../packages/cli
-
   examples/article:
     devDependencies:
       '@native-sdk/cli':
@@ -167,37 +161,6 @@ importers:
         version: link:../../packages/cli
 
   examples/chat:
-    dependencies:
-      '@types/react':
-        specifier: 19.2.10
-        version: 19.2.10
-      '@types/react-dom':
-        specifier: 19.2.3
-        version: 19.2.3(@types/react@19.2.10)
-      '@ui-sdk/core':
-        specifier: 0.1.0-beta.13
-        version: 0.1.0-beta.13
-      '@ui-sdk/react':
-        specifier: 0.1.0-beta.13
-        version: 0.1.0-beta.13(@types/react@19.2.10)(@ui-sdk/core@0.1.0-beta.13)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      react:
-        specifier: 19.2.0
-        version: 19.2.0
-      react-dom:
-        specifier: 19.2.0
-        version: 19.2.0(react@19.2.0)
-    devDependencies:
-      '@native-sdk/cli':
-        specifier: workspace:*
-        version: link:../../packages/cli
-      '@tailwindcss/cli':
-        specifier: 4.1.17
-        version: 4.1.17
-      tailwindcss:
-        specifier: 4.1.17
-        version: 4.1.17
-
-  examples/checkout:
     dependencies:
       '@types/react':
         specifier: 19.2.10
@@ -282,37 +245,6 @@ importers:
       '@native-sdk/cli':
         specifier: workspace:*
         version: link:../../packages/cli
-
-  examples/gallery:
-    dependencies:
-      '@types/react':
-        specifier: 19.2.10
-        version: 19.2.10
-      '@types/react-dom':
-        specifier: 19.2.3
-        version: 19.2.3(@types/react@19.2.10)
-      '@ui-sdk/core':
-        specifier: 0.1.0-beta.13
-        version: 0.1.0-beta.13
-      '@ui-sdk/react':
-        specifier: 0.1.0-beta.13
-        version: 0.1.0-beta.13(@types/react@19.2.10)(@ui-sdk/core@0.1.0-beta.13)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      react:
-        specifier: 19.2.0
-        version: 19.2.0
-      react-dom:
-        specifier: 19.2.0
-        version: 19.2.0(react@19.2.0)
-    devDependencies:
-      '@native-sdk/cli':
-        specifier: workspace:*
-        version: link:../../packages/cli
-      '@tailwindcss/cli':
-        specifier: 4.1.17
-        version: 4.1.17
-      tailwindcss:
-        specifier: 4.1.17
-        version: 4.1.17
 
   examples/halyard:
     dependencies:

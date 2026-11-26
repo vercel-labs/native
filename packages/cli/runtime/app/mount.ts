@@ -1,6 +1,6 @@
 // Compiled app tables, mounting them as a DOM, and the style/layout/paint frame pipeline.
 
-import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
+import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, resetInput, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
 import { setDocumentMode } from "../quirk.ts";
 import { setPageCharset } from "../dom.ts";
 import { clearPaintDamage, layoutEpoch, stateUsage, takeStyleRoots, paintMarkTrace } from "../invalidation.ts";
@@ -788,6 +788,8 @@ export function resetPage(): void {
   clearRegistrations();
   resetCounterStyles();
   setFocus(null);
+  // The next page's own focus decisions start with no interaction behind them.
+  resetInput();
   pointer.hovered = [];
   pointer.pressed = null;
   pointer.down = false;

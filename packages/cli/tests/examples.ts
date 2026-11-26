@@ -220,6 +220,40 @@ const EXAMPLES: { [name: string]: Example } = {
     steps: "frame 0 | frame 16 | click #album-still-harbor | frame 500 | click #track-still-harbor-1 | frame 1000 | print #now-playing",
     want: ["Still Harbor · Marlow Vane"],
   },
+  notes: {
+    open: "frame 0 | frame 16",
+    // React renders on a microtask, so the steps that follow start with a frame.
+    steps: "frame 0 | frame 16 | click #search | type launch | frame 16 | print #note-count",
+    want: ["1 note"],
+  },
+  "data-table": {
+    open: "frame 0 | frame 16",
+    // Sorting by Due twice puts the latest date first (INV-1103), the filter narrows 3000
+    // invoices to the 750 overdue ones (the first is INV-1002), and a search that matches nothing
+    // leaves the arrow keys with nothing to move to instead of throwing.
+    steps: "frame 0 | frame 16 | click #sort-due | frame 16 | click #sort-due | frame 16 | print #row-INV-1103 | click #sort-invoice | frame 16 | click #filter-overdue | frame 16 | print #result-count | click #row-INV-1002 | frame 16 | print #selected | click #search | type zzzzzzzz | frame 16 | print #result-count | click #rows | frame 16 | key ArrowDown | frame 16 | print #selected",
+    want: ["INV-1103KLKestrel LabsDraft$3,476.57Dec 27, 2027Priya", "750 of 3000 rows", "Selected INV-1002", "0 of 3000 rows", "Selected INV-1002"],
+  },
+  kanban: {
+    open: "frame 0 | frame 16",
+    // A drag of the card in "In progress" onto the "Next up" column.
+    steps: "frame 0 | frame 16 | drag #card-k6 -280 0 | frame 16 | print #board-status | print #count-next",
+    want: ["Moved “Drag a card between columns” to Next up", "3"],
+  },
+  chat: {
+    open: "frame 0 | frame 16",
+    // Enter sends; the reply streams from a timer, so the count is read once the two messages are
+    // in the thread (the text keeps arriving after that). New conversation adds an empty thread
+    // instead of reopening Release notes.
+    steps: "frame 0 | frame 16 | click #composer | type How did the deploy go? | key Enter | wait 500 | print #message-count | click #new-thread | frame 16 | print #message-count",
+    want: ["5 messages", "0 messages"],
+  },
+  places: {
+    open: "frame 0 | wait 200",
+    // The first run fills the store from public/seed.json; the editor adds one more.
+    steps: "frame 0 | wait 200 | print #count | click #add | type A small site | click #field-url | type https://example.com | click #save | wait 200 | print #count",
+    want: ["8 places", "9 places"],
+  },
   pulse: {
     open: "frame 0 | frame 16",
     // The metrics tick on a timer; `wait` lets the timer and the state update land.
