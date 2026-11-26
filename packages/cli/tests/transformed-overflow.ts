@@ -22,6 +22,8 @@ body { margin: 0; }
 <div id="own"><div style="width:50px;height:50px;transform:translateX(300px)"></div></div>
 <div id="shrink"><div id="shrunk" style="width:50px;height:50px;transform:translateX(300px)"></div></div>
 <div id="escS"><div id="esc"><div id="escClip"><div style="position:absolute;transform:translateX(2000px);width:50px;height:50px"></div></div></div></div>
+<div id="tAwrap" style="transform:translateX(200px)"><div id="tA" style="width:100px;height:100px;overflow:auto"><div style="transform:translateX(120px);width:50px;height:50px"></div></div></div>
+<div id="tB" style="position:relative;width:100px;height:100px"><div style="overflow:hidden;width:50px;height:50px"><div style="position:absolute;transform:translateX(300px);width:50px;height:50px"></div></div><div style="overflow:hidden;width:50px;height:50px"><div style="position:absolute;transform:translateX(2000px);width:50px;height:50px"></div></div></div>
 <div id="fxwrap" style="transform:translateX(100px)"><div id="fx" style="position:fixed;left:2000px;top:0;width:50px;height:50px"></div></div>
 <div id="bodycase" style="transform:translateY(900px);width:50px;height:50px"></div>
 <div id="s"></div>
@@ -62,6 +64,10 @@ requestAnimationFrame(() => {
   console.log("escape=" + Math.round(document.getElementById("escS")!.scrollWidth));
   // A fixed box inside a transformed box moves with the page.
   console.log("fixed=" + Math.round(document.documentElement.scrollWidth));
+  // A scroll container inside a transformed ancestor measures itself, not the ancestor.
+  console.log("ancestor=" + Math.round(document.getElementById("tA")!.scrollWidth));
+  // Two out-of-flow boxes routed to one containing block: the farther one still counts.
+  console.log("routed=" + Math.round(document.getElementById("tB")!.scrollWidth));
   // The body's overflow is the viewport's: the page's scroll range still takes in what it holds.
   document.body.style.overflow = "hidden";
   console.log("body=" + Math.round(document.documentElement.scrollHeight));
@@ -98,12 +104,16 @@ check("a smaller translation shrinks the scroll range again",
   values.shrunk === "150", `${values.shrunk} after shrinking, ${values.back} back`);
 check("and growing it again reaches the old edge",
   values.back === "350", values.back);
+check("a scroll container inside a transformed ancestor keeps its own scroll range",
+  values.ancestor === "170", values.ancestor);
+check("two out-of-flow boxes routed to one containing block both count",
+  values.routed === "2050", values.routed);
 check("a fixed box inside a transformed box moves with the page",
   values.fixed === "2150", values.fixed);
 check("an absolute box whose containing block sits above a clipping box is not clipped by it",
   values.escape === "2050", values.escape);
 check("the body's overflow propagates to the viewport instead of clipping the page",
-  values.body === "1250", values.body);
+  values.body === "1450", values.body);
 console.log(`     layout of depth ${DEPTH}: ${values.ms}ms`);
 
 if (failed > 0) {

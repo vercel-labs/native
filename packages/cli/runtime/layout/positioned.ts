@@ -387,7 +387,15 @@ export function growTransformedOverflow(page: Node): void {
   const route = (cb: Node | null, r: number[]): void => {
     const at = pending.get(cb === null ? page : cb);
     if (at === undefined) pending.set(cb === null ? page : cb, r.slice());
-    else unionInto(at, r);
+    else {
+      // The entry holds the page maxima and the box, as the walk returns them: merge both.
+      if (r[0] > at[0]) at[0] = r[0];
+      if (r[1] > at[1]) at[1] = r[1];
+      if (r[2] < at[2]) at[2] = r[2];
+      if (r[3] < at[3]) at[3] = r[3];
+      if (r[4] > at[4]) at[4] = r[4];
+      if (r[5] > at[5]) at[5] = r[5];
+    }
   };
   // Each box hands its parent two things: the right and bottom edges every box in its subtree
   // paints at, each through the transforms above it (exact: every box is transformed on its own),
@@ -432,7 +440,7 @@ export function growTransformedOverflow(page: Node): void {
     // The box's own scroll extents take in what its subtree paints (CSS Overflow 3). A box with a
     // transform of its own measures the subtree in its own coordinates, so the transform it
     // carries is not part of its own scroll range.
-    if (hasTransform(el)) growReach(el, box[2], box[3], ex, ey);
+    if (hasTransform(el) || m !== null) growReach(el, box[2], box[3], ex, ey);
     else growReach(el, pageX, pageY, ex, ey);
     // Content a clipping box hides cannot paint outside it: the boxes above see the box's edge.
     const clipX = clipsForOverflow(el, true);
