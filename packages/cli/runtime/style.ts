@@ -2600,8 +2600,15 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
       sv[P.P_DISPLAY] = blockified(sv[P.P_DISPLAY]);
     }
   }
+  // The formatting context a box takes part in comes from the nearest ancestor that generates a
+  // box: a `display: contents` wrapper generates none, so its children are the outer container's
+  // own items and floats.
+  let boxParent: Node | null = parent;
+  while (boxParent !== null && !boxParent.isTextNode && boxParent.sv[P.P_DISPLAY] === P.D_CONTENTS) {
+    boxParent = boxParent.parentElement;
+  }
   // A float is block-level, whatever its display was. It has no effect on a flex item.
-  if (!el.isTextNode && sv[P.P_FLOAT] !== P.FL_NONE && (parent === null || !isFlexContainer(parent))) {
+  if (!el.isTextNode && sv[P.P_FLOAT] !== P.FL_NONE && (boxParent === null || !isFlexContainer(boxParent))) {
     const d = sv[P.P_DISPLAY];
     // One that was inline-level belongs to the inline content it sits in, not to the block flow
     // around it (CSS 2.1 9.5).
@@ -2620,7 +2627,7 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
   // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
-  if (parent !== null && (isFlexContainer(parent) || isGridContainer(parent) || isLanesContainer(parent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  if (boxParent !== null && (isFlexContainer(boxParent) || isGridContainer(boxParent) || isLanesContainer(boxParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
