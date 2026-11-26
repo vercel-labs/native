@@ -1205,9 +1205,10 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const isRoot = el === htmlEl;
     return rules.some((r) => r.selectors.some((s) => s.pseudo === kind &&
       (name === null || s.pseudoName === name) &&
-      (s.tagNs !== undefined || s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
-      // A class prefix can't be screened out here: the box is made and the rule's conditions
-      // decide at runtime whether it draws anything.
+      // The local name counts whatever namespace the selector names (the namespace itself is not
+      // screened here), and a class prefix can't be screened at all: the box is made and the
+      // rule's conditions decide at runtime whether it draws anything.
+      (s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
       ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(c)))));
   };
 
@@ -1679,7 +1680,9 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         if (sel.host === true || sel.slotted === true) continue;
         // A ::highlight() carrier takes the rules of its own name only.
         if (pseudo === P.PE_HIGHLIGHT && sel.pseudoName !== node.pseudoName) continue;
-        if (sel.tag && sel.tagNs === undefined && sel.tag !== origin.tag) continue;
+        // A selector's local name has to match the element's whatever namespace it names: the
+        // namespace itself is not screened here, so "*|a" still names anchors only.
+        if (sel.tag && sel.tag !== origin.tag) continue;
         if (sel.root && at !== rootIdx) continue;
         if (!markupMayChange && sel.id !== null && sel.id !== origin.id) continue;
         if (!plausible(sel)) continue;
