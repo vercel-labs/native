@@ -11842,6 +11842,29 @@ export function setWindowEventHost(host: WindowEventHost | null): void {
   windowEventHost = host;
 }
 
+/** When a trusted input event last counted as a user gesture. */
+let activationAt = -1;
+/** How long a gesture keeps counting, the way a browser's transient activation does. */
+const ACTIVATION_WINDOW_MS = 5000;
+
+/** Records a user gesture at the input path: a press or a key the host delivered, never an event
+ *  a script dispatched (document.createEvent, element.click() and dispatchEvent are not gestures). */
+export function noteUserActivation(): void {
+  activationAt = performance.now();
+}
+
+/** Spends the current gesture: a transient activation opens at most one window, as a browser's
+ *  does. */
+export function consumeUserActivation(): void {
+  activationAt = -1;
+}
+
+/** Whether the page may open a new window now: a user gesture began within the activation
+ *  window. A window.open() outside one is a popup, which browsers block, so this does too. */
+export function hasTransientActivation(): boolean {
+  return activationAt >= 0 && performance.now() - activationAt <= ACTIVATION_WINDOW_MS;
+}
+
 export function dispatch(event: Event, target: Node): boolean {
   event.dispatchFlag = true;
   event.windowCaptureRan = false;

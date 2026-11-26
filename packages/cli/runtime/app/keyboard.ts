@@ -1,7 +1,7 @@
 // Keyboard input: key events, focus cycling and text-field editing.
 
 import * as P from "../../shared/props.ts";
-import { Node, Element, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, InputEvent, KeyboardEvent, document, dispatch, trusted, implicitSubmit, markPaintDirty, invalidatePaint, focusState, setFocus, noteInput, dismissPopover, openSelectMenu, controlKind, rangeSpec, setRangeValue, CONTROL_NONE, CONTROL_RANGE, inDisabledFormControl, dateKind, dateSegments, dateTypeText, dateStepActive, dateMoveActive, dateClearActive, dateSetActive, editingHostFor } from "../dom.ts";
+import { Node, Element, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, InputEvent, KeyboardEvent, document, dispatch, trusted, implicitSubmit, markPaintDirty, invalidatePaint, focusState, setFocus, noteInput, noteUserActivation, dismissPopover, openSelectMenu, controlKind, rangeSpec, setRangeValue, CONTROL_NONE, CONTROL_RANGE, inDisabledFormControl, dateKind, dateSegments, dateTypeText, dateStepActive, dateMoveActive, dateClearActive, dateSetActive, editingHostFor } from "../dom.ts";
 import { deleteTextIn, insertTextInto, moveCaretIn, selectHost } from "../editable.ts";
 import { datePickerKey, closeDatePicker } from "../date-picker.ts";
 import { caret, textAreaLineStarts } from "../paint.ts";
@@ -382,6 +382,7 @@ export function keyUp(code: number, mods: number, text: string = ""): void {
 
 export function keyDown(code: number, mods: number, text: string, repeat: boolean = false): void {
   noteInput("key");
+  noteUserActivation();
   const target: Node = focusState.el !== null ? focusState.el :
     document.body !== null ? document.body : document.documentElement;
   const ev = trusted(new KeyboardEvent("keydown", {

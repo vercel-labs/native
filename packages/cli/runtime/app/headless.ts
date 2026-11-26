@@ -14,7 +14,7 @@ import { handleHostEvent, tick } from "./loop.ts";
 import { config, frame, paintPage } from "./mount.ts";
 import { applicationMenuItemIndex, chooseApplicationMenuItem, installApplicationMenu } from "../menus.ts";
 import { publishTitlebarArea } from "./titlebar.ts";
-import { pointer, pointerContext, pointerDown, pointerMove, pointerUp } from "./pointer.ts";
+import { pointer, pointerContext, pointerDown, pointerMove, pointerUp, pressElement } from "./pointer.ts";
 import { dropFilesAt, fileFromPath } from "./dnd.ts";
 import { fadeScrollbars, wheel } from "./scroll.ts";
 import { SNAPSHOT_SCALE, setSnapshotScale } from "../device.ts";
@@ -23,9 +23,10 @@ import { compositorStats } from "../compositor.ts";
 // ---------------------------------------------------------------------------
 // Headless mode for tests and CI:
 //   NATIVE_STEPS='click #new | type Buy milk | key Enter | hover #add | drag #stage 40 0' NATIVE_SNAPSHOT=out.png ./app
-// Steps go through the same pointer and keyboard paths as real input. `frame <ms>` runs the
-// animation callbacks at a chosen timestamp, and `resize <w> <h>` changes the viewport. With steps
-// but no snapshot the app still runs them headlessly, then exits instead of leaving a window up.
+// Steps go through the same pointer and keyboard paths as real input, and `axpress <selector>` goes
+// through the press an accessibility client's activation runs. `frame <ms>` runs the animation
+// callbacks at a chosen timestamp, and `resize <w> <h>` changes the viewport. With steps but no
+// snapshot the app still runs them headlessly, then exits instead of leaving a window up.
 
 const KEY_CODES: Map<string, number> = new Map([
   ["Backspace", KEY_BACKSPACE], ["Enter", KEY_ENTER], ["ArrowLeft", KEY_LEFT], ["ArrowRight", KEY_RIGHT],
@@ -120,6 +121,11 @@ function runStep(step: string): void {
     pointerDown(c[0], c[1]);
     frame();
     pointerUp(c[0], c[1]);
+  } else if (verb === "axpress") {
+    // axpress <selector>: a press from an accessibility client, as a screen reader's activation
+    // runs it — the element's own press, with no pointer position and no gesture before it.
+    const el = document.querySelector(arg);
+    if (el !== null) pressElement(el);
   } else if (verb === "clickat") {
     // clickat <x> <y> [Meta|Shift|Alt|Ctrl]: a press and release at a viewport point, with the
     // modifier keys a real event would carry.
