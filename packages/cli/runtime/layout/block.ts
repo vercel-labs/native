@@ -1,9 +1,9 @@
 // Block flow with margin collapsing.
 
 import * as P from "../../shared/props.ts";
-import { Element, Node, hasLineFragment } from "../dom.ts";
+import { Element, Node, boxKids, hasLineFragment } from "../dom.ts";
 import { layoutBox } from "./box.ts";
-import { allChildren, aspectRatio, blockEndBorder, blockStartBorder, borderBottom, borderLeft, borderRight, borderTop, clampW, display, inlineStartBorder, isBfcRoot, isButtonBox, isFloat, isReplaced, len, marginH, padH, padV, place, sizeUnit, specW, zeroIfNaN } from "./box-model.ts";
+import { allChildren, aspectRatio, blockEndBorder, blockStartBorder, borderBottom, borderLeft, borderRight, borderTop, clampW, display, inlineStartBorder, isBfcRoot, isButtonBox, isFloat, isOutOfFlow, isReplaced, len, marginH, padH, padV, place, sizeUnit, specW, zeroIfNaN } from "./box-model.ts";
 import { clearBottom, FloatBox, FloatCtx, floatBottom, floatFitY, floatSides, Flow, floatSlot, lineFitY } from "./floats.ts";
 import { breakLines, floatLineTop, isBlankPieces, isCollapsibleRun, layoutInlinePieces, measurePieces, piecesClearFloat, placeAbsOfBlankRun, Piece, splitFlow } from "./inline.ts";
 import { anonymousTableWidth, isTableDisplay, isTableInternal, layoutAnonymousTable, tableShrinkWidth, tableUsedWidth } from "./table.ts";
@@ -52,6 +52,35 @@ function fieldsetLegend(el: Node): Node | null {
  * the margin above (below) the box itself. A box with no height of its own collapses through
  * its own margins, leaving the margins around it to collapse together.
  */
+/** The lines a box's flow has laid out, its block descendants' included. */
+function flowLines(el: Node): number {
+  let n = Math.max(el.lineBaseline.length, el.lines.length);
+  for (const k of boxKids(el)) {
+    if (display(k) === P.D_NONE || isOutOfFlow(k) || isFloat(k)) continue;
+    if (isBfcRoot(k)) continue;
+    n += flowLines(k);
+  }
+  return n;
+}
+
+/** Whether a box holds a forced line break, which splits its text into runs of their own. */
+function hasBreak(el: Node): boolean {
+  for (const k of boxKids(el)) {
+    if (!k.isTextNode && (k as Element).localName === "br") return true;
+    if (hasBreak(k)) return true;
+  }
+  return false;
+}
+
+/** Drops a clamp budget left on a box and the layouts it made stale. */
+function clearClamp(n: Node): void {
+  if (n.clampBudget < 0 && !n.clampEllipsis) return;
+  n.clampBudget = -1;
+  n.clampEllipsis = false;
+  n.lN = 0;
+  for (const k of boxKids(n)) clearClamp(k);
+}
+
 export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number, pt: number, flow?: Flow): number {
   // A fieldset's rendered legend sits in its top border, out of the flow its content runs in:
   // what it adds beyond that border pushes the content down.
@@ -112,6 +141,17 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
   // shortened too (CSS 2.1 9.5.1, rules 5 to 8).
   const preplaced: number[] = [];
   for (let i = 0; i < entries.length; i++) preplaced.push(0);
+  // line-clamp counts the lines of the whole box, its block children's included (CSS Overflow 4):
+  // a child lays out only the lines left of the budget, and the ones past it make nothing.
+  const clampBase = el.sv[P.P_LINE_CLAMP] > 0 ? el.sv[P.P_LINE_CLAMP] : el.clampBudget;
+  let clampBlocks = 0;
+  let clampPending: Node | null = null;
+  // The children that take part in the flow, counted once: a clamp only needs to know whether one
+  // child holds the whole flow.
+  const flowKids = entries.filter((e) => e.block !== null && !isFloat(e.block)).length;
+  // The budget this box came in with: the runs below lend it the block children's spend, and it
+  // is put back once the flow is placed.
+  const clampIncoming = el.clampBudget;
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     if (entry.abs !== null) {
@@ -126,6 +166,16 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     }
     const isRun = entry.block === null;
     if (isRun || (entry.block !== null && isFloat(entry.block))) {
+      // The block child just placed has spent its lines of the budget, and the run that follows
+      // it is laid out with what is left: the child's lines are only counted once the flow
+      // reaches the next block child, which is too late for this run.
+      if (clampPending !== null) {
+        clampBlocks += flowLines(clampPending);
+        clampPending = null;
+      }
+      // The container's own runs share its budget with the block children: what those took is
+      // spent before a run's lines are counted.
+      if (clampBase >= 0) el.clampBudget = Math.max(0, clampBase - clampBlocks);
       // The whole anonymous box, from its first piece of inline content to the last, including
       // the floats in it.
       const before = el.fragKind.length;
@@ -196,6 +246,37 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     }
     if (entry.block === null) continue;
     const c: Node = entry.block;
+    // The lines the previous block child took count against the budget.
+    if (clampPending !== null && clampPending !== c) {
+      clampBlocks += flowLines(clampPending);
+      // The budget stays on the child as the record of the pass, so a later layout with the clamp
+      // gone can tell it was clamped and drop the layouts that clamped pass made.
+      clampPending = null;
+    }
+    // A child with a formatting context of its own keeps its lines to itself: line-clamp skips
+    // them (CSS Overflow 4, and the line-clamp-007 test).
+    // A box that was not clamped last time must not keep the budget it had then, and the layout
+    // it kept from under that budget is stale.
+    if (clampBase < 0 && (c.clampBudget >= 0 || c.clampEllipsis)) clearClamp(c);
+    // A child that became a formatting context of its own keeps its lines to itself, so a budget
+    // an earlier pass left on it has to go: its text is not part of the clamp any more.
+    if (isBfcRoot(c) && (c.clampBudget >= 0 || c.clampEllipsis) && !isFloat(c)) clearClamp(c);
+    // One block child holding a flow full of forced breaks lays its lines out in runs the budget
+    // can't count straight; the clamp inside it is left to itself.
+    const alone = flowKids <= 1 && hasBreak(c);
+    if (clampBase >= 0 && !alone && !isFloat(c) && !isBfcRoot(c)) {
+      c.clampBudget = Math.max(0, clampBase - el.lineBaseline.length - clampBlocks);
+      // Content after this box, or after the box that holds it, means the clamp cuts the flow
+      // there, and the last line it keeps ends in an ellipsis even when that line fits. The
+      // continuation the container was given has to reach the deepest box that shows the line:
+      // a wrapper with nothing after it inside would otherwise drop it.
+      c.clampEllipsis = el.clampEllipsis;
+      for (let k = i + 1; k < entries.length; k++) {
+        const e = entries[k];
+        if (e.block !== null || !isBlankPieces(e.pieces)) { c.clampEllipsis = true; break; }
+      }
+      clampPending = c;
+    }
     if (isFloat(c)) {
       // A float leaves the flow: it is placed beside the floats before it, and the content
       // after it flows around it. One that followed a run was placed with it already.
@@ -534,6 +615,9 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     pendP = Math.max(0, mb, c.escBotP);
     pendN = Math.min(0, mb, c.escBotN);
   }
+  // The runs above lent the container's budget to the block children's spend; the box leaves
+  // with the budget it came in with.
+  el.clampBudget = clampIncoming;
   if (leading) {
     // Everything collapsed through, so the margin is at both edges of this box at once: it
     // escapes upward, and downward too when nothing separates it from the bottom edge.

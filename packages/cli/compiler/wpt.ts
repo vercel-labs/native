@@ -279,6 +279,8 @@ interface BatchOutput {
   built?: boolean;
   /** True when the runner died before its first page began: the program itself, not a page. */
   startup?: boolean;
+  /** The build directories this batch made, for its caller to remove once it has the results. */
+  dirs?: string[];
 }
 
 interface ExecResult { status: number | null; stdout: string; stderr: string; signal: string | null }
@@ -402,6 +404,44 @@ function reapCheckerServers(dir: string): void {
 
 const RUNNER_CACHE = join(homedir(), ".cache", "native", "wpt-runners");
 const SLOTS_DIR = join(homedir(), ".cache", "native", "wpt-slots");
+
+/**
+ * Keeps the compiled-runner cache within NATIVE_WPT_CACHE_MB (default 8 GB). A run builds many
+ * runners of a few hundred megabytes each, and a machine that runs the suite repeatedly fills its
+ * volume with them until a run is killed for disk. The oldest entries go first; a build that
+ * finished moments ago is the one a rerun would hit, so the newest always stay.
+ */
+function pruneRunnerCache(): void {
+  if (!existsSync(RUNNER_CACHE)) return;
+  const entries: { path: string; size: number; at: number }[] = [];
+  let total = 0;
+  for (const name of readdirSync(RUNNER_CACHE)) {
+    // A copy another run is writing is renamed into place when it is complete; pruning it
+    // mid-flight would make that run's rename fail.
+    if (name.indexOf(".tmp") >= 0) continue;
+    const path = join(RUNNER_CACHE, name);
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) continue;
+      entries.push({ path, size: st.size, at: st.mtimeMs });
+      total += st.size;
+    } catch {}
+  }
+  const max = Math.max(256, Number(process.env.NATIVE_WPT_CACHE_MB ?? 8192)) * 1024 * 1024;
+  if (total <= max) return;
+  entries.sort((a, b) => a.at - b.at);
+  // A runner another run selected moments ago may still be copied: leave recent entries alone on
+  // this pass, and the next run prunes them.
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const entry of entries) {
+    if (total <= max) break;
+    if (entry.at > cutoff) continue;
+    try {
+      rmSync(entry.path, { force: true });
+      total -= entry.size;
+    } catch {}
+  }
+}
 
 /**
  * How a runner is compiled. The dev posture is -O0 with scriptc's cached LLVM object shards, so
@@ -660,10 +700,14 @@ function writePageModules(dir: string, job: Job): string[] {
     body += "document.currentScript = null;\n";
     // The page's scripts share this module scope, so the harness's keyboard driver (which
     // testharness.js calls) is bound here rather than exposed as a global an app would get.
-    let loader = `import { __nativeSendKeys } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/keyboard.ts")))}; `;
+    let loader = `import { __nativeSendKeys, actionKey } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/keyboard.ts")))}; `;
     // The harness's clicks and hovers take the page's own pointer path, so a press focuses what
-    // it hits and the page sees the events a real one sends.
-    loader += `import { pressElement as __nativePress, hoverElement as __nativeHover } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/pointer.ts")))}; `;
+    // it hits and the page sees the events a real one sends; test_driver.Actions drives the same
+    // pointer path and the wheel.
+    loader += `import { pressElement as __nativePress, hoverElement as __nativeHover, pointerDown, pointerUp, pointerMove } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/pointer.ts")))}; `;
+    loader += `import { wheel } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/scroll.ts")))}; `;
+    // Actions hit-test where the page is now: lay it out first, as a browser has before input.
+    loader += `import { frame } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app/mount.ts")))}; `;
     if (handlers.length > 0) {
       loader += `import { attachHandler } from ${JSON.stringify(importPath(dir, join(RUNTIME, "app.ts")))}; `;
       for (const h of handlers) {
@@ -723,7 +767,9 @@ function writeMain(dir: string, keys: string[], layout: boolean[], test: boolean
     `const layout: boolean[] = ${JSON.stringify(layout)};`,
     `const tests: boolean[] = ${JSON.stringify(test)};`,
     `const start = process.argv.length > 2 ? Number(process.argv[2]) : 0;`,
-    "for (let i = start; i < KEYS.length; i++) {",
+    "// A runner spawned as a child window by window.open has no pages of its own to drive.",
+    `const spawnedAsWindow = process.env.NATIVE_WINDOW_URL !== undefined;`,
+    "for (let i = start; i < KEYS.length && !spawnedAsWindow; i++) {",
     "  console.log(\"BEGIN \" + i);",
     "  resetPage();",
     "  try {",
@@ -764,11 +810,16 @@ function writeMain(dir: string, keys: string[], layout: boolean[], test: boolean
  * the pages whose scripts didn't compile (with the error), which stay skips.
  */
 async function runBatchOne(index: number, jobs: Job[], outDir: string, hostObjs: string[]): Promise<BatchOutput> {
+  const dir = join(WORK, `batch-${index}`);
   try {
-    return await runBatchInDir(join(WORK, `batch-${index}`), jobs, outDir, hostObjs);
+    const result = await runBatchInDir(dir, jobs, outDir, hostObjs);
+    // The directory's page sources, compiled runner and object files have given the batch
+    // everything it reports; the caller removes it once the results are in hand, so that a run of
+    // a large directory doesn't leave a gigabyte or more a batch behind.
+    return { ...result, dirs: [dir] };
   } finally {
     // The build directory is done with, and so is the checker daemon it started for it.
-    reapCheckerServers(join(WORK, `batch-${index}`));
+    reapCheckerServers(dir);
   }
 }
 
@@ -817,7 +868,13 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
     let cached = useCache || store ? runnerKey(gen.main, gen.files) : "";
     const copyCached = (): boolean => {
       if (cached === "" || !existsSync(cached)) return false;
-      copyFileSync(cached, exe);
+      // Another run prunes the shared cache while this one selects a hit: losing that race is a
+      // cache miss for this batch, not a failure of the run.
+      try {
+        copyFileSync(cached, exe);
+      } catch {
+        return false;
+      }
       chmodSync(exe, 0o755);
       cacheStats.hits++;
       reused = true;
@@ -941,6 +998,9 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
  */
 const MAX_SPLIT_DEPTH = 3;
 
+/** The first index a split child takes; top-level batches never reach it. */
+let splitIndex = 1_000_000;
+
 async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: string[], depth: number = 0): Promise<BatchOutput> {
   const first = await runBatchOne(index, jobs, outDir, hostObjs);
   // A build that never succeeded is split, whoever the error was attributed to: the pages that
@@ -964,14 +1024,19 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
   }
   const mid = Math.ceil(jobs.length / 2);
   process.stderr.write(`\nnative wpt: batch ${index}: ${why} for ${jobs.length} page(s); splitting to find the page that breaks it\n`);
-  const half = async (n: number, part: Job[]): Promise<BatchOutput> => runBatch(index * 100 + n, part, outDir, hostObjs, depth + 1);
+  // A split child gets an index of its own, above every top-level one: its build directory lives
+  // until its parent's results are merged, and a later top-level batch must not reuse it and have
+  // its live tree deleted underneath it.
+  const half = async (_n: number, part: Job[]): Promise<BatchOutput> =>
+    runBatch(splitIndex++, part, outDir, hostObjs, depth + 1);
   const a = await half(1, jobs.slice(0, mid));
   const b = await half(2, jobs.slice(mid));
   const outputs = new Map(first.outputs);
   for (const m of [a.outputs, b.outputs]) for (const [k, v] of m) outputs.set(k, v);
   const failures = new Map(first.failures);
   for (const m of [a.failures, b.failures]) for (const [k, v] of m) failures.set(k, v);
-  return { outputs, failures, built: true };
+  const dirs = [...(first.dirs ?? []), ...(a.dirs ?? []), ...(b.dirs ?? [])];
+  return { outputs, failures, built: true, dirs };
 }
 
 function compareImages(a: string, b: string, fuzzy: Test["fuzzy"], mismatch: boolean): { pass: boolean; detail: string; pixels: number } {
@@ -1152,27 +1217,17 @@ async function run(args: string[]): Promise<void> {
   const outputs = new Map<string, string>();
   /** Pages whose scripts didn't compile, with scriptc's error: each stays a skip. */
   const scriptFailures = new Map<string, string>();
-  const batches = Math.ceil(all.length / batchSize);
-  const releaseSlot = await acquireSlot();
-  const hostObjs = ensureHost();
-  let next = 0;
-  let finished = 0;
-  const progress = () =>
-    process.stderr.write(`\rnative wpt: ${finished}/${batches} batches done (${all.length} pages, ${parallel} in parallel)…`);
-  progress();
-  await Promise.all(Array.from({ length: Math.min(parallel, batches) }, async () => {
-    for (let b = next++; b < batches; b = next++) {
-      const batch = await runBatch(b, all.slice(b * batchSize, (b + 1) * batchSize), outDir, hostObjs);
-      for (const [k, v] of batch.outputs) outputs.set(k, v);
-      for (const [k, v] of batch.failures) scriptFailures.set(k, v);
-      finished++;
-      progress();
-    }
-  }));
-  releaseSlot();
-  process.stderr.write(`\nnative wpt: compiled runners: ${cacheStats.misses} built, ${cacheStats.hits} reused from ${relative(process.cwd(), RUNNER_CACHE) || RUNNER_CACHE}\n`);
-
+  /** Adds the result of every runnable page whose runs are in, or of every page on a final pass. */
+  const collectInto = (target: Result[], final: boolean): void => {
   for (const r of runnable) {
+    // Until every page of a test (its own and its references) has run, there is no verdict: a
+    // partial write leaves those tests out rather than calling them errors.
+    // A page whose scripts scriptc refused has a verdict of its own (a skip), so it is ready too:
+    // an interrupted run keeps it along with the pages that ran.
+    const hasRun = (key: string): boolean => outputs.has(key) || scriptFailures.has(key);
+    const ready = hasRun(r.page.key) &&
+      r.matchRefs.every((ref) => hasRun(ref.key)) && r.mismatchRefs.every((ref) => hasRun(ref.key));
+    if (!ready && !final) continue;
     // A page whose scripts scriptc refused is a skip with the error; a script that throws while
     // running is an error, since what the page shows then isn't what it means to show.
     const failed = scriptFailures.get(r.page.key);
@@ -1181,7 +1236,7 @@ async function run(args: string[]): Promise<void> {
     for (const ref of r.mismatchRefs) if (refFailed === undefined) refFailed = scriptFailures.get(ref.key);
     if (failed !== undefined || refFailed !== undefined) {
       const msg = failed ?? refFailed!;
-      results.push({ path: r.test.path, kind: r.test.kind, status: "skip", reason: `${failed === undefined ? "reference script: " : "script: "}${msg}` });
+      target.push({ path: r.test.path, kind: r.test.kind, status: "skip", reason: `${failed === undefined ? "reference script: " : "script: "}${msg}` });
       continue;
     }
     const out = outputs.get(r.page.key) ?? "ERROR no output";
@@ -1195,7 +1250,7 @@ async function run(args: string[]): Promise<void> {
       const bad = badTest !== "" ? badTest : refOuts[badRef];
       const status = bad.startsWith("CRASH") ? "crash" : "error";
       const why = bad.replace(/^RUNTIME /, "script threw: ");
-      results.push({ path: r.test.path, kind: r.test.kind, status, reason: (badRef >= 0 ? "reference page: " : "") + why });
+      target.push({ path: r.test.path, kind: r.test.kind, status, reason: (badRef >= 0 ? "reference page: " : "") + why });
       continue;
     }
     if (r.test.kind === "testharness") {
@@ -1203,14 +1258,14 @@ async function run(args: string[]): Promise<void> {
       let parsed: { status: number; message: string; tests: { name: string; status: number; message: string }[] } | null = null;
       try { parsed = JSON.parse(body); } catch { parsed = null; }
       if (parsed === null) {
-        results.push({ path: r.test.path, kind: "testharness", status: "fail", reason: "no test harness result" });
+        target.push({ path: r.test.path, kind: "testharness", status: "fail", reason: "no test harness result" });
       } else {
         const failed = parsed.tests.filter((t) => t.status !== 0);
         const reasons: string[] = [];
         if (parsed.status !== 0) reasons.push(parsed.message === "" ? "harness error" : parsed.message);
         if (failed.length > 0) reasons.push(`${failed[0].name}: ${failed[0].message === "" ? "failed" : failed[0].message}`);
         const many = failed.length > 1 ? ` (+${failed.length - 1} more)` : "";
-        results.push({
+        target.push({
           path: r.test.path, kind: "testharness",
           status: reasons.length === 0 ? "pass" : "fail",
           reason: reasons.length === 0 ? undefined : (reasons.join("; ") + many).slice(0, 300),
@@ -1219,12 +1274,13 @@ async function run(args: string[]): Promise<void> {
       continue;
     }
     if (r.test.kind === "layout") {
-      if (out.startsWith("PASS")) results.push({ path: r.test.path, kind: "layout", status: "pass" });
-      else if (out === "NONE") results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: no expectations found" });
-      else if (/unsupported check/.test(out)) results.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: " + /unsupported check [\w-]+/.exec(out)![0] });
-      else results.push({ path: r.test.path, kind: "layout", status: "fail", reason: out.replace(/^FAIL /, "") });
+      // Into the batch's own list, like every other verdict: the final write replaces it.
+      if (out.startsWith("PASS")) target.push({ path: r.test.path, kind: "layout", status: "pass" });
+      else if (out === "NONE") target.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: no expectations found" });
+      else if (/unsupported check/.test(out)) target.push({ path: r.test.path, kind: "layout", status: "skip", reason: "layout: " + /unsupported check [\w-]+/.exec(out)![0] });
+      else target.push({ path: r.test.path, kind: "layout", status: "fail", reason: out.replace(/^FAIL /, "") });
     } else if (r.test.kind === "crash") {
-      results.push({ path: r.test.path, kind: "crash", status: "pass" });
+      target.push({ path: r.test.path, kind: "crash", status: "pass" });
     } else {
       // The page passes when it matches any one of its match references and differs from every
       // one of its mismatch references; the closest reference names the difference otherwise.
@@ -1235,10 +1291,45 @@ async function run(args: string[]): Promise<void> {
       const ok = (matches.length === 0 || matches.some((c) => c.pass)) && differs.every((c) => c.pass);
       const cmps = matches.concat(differs);
       const nearest = cmps.reduce((a, b) => (b.pixels < a.pixels ? b : a));
-      results.push({ path: r.test.path, kind: "reftest", status: ok ? "pass" : "fail", reason: ok ? undefined : nearest.detail });
+      target.push({ path: r.test.path, kind: "reftest", status: ok ? "pass" : "fail", reason: ok ? undefined : nearest.detail });
     }
   }
+  };
 
+  const batches = Math.ceil(all.length / batchSize);
+  const releaseSlot = await acquireSlot();
+  const hostObjs = ensureHost();
+  let next = 0;
+  let finished = 0;
+  const progress = () =>
+    process.stderr.write(`\rnative wpt: ${finished}/${batches} batches done (${all.length} pages, ${parallel} in parallel)…`);
+  progress();
+  await Promise.all(Array.from({ length: Math.min(parallel, batches) }, async () => {
+    for (let b = next++; b < batches; b = next++) {
+      const batch = await runBatch(b, all.slice(b * batchSize, (b + 1) * batchSize), outDir, hostObjs);
+      for (const [k, v] of batch.outputs) outputs.set(k, v);
+      for (const [k, v] of batch.failures) scriptFailures.set(k, v);
+      // The results are in hand, so the batch's build trees are done with: nothing later in the
+      // run reads them (a runner reused by a later batch comes from the build cache).
+      for (const d of batch.dirs ?? []) rmSync(d, { recursive: true, force: true });
+      finished++;
+      progress();
+      // Write what is known after every batch: a run that is stopped keeps the results of the
+      // batches it finished, instead of losing the whole file.
+      const done = results.slice();
+      collectInto(done, false);
+      if (done.length > results.length) {
+        done.sort((a, b) => a.path.localeCompare(b.path));
+        mkdirSync(dirname(outFile), { recursive: true });
+        writeFileSync(outFile, JSON.stringify({ wpt: wptRevision(), partial: true, results: done }, null, 1) + "\n");
+      }
+    }
+  }));
+  releaseSlot();
+  pruneRunnerCache();
+  process.stderr.write(`\nnative wpt: compiled runners: ${cacheStats.misses} built, ${cacheStats.hits} reused from ${relative(process.cwd(), RUNNER_CACHE) || RUNNER_CACHE}\n`);
+
+  collectInto(results, true);
   report(results, verbose, (performance.now() - t0) / 1000);
   mkdirSync(dirname(outFile), { recursive: true });
   results.sort((a, b) => a.path.localeCompare(b.path));
