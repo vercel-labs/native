@@ -428,6 +428,8 @@ function contentMaxWidthInner(el: Node, cbW: number, cbH: number = NaN, ownH: nu
       const maxMain = len(k, P.P_MAX_HEIGHT, wrap);
       if (!Number.isNaN(maxMain)) main = Math.min(main, maxMain + pad);
       if (!Number.isNaN(minMain)) main = Math.max(main, minMain + pad);
+      // A box is never shorter than its own padding and border, whatever the maximum says.
+      main = Math.max(main, padV(k, wrap));
       const outerMain = main +
         zeroIfNaN(len(k, P.P_MARGIN_TOP, wrap)) + zeroIfNaN(len(k, P.P_MARGIN_BOTTOM, wrap));
       // The gap before this item is part of what has to fit, and a finished column is followed by
@@ -620,7 +622,10 @@ function contentMinWidthInner(el: Node, cbW: number, allowRatio = true, cbH: num
         // A shrinkable item can go below its basis, so only one that cannot shrink contributes at
         // least the basis to the container's min-content width.
         if (!Number.isNaN(base) && kids[i].sv[P.P_FLEX_SHRINK] === 0) {
-          outer = Math.max(outer, base + marginH(kids[i], 0));
+          // The item's own min-width and max-width hold the contribution too: a basis larger than
+          // the item's maximum size can't lift the container past it (CSS Sizing 3 §5.2).
+          const mh = marginH(kids[i], 0);
+          outer = clampContributionW(kids[i], Math.max(outer - mh, base), cbW) + mh;
         }
         content += outer + (i > 0 ? zeroIfNaN(len(el, P.P_COLUMN_GAP, cbW)) : 0);
       } else content = Math.max(content, outer);
