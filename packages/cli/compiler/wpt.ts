@@ -4,7 +4,7 @@
 //   native wpt run [dir...] [options]   run tests under the given WPT directories
 //   native wpt show <test>              render one test, its reference and their diff into a PNG
 //       --filter <regex>   only tests whose path matches
-//       --batch <n>        pages per compiled runner binary (default 100)
+//       --batch <n>        pages per compiled runner binary (default 50)
 //       --jobs <n>         batches built and run in parallel (default: CPU count - 2, at most 8)
 //       --out <file>       results JSON (default wpt/results.json)
 //       --verbose          print every failure
@@ -953,6 +953,10 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
       // the batch: the halves are smaller programs, and a smaller program does not overflow.
       if (start === 0 && begun < 0) {
         startup = true;
+        // The pages of a program that never started crashed with it: say so here, so a page left
+        // alone by the split (and every page of a single-page program) reports a crash rather
+        // than no result at all.
+        for (const j of active) out.set(j.page.key, "CRASH the runner died before its first page started");
         return crashedPages;
       }
       const crashed = begun > last ? begun : last + 1;
@@ -993,9 +997,11 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
  * the batch is rebuilt without it; but an error it reports without a page (an internal error, say)
  * can only be pinned on a page by bisecting. Halving costs one build per half, so a batch that
  * fails for such a reason is cut at most this many times and the pages left are reported as build
- * failures rather than splitting further on every run.
+ * failures rather than splitting further on every run. A program that dies before its first page
+ * starts (a document the compiler built too large to start, say) can only be made to start by
+ * making it smaller, so that failure is split the same way.
  */
-const MAX_SPLIT_DEPTH = 3;
+const MAX_SPLIT_DEPTH = 4;
 
 /** The first index a split child takes; top-level batches never reach it. */
 let splitIndex = 1_000_000;
@@ -1015,6 +1021,19 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
     }
   }
   if (depth >= MAX_SPLIT_DEPTH) {
+    // One page's tables can keep a whole program from starting, so a batch that still cannot
+    // start at this depth is broken into one-page programs: every page runs on its own, and only
+    // the page whose program cannot start is reported as a crash.
+    if (first.startup === true && jobs.length > 1) {
+      const outputs = new Map(first.outputs);
+      const failures = new Map(first.failures);
+      for (let n = 0; n < jobs.length; n++) {
+        const part = await runBatch(index * 1000 + n + 1, [jobs[n]], outDir, hostObjs, depth + 1);
+        for (const [k, v] of part.outputs) outputs.set(k, v);
+        for (const [k, v] of part.failures) failures.set(k, v);
+      }
+      return { outputs, failures, built: true };
+    }
     if (first.startup === true) {
       for (const j of jobs) first.outputs.set(j.page.key, "CRASH the runner died before its first page started");
     }
@@ -1094,7 +1113,10 @@ async function run(args: string[]): Promise<void> {
   const filter = opt("--filter");
   const set = opt("--set");
   const extended = set === "extended" || process.env.NATIVE_WPT_EXTENDED === "1";
-  const batchSize = Number(opt("--batch") ?? 100);
+  // The default batch is fifty pages: a runner holds all of its pages in one program, and a
+  // hundred pages can make a document the program cannot start, which would report every page in
+  // the batch as crashing at startup. Fifty starts.
+  const batchSize = Number(opt("--batch") ?? 50);
   // A build holds a few gigabytes (scriptc plus its LLVM helper), so the default count of at-once
   // batches is bounded by memory as well as by cores: eight builds on a 16 GB machine would be
   // killed for running the machine out of memory, which the build then reports as a batch that

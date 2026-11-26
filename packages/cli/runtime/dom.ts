@@ -110,6 +110,14 @@ export type { Animation } from "./animation.ts";
 /** The event a listener is running for, as the legacy `window.event` reports it. */
 export let currentEvent: Event | null = null;
 
+/** Makes `event` the one a listener is running for; answers the event that was current before,
+ *  so the caller can put it back when its dispatch ends. */
+export function setCurrentEvent(event: Event | null): Event | null {
+  const prev = currentEvent;
+  currentEvent = event;
+  return prev;
+}
+
 export interface UIEventInit extends EventInit {
   detail?: number;
 }
@@ -925,11 +933,28 @@ export class ListenerEntry {
   }
 }
 
+/**
+ * HTML's default passive value: a touch or wheel listener registered without an explicit
+ * `passive` on the window, the document, the root element or the body starts out passive, so a
+ * page can't block scrolling on the main thread that way. Windows use the same rule through
+ * Window.addEventListener.
+ */
+export function passiveByDefault(type: string, target: any): boolean {
+  if (type !== "touchstart" && type !== "touchmove" && type !== "wheel" && type !== "mousewheel") return false;
+  if (target instanceof Document) return true;
+  if (target instanceof Element) {
+    const doc = target.ownerDocument;
+    return doc !== null && (target === doc.documentElement || target === doc.body);
+  }
+  return false;
+}
+
 function listenerEntry(listener: EventListenerOrEventListenerObject,
-  options?: ListenerOptions | boolean): ListenerEntry {
+  options?: ListenerOptions | boolean, passiveDefault: boolean = false): ListenerEntry {
   const capture = typeof options === "boolean" ? options : options !== undefined && options.capture === true;
   const once = typeof options === "boolean" || options === undefined ? false : options.once === true;
-  const passive = typeof options === "boolean" || options === undefined ? false : options.passive === true;
+  const passive = typeof options === "boolean" || options === undefined || options.passive === undefined
+    ? passiveDefault : options.passive === true;
   if (typeof listener === "function") return new ListenerEntry(listener, null, capture, once, passive);
   return new ListenerEntry(null, listener, capture, once, passive);
 }
@@ -1102,7 +1127,7 @@ export class EventTarget {
       if (entry.capture === capture &&
         ((entry.fn !== null && entry.fn === listener) || (entry.object !== null && entry.object === listener))) return;
     }
-    list.push(listenerEntry(listener, options));
+    list.push(listenerEntry(listener, options, passiveByDefault(type, this)));
   }
   removeEventListener<K extends keyof GlobalEventHandlersEventMap>(type: K,
     listener: (event: GlobalEventHandlersEventMap[K]) => void, options?: ListenerOptions | boolean): void;
@@ -1124,6 +1149,8 @@ export class EventTarget {
   }
   dispatchEvent(event: Event): boolean {
     if (!(event instanceof Event)) throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
+    if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+    if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
     event.dispatchFlag = true;
     event.propagationStopped = false;
     event.immediateStopped = false;
@@ -1188,6 +1215,7 @@ export class DOMTokenList {
     // script can add, since the build keeps them all.
     if (this.owner !== null && this.owner.dynamic) this.owner.rulesStale = true;
     if (liveHead !== null) refreshLiveCollections();
+    else refreshLabelsIfHeld();
   }
 
   /** Replaces the whole list from a space-separated string (className / class attribute). */
@@ -1585,8 +1613,10 @@ function noteChildList(target: Node, added: Node[], removed: Node[], previousSib
   markLayoutDirty(target);
   // A positioned box taken out grew the scroll extents of the boxes it was in.
   for (const r of removed) if (holdsPositioned(r)) boxChanges.growthStale = true;
-  // The live getElements* lists read the tree, which has just changed.
+  // The live getElements* lists read the tree, which has just changed, and a labels list a
+  // script kept names elements by where they are.
   if (liveHead !== null) refreshLiveCollections();
+  else refreshLabelsIfHeld();
 }
 /** Whether a subtree holds a box incremental layout counts as positioned. */
 function holdsPositioned(n: Node): boolean {
@@ -1615,7 +1645,13 @@ function noteAttribute(target: Element, name: string, oldValue: string | null): 
   }
   notifyAttribute(target, name, oldValue);
   // Only these attributes decide which lists an element belongs to or answers for.
-  if (liveHead !== null && (name === "id" || name === "class" || name === "name")) refreshLiveCollections();
+  if (name === "id" || name === "class" || name === "name") {
+    if (liveHead !== null) refreshLiveCollections();
+    else refreshLabelsIfHeld();
+  } else if (name === "type" || name === "for") {
+    // An input's type decides whether it is labelable, and a label's for= names its control.
+    refreshLabelsIfHeld();
+  }
 }
 function noteCharacterData(target: Node, oldValue: string): void {
   if (OBSERVERS.length > 0) mutationRelay.noteCharacterData(target, oldValue);
@@ -3483,7 +3519,7 @@ export class Node extends EventTarget {
       if (entry.capture === capture &&
         ((entry.fn !== null && entry.fn === listener) || (entry.object !== null && entry.object === listener))) return;
     }
-    list.push(listenerEntry(listener, options));
+    list.push(listenerEntry(listener, options, passiveByDefault(type, this)));
   }
   removeEventListener<K extends keyof GlobalEventHandlersEventMap>(type: K,
     listener: (event: GlobalEventHandlersEventMap[K]) => void, options?: ListenerOptions | boolean): void;
@@ -3850,7 +3886,15 @@ export type NodeListOf<T extends Node = Node> = readonly T[];
  * The NodeList constructor, for the instanceof checks pages make. The lists this runtime hands
  * out are plain arrays (a querySelectorAll result is one), so none of them is a NodeList.
  */
-class NodeListCtor {
+/**
+ * The list a DOM property hands out for a NodeList: an array a script can test with
+ * `instanceof NodeList`, which is what the DOM's lists are. Its `item()` is the member the DOM
+ * gives a list besides its indices.
+ */
+class NodeListCtor extends Array<Node> {
+  item(index: number): Node | null {
+    return index >= 0 && index < this.length ? this[index] : null;
+  }
 }
 export const NodeList: any = NodeListCtor;
 
@@ -3882,6 +3926,7 @@ const HTML_NS = "http://www.w3.org/1999/xhtml";
 let liveHead: HTMLCollection | null = null;
 
 function refreshLiveCollections(): void {
+  refreshAllLabels();
   let c: HTMLCollection | null = liveHead;
   while (c !== null) {
     fillCollection(c);
@@ -3892,6 +3937,9 @@ function refreshLiveCollections(): void {
 /** Forgets the collections of the page that just ended (the WPT runner reuses the process). */
 export function clearLiveCollections(): void {
   liveHead = null;
+  // The labels lists a page handed out belong to that page: a runner's next page starts with
+  // none, so a previous page's controls are not retained and refreshed on every mutation.
+  labelLists.clear();
 }
 
 /**
@@ -5086,6 +5134,7 @@ export class Element extends Node {
         noteOtherIdentityChange(this);
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, text);
+        if (key === "for") refreshAllLabels();
       }
     }
   }
@@ -5779,7 +5828,7 @@ export class Element extends Node {
   ensurePseudoBox(kind: number): Element | null {
     if (kind === P.PE_MARKER) return this.ensureMarker();
     if (kind === P.PE_PLACEHOLDER) {
-      if (this.placeholderPseudo === null && this.localName === "input") this.addPseudoChild(kind, []);
+      if (this.placeholderPseudo === null && (this.localName === "input" || this.localName === "textarea")) this.addPseudoChild(kind, []);
       return this.placeholderPseudo;
     }
     const existing = kind === P.PE_BEFORE ? this.beforePseudo : kind === P.PE_AFTER ? this.afterPseudo : null;
@@ -5925,13 +5974,13 @@ export class Element extends Node {
     return want;
   }
 
-  /** Dispatches a bubbling click event starting at this element, as a browser's click() does. */
+  /** Dispatches a bubbling click event starting at this element, as a browser's click() does:
+   *  the click event itself is untrusted, while the input and change events its activation
+   *  sends are trusted, as Chrome's are. */
   click(): void {
     // A disabled control takes neither a click event nor its default action, as in a browser.
     if (inDisabledFormControl(this)) return;
-    if (dispatch(trusted(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true })), this)) {
-      runClickDefault(this);
-    }
+    dispatchClick(this, () => new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }), false);
   }
 
   /**
@@ -6629,7 +6678,7 @@ export class ElementInternals {
   }
 
   /** The labels that name the element. */
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this.host);
   }
 
@@ -6955,7 +7004,8 @@ function collectFormEntries(form: HTMLFormElement, data: FormData): void {
       if (type === "checkbox" || type === "radio") {
         if (node.checked) data.append(name, node.value);
       } else if (type === "file") {
-        for (const file of node.files) data.append(name, file);
+        const files = node.files;
+        if (files !== null) for (const file of files) data.append(name, file);
       } else if (type !== "submit" && type !== "reset" && type !== "button" && type !== "image") {
         data.append(name, node.value);
       }
@@ -6987,13 +7037,15 @@ function numberAttribute(el: Element, name: string, fallback: number): number {
 /** The elements a form lists and a label can name. */
 function isLabelable(el: Element): boolean {
   const n = el.localName;
-  return n === "button" || n === "input" || n === "meter" || n === "output"
+  // An input in the hidden state is listed but not labelable.
+  if (n === "input") return (el as HTMLInputElement).type.toLowerCase() !== "hidden";
+  return n === "button" || n === "meter" || n === "output"
     || n === "progress" || n === "select" || n === "textarea";
 }
 
 /** The elements a form lists, which is the same set plus fieldsets and objects. */
 function isListedElement(el: Element): boolean {
-  return isLabelable(el) || el.localName === "fieldset" || el.localName === "object";
+  return isLabelable(el) || el.localName === "input" || el.localName === "fieldset" || el.localName === "object";
 }
 
 /** The first labelable descendant of `root`, in document order. */
@@ -7063,15 +7115,42 @@ function formOwnerFor(el: HTMLElement): HTMLFormElement | null {
 }
 
 /** The labels that name `el`: the ones around it, and the ones whose for= gives its id. */
-function labelsFor(el: HTMLElement): HTMLLabelElement[] {
+/** The labels list each element was handed, which stays the same object and stays live. */
+const labelLists = new Map<HTMLElement, NodeListCtor>();
+
+function labelsFor(el: HTMLElement): NodeListCtor {
+  let list = labelLists.get(el);
+  if (list === undefined) {
+    list = new NodeListCtor();
+    labelLists.set(el, list);
+  }
+  fillLabels(el, list);
+  return list;
+}
+
+/** Re-reads the labels of an element that names it, or the label around it. */
+function fillLabels(el: HTMLElement, list: NodeListCtor): void {
+  list.length = 0;
+  if (!isLabelable(el)) return;
   const all: Element[] = [];
   collectElements(document.documentElement, all);
-  const out: HTMLLabelElement[] = [];
   for (const e of all) {
     if (!(e instanceof HTMLLabelElement)) continue;
-    if (e.control === el) out.push(e);
+    if (e.control === el) list.push(e);
   }
-  return out;
+}
+
+/** Brings the labels lists already handed out up to date, when a page holds any. */
+function refreshLabelsIfHeld(): void {
+  if (labelLists.size > 0) refreshAllLabels();
+}
+
+/** Brings every labels list already handed out up to date. */
+function refreshAllLabels(): void {
+  for (const el of labelLists.keys()) {
+    const list = labelLists.get(el);
+    if (list !== undefined) fillLabels(el, list);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -7174,7 +7253,7 @@ export class HTMLButtonElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   get name(): string {
@@ -7770,6 +7849,89 @@ export function openSelectMenu(el: HTMLSelectElement): void {
  * A click's default action on a checkbox or radio: the box ticks, a radio ticks and unchecks the
  * rest of its group, and the "input" and "change" events follow. A disabled control does nothing.
  */
+/** What a click on a checkbox or radio changed, so a canceled click can put it back. */
+interface ClickActivation {
+  el: HTMLInputElement;
+  checked: boolean;
+  indeterminate: boolean;
+  groupPrev: HTMLInputElement | null;
+  /** Whether the click changed the control at all: a radio that was already checked's click
+   *  sends no input or change event. */
+  changed: boolean;
+}
+
+/** The state a click activates on a checkbox or radio, applied before the click event runs. */
+function preClickActivate(target: Node): ClickActivation | null {
+  let n: Node | null = target;
+  while (n !== null) {
+    if (n instanceof HTMLInputElement) {
+      const kind = controlKind(n.type);
+      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
+        const act: ClickActivation = { el: n, checked: n.checked, indeterminate: n.indeterminate, groupPrev: null, changed: false };
+        if (kind === CONTROL_RADIO) {
+          if (!n.checked) {
+            // A radio's click takes the group's checkedness: the one that had it is unchecked
+            // now, so only this radio is left checked.
+            const group: HTMLInputElement[] = [];
+            radioGroup(n, group);
+            for (const o of group) {
+              if (o === n || !o.checked) continue;
+              act.groupPrev = o;
+              o.checked = false;
+            }
+            n.checked = true;
+            act.changed = true;
+          }
+        } else {
+          // A half-checked box goes the rest of the way to checked, and clearing the half state
+          // is a change of its own.
+          const next = n.indeterminate ? true : !n.checked;
+          act.changed = next !== n.checked || n.indeterminate;
+          n.indeterminate = false;
+          n.checked = next;
+        }
+        return act;
+      }
+      return null;
+    }
+    if (n instanceof HTMLButtonElement) return null;
+    n = n.parentNode;
+  }
+  return null;
+}
+
+/** The input and change events a completed click activation sends. */
+function finishClickActivation(act: ClickActivation): void {
+  // A click that left the control as it was — a radio that was already checked — sends nothing.
+  if (!act.changed) return;
+  dispatch(trusted(new Event("input", { bubbles: true })), act.el);
+  dispatch(trusted(new Event("change", { bubbles: true })), act.el);
+}
+
+/** Puts back what a canceled click's pre-activation changed. */
+function cancelClickActivation(act: ClickActivation): void {
+  const el = act.el;
+  if (act.groupPrev !== null) act.groupPrev.checked = true;
+  el.checked = act.checked;
+  el.indeterminate = act.indeterminate;
+}
+
+/**
+ * Dispatches a click at `target` and runs what it activates: a checkbox or radio is toggled
+ * before the click event, the event is dispatched, and a canceled event puts the toggle back.
+ */
+export function dispatchClick(target: Node, makeEvent: () => MouseEvent, user: boolean): boolean {
+  const act = preClickActivate(target);
+  const accepted = dispatch(makeEvent(), target);
+  if (act !== null) {
+    if (accepted) finishClickActivation(act);
+    else cancelClickActivation(act);
+  } else if (accepted) {
+    runClickDefault(target, user);
+  }
+  return accepted;
+}
+
 function activateControl(el: HTMLInputElement): void {
   if (controlDisabled(el)) return;
   if (controlKind(el.type) === CONTROL_RADIO) {
@@ -7894,16 +8056,13 @@ export function runClickDefault(target: Node, user: boolean = false): void {
     if (picker instanceof HTMLInputElement || picker instanceof HTMLButtonElement) break;
     picker = picker.parentNode;
   }
-  // A checkbox or radio ticks when it is clicked, in a form or not. A range took its new value
-  // when the press landed, so the click has nothing left to do.
+  // A checkbox or radio was toggled around its click event (see dispatchClick); a range took its
+  // new value when the press landed, so the click has nothing left to do.
   let box: Node | null = target;
   while (box !== null) {
     if (box instanceof HTMLInputElement) {
       const kind = controlKind(box.type);
-      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
-        activateControl(box);
-        return;
-      }
+      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) return;
       if (kind === CONTROL_RANGE) return;
       break;
     }
@@ -8800,6 +8959,10 @@ export class HTMLMetaElement extends HTMLElement {
 
 export class HTMLMeterElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLMeterElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   constructor(id: string = "", text: string = "", rules: readonly number[] = [], states: number = 0, inline: boolean = true) {
     super();
     this.initEl("meter", id, text, rules, states, inline);
@@ -8989,6 +9152,10 @@ export class Option extends HTMLOptionElement {
 
 export class HTMLOutputElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLOutputElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   /** The message setCustomValidity() was given, which a failed check reports. */
   private customMessage = "";
   /** Whether a script set the value, which then stops following the element's text. */
@@ -9073,6 +9240,10 @@ export class HTMLPreElement extends HTMLElement {
 
 export class HTMLProgressElement extends HTMLElement {
   get [Symbol.toStringTag](): string { return "HTMLProgressElement"; }
+  /** The labels that name the element. */
+  get labels(): NodeListCtor {
+    return labelsFor(this);
+  }
   constructor(id: string = "", text: string = "", rules: readonly number[] = [], states: number = 0, inline: boolean = true) {
     super();
     this.initEl("progress", id, text, rules, states, inline);
@@ -9255,7 +9426,7 @@ export class HTMLSelectElement extends HTMLElement {
   set size(value: number) {
     this.setAttribute("size", String(value));
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   /** The option at `index`, or null past the end. */
@@ -9998,7 +10169,7 @@ export class HTMLTextAreaElement extends HTMLElement {
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
+  get labels(): NodeListCtor {
     return labelsFor(this);
   }
   /** Which end the selection is anchored at, and so which way a shift-click extends it. */
@@ -10704,18 +10875,14 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  const d = parent.sv[P.P_DISPLAY];
-  if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
-    d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
-  // A display: contents box has no box of its own: its children are items of the container that
-  // does, so a whitespace-only run under it is decided there and an edit must restyle.
-  if (d === P.D_CONTENTS) {
-    for (let a = parent.parentNode; a !== null && a.nodeType === 1; a = a.parentNode) {
-      const ad = (a as Element).sv[P.P_DISPLAY];
-      if (ad === P.D_FLEX || ad === P.D_INLINE_FLEX || ad === P.D_GRID || ad === P.D_INLINE_GRID ||
-        ad === P.D_GRID_LANES || ad === P.D_INLINE_GRID_LANES) return true;
-      if (ad !== P.D_CONTENTS) break;
-    }
+  // A `display: contents` wrapper generates no box, so the text takes part in the formatting
+  // context of the nearest ancestor that does: that box decides whether whitespace renders.
+  let boxed: Node | null = parent;
+  while (boxed !== null && !boxed.isTextNode && boxed.sv[P.P_DISPLAY] === P.D_CONTENTS) boxed = boxed.parentNode;
+  if (boxed !== null) {
+    const d = boxed.sv[P.P_DISPLAY];
+    if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
+      d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   }
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
     if (a.firstLetterPseudo !== null || a.firstLetterFloat !== null) return true;
@@ -11889,6 +12056,8 @@ export function hasTransientActivation(): boolean {
 }
 
 export function dispatch(event: Event, target: Node): boolean {
+  if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+  if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
   event.dispatchFlag = true;
   event.windowCaptureRan = false;
   event.windowBubbleRan = false;
@@ -12447,6 +12616,8 @@ function dateApply(el: HTMLInputElement, vals: (number | null)[], active: number
   const next = text === null ? "" : text;
   if (next !== el.val) {
     el.val = next;
+    // A segment edit is the user's own, so the change event a commit sends follows from it.
+    el.userEdited = true;
     noteControlChange(el);
     dispatch(trusted(new InputEvent("input", { bubbles: true })), el);
   } else {
@@ -12573,6 +12744,21 @@ function parseFloatingPointNumber(text: string): number {
   if (i !== s.length) return NaN;
   const n = Number(s);
   return isFinite(n) ? n : NaN;
+}
+
+/** An email field's value: its newlines are stripped and the ends trimmed, and a multiple field
+ *  also trims each address. */
+function sanitizeEmailText(text: string, multiple: boolean): string {
+  const one = text.replace(/[\r\n]/g, "").trim();
+  if (!multiple) return one;
+  const out: string[] = [];
+  for (const a of one.split(",")) out.push(a.trim());
+  return out.join(",");
+}
+
+/** A url field's value: its tabs and newlines are removed and its ends trimmed. */
+function sanitizeUrlText(text: string): string {
+  return text.replace(/[\t\r\n]/g, "").trim();
 }
 
 /** The value a number field keeps of `text`: the number as written, or nothing when it names none. */
@@ -12737,6 +12923,8 @@ export class HTMLInputElement extends HTMLElement {
   anchor = 0;
   /** The value at focus or the last change event, for deciding when "change" fires. */
   committed = "";
+  /** Whether a user's typing changed the value since the last commit. */
+  userEdited = false;
   /** A checkbox's state. The box itself isn't drawn yet, but the property is the value frameworks set. */
   private checkedFlag = false;
   /** A checkbox whose state a script put between checked and unchecked. */
@@ -12824,8 +13012,13 @@ export class HTMLInputElement extends HTMLElement {
     // page put it, as a browser does; a framework that controls a field rewrites its value after
     // every keystroke, and moving the caret to the end there would send the next character to the
     // end of the field.
-    const text = String(v);
-    if (text === this.value) return;
+    let text = String(v);
+    // An email or url field keeps only what its value sanitization allows.
+    const fieldType = this.type.toLowerCase();
+    if (fieldType === "email" || fieldType === "url") {
+      text = fieldType === "email" ? sanitizeEmailText(text, this.multiple) : sanitizeUrlText(text);
+    }
+    if (text === this.val) return;
     moveValueRanges(this, 0, this.val.length, text.length);
     this.val = text;
     this.selStart = text.length;
@@ -12977,6 +13170,8 @@ export class HTMLInputElement extends HTMLElement {
     const declared = stepAttr === null ? 1 : Number(stepAttr);
     const step = isFinite(declared) && declared > 0 ? declared : 1;
     if (min > max) return;
+    // An empty field counts as zero, as the stepping algorithm has it; its bounds then clamp the
+    // result, so an unbounded field steps from zero and a bounded one lands on its bound.
     let current = this.val === "" ? (t === "range" ? spec.value : 0) : Number(this.val);
     if (isNaN(current)) current = t === "range" ? spec.value : 0;
     if (current < min || current > max) return;
@@ -13068,18 +13263,49 @@ export class HTMLInputElement extends HTMLElement {
   set accept(v: string) {
     this.setAttribute("accept", v);
   }
-  /** The files the field holds. Nothing opens a picker here, so this stays empty unless set. */
-  get files(): readonly File[] {
-    return this.fileList;
+  /** The files the field holds, which only a file field has: nothing opens a picker here, so
+   *  this stays empty unless a script sets it. */
+  get files(): readonly File[] | null {
+    return this.type.toLowerCase() === "file" ? this.fileList : null;
   }
   set files(list: readonly File[]) {
     this.fileList = list.slice();
   }
+  /** The datalist the list attribute names, or null when it names none. */
+  get list(): HTMLDataListElement | null {
+    const id = this.getAttribute("list");
+    if (id === null || id === "") return null;
+    // The list is the one in the tree the field is in: a field inside a shadow tree, a detached
+    // fragment, a detached element's subtree or another document finds the datalist there rather
+    // than one in the page around it.
+    const root = this.getRootNode();
+    let el: Element | null = null;
+    if (root instanceof DocumentFragment || root instanceof Document) {
+      el = root.getElementById(id);
+    } else if (root instanceof Element) {
+      // A detached subtree's root is the element the field was built in: look through it.
+      if (root.id === id) el = root;
+      else {
+        const all: Element[] = [];
+        collectElements(root, all);
+        for (const c of all) if (c.id === id) { el = c; break; }
+      }
+    }
+    return el instanceof HTMLDataListElement ? el : null;
+  }
+  /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
+  get defaultIndeterminate(): boolean {
+    return attributeFlag(this, "indeterminate");
+  }
+  set defaultIndeterminate(v: boolean) {
+    setAttributeFlag(this, "indeterminate", v);
+  }
   get form(): HTMLFormElement | null {
     return formOwnerFor(this);
   }
-  get labels(): HTMLLabelElement[] {
-    return labelsFor(this);
+  get labels(): NodeListCtor | null {
+    // An input in the hidden state has none; its retained list is emptied.
+    return this.type.toLowerCase() === "hidden" ? null : labelsFor(this);
   }
   get textLength(): number {
     return this.val.length;
@@ -13200,6 +13426,7 @@ export class HTMLInputElement extends HTMLElement {
     const e = this.selEnd;
     moveValueRanges(this, s, e - s, text.length);
     this.val = this.val.slice(0, s) + text + this.val.slice(e);
+    this.userEdited = true;
     this.moveCaret(s + text.length, false);
     noteControlChange(this);
     if (axChangeHook !== null) axChangeHook();
@@ -13226,10 +13453,23 @@ export class HTMLInputElement extends HTMLElement {
       } else if (String(value).trim().toLowerCase() === "number") {
         this.val = sanitizeNumberText(this.val);
         noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
+        noteControlChange(this);
+      } else if (String(value).trim().toLowerCase() === "url") {
+        this.val = sanitizeUrlText(this.val);
+        noteControlChange(this);
       }
       // A field that becomes a text field while focused starts showing the ring a text field
       // has, and one that stops being one loses it: :focus-visible follows the type change.
       if (focusState.el === this) refreshFocusVisible();
+    } else if (name === "multiple") {
+      super.setAttribute(name, value);
+      if (this.type.toLowerCase() === "email") {
+        this.val = sanitizeEmailText(this.val, this.multiple);
+        noteControlChange(this);
+      }
+      refreshAllLabels();
     } else if (name === "checked") {
       super.setAttribute(name, value);
       this.checked = true;
@@ -13316,12 +13556,13 @@ export class HTMLInputElement extends HTMLElement {
     return this.checkValidity();
   }
 
-  /** Fires "change" if the value differs from the last committed value. */
+  /** Fires "change" when a user's edit changed the value; a value a script set sends none. */
   commit(): void {
-    if (this.val !== this.committed) {
-      this.committed = this.val;
-      dispatch(trusted(new Event("change", { bubbles: true })), this);
-    }
+    const edited = this.userEdited;
+    const changed = this.val !== this.committed;
+    this.committed = this.val;
+    this.userEdited = false;
+    if (edited && changed) dispatch(trusted(new Event("change", { bubbles: true })), this);
   }
 }
 
@@ -15168,6 +15409,13 @@ export class FontFaceSet extends EventTarget {
   }
 }
 
+/** Marks an event createEvent() made: it stays uninitialized until initEvent() sets its type and
+ *  flags, and dispatching it before then is an InvalidStateError. */
+function uninitialized(event: Event): Event {
+  event.initialized = false;
+  return event;
+}
+
 export class Document extends Node {
   get [Symbol.toStringTag](): string { return "Document"; }
   documentElement: HTMLElement = newElementFor("html", "", "", [], 0, false);
@@ -15748,21 +15996,21 @@ export class Document extends Node {
     // The legacy interface table, and nothing else: only the names below are createable, and
     // each makes an event of the interface it names.
     const name = String(interfaceName).toLowerCase();
-    if (name === "event" || name === "events" || name === "htmlevents" || name === "svgevents") return new Event("");
-    if (name === "beforeunloadevent") return new BeforeUnloadEvent("");
-    if (name === "compositionevent") return new CompositionEvent("");
-    if (name === "customevent") return new CustomEvent("");
-    if (name === "devicemotionevent") return new DeviceMotionEvent("");
-    if (name === "deviceorientationevent") return new DeviceOrientationEvent("");
-    if (name === "dragevent") return new DragEvent("");
-    if (name === "focusevent") return new FocusEvent("");
-    if (name === "hashchangeevent") return new HashChangeEvent("");
-    if (name === "keyboardevent") return new KeyboardEvent("");
-    if (name === "messageevent") return new MessageEvent("");
-    if (name === "mouseevent" || name === "mouseevents") return new MouseEvent("");
-    if (name === "storageevent") return new StorageEvent("");
-    if (name === "textevent") return new TextEvent("");
-    if (name === "uievent" || name === "uievents") return new UIEvent("");
+    if (name === "event" || name === "events" || name === "htmlevents" || name === "svgevents") return uninitialized(new Event(""));
+    if (name === "beforeunloadevent") return uninitialized(new BeforeUnloadEvent(""));
+    if (name === "compositionevent") return uninitialized(new CompositionEvent(""));
+    if (name === "customevent") return uninitialized(new CustomEvent(""));
+    if (name === "devicemotionevent") return uninitialized(new DeviceMotionEvent(""));
+    if (name === "deviceorientationevent") return uninitialized(new DeviceOrientationEvent(""));
+    if (name === "dragevent") return uninitialized(new DragEvent(""));
+    if (name === "focusevent") return uninitialized(new FocusEvent(""));
+    if (name === "hashchangeevent") return uninitialized(new HashChangeEvent(""));
+    if (name === "keyboardevent") return uninitialized(new KeyboardEvent(""));
+    if (name === "messageevent") return uninitialized(new MessageEvent(""));
+    if (name === "mouseevent" || name === "mouseevents") return uninitialized(new MouseEvent(""));
+    if (name === "storageevent") return uninitialized(new StorageEvent(""));
+    if (name === "textevent") return uninitialized(new TextEvent(""));
+    if (name === "uievent" || name === "uievents") return uninitialized(new UIEvent(""));
     throw new Error(`NotSupportedError: Failed to execute 'createEvent' on 'Document': The provided event type ('${String(interfaceName)}') is invalid.`);
   }
 

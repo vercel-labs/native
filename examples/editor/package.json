@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-editor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/editor"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

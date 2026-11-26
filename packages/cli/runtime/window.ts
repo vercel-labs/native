@@ -3,7 +3,7 @@
 // can share them; the DOM reaches the window object through document.defaultView.
 
 import type { Element, EventListener, EventListenerOrEventListenerObject, ListenerOptions, ScrollToOptions, Selection, WindowEventMap } from "./dom.ts";
-import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, hasTransientActivation, consumeUserActivation, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
+import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, hasTransientActivation, consumeUserActivation, setCurrentEvent, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
 import { CSS } from "./cssom.ts";
 import { rasterScale } from "./device.ts";
 import * as domIface from "./dom.ts";
@@ -703,7 +703,10 @@ export class Window {
     if (listener === null) return;
     const capture = typeof options === "boolean" ? options : options !== undefined && options.capture === true;
     const once = typeof options === "object" && options !== null && options.once === true;
-    const passive = typeof options === "object" && options !== null && options.passive === true;
+    // A wheel or touch listener on the window is passive unless the options say otherwise.
+    const passive = typeof options === "object" && options !== null && options.passive !== undefined
+      ? options.passive === true
+      : type === "touchstart" || type === "touchmove" || type === "wheel" || type === "mousewheel";
     let list = this.listeners.get(type);
     if (list === undefined) {
       list = [];
@@ -768,11 +771,36 @@ export class Window {
 
   /** Dispatches an event at the window's listeners, without the document hearing it. */
   dispatchEvent(event: Event): boolean {
+    if (!(event instanceof Event)) throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
+    // The same state checks EventTarget.dispatchEvent makes: an event already dispatching, or one
+    // document.createEvent() made and never initialized, is an error.
+    if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+    if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
     // This is a dispatch of its own, even for an event that travelled through the page before:
     // its listeners hear it again, as EventTarget.dispatchEvent has it.
+    event.dispatchFlag = true;
     event.windowCaptureRan = false;
     event.windowBubbleRan = false;
-    dispatchWindow(event);
+    event.propagationStopped = false;
+    event.immediateStopped = false;
+    event.target = this as any;
+    event.currentTarget = this as any;
+    event.eventPhase = Event.AT_TARGET;
+    const outer = setCurrentEvent(event);
+    try {
+      dispatchWindow(event);
+    } finally {
+      // A listener that throws must not leave the dispatch's state behind: the outer event, the
+      // dispatch flag and the passive flag are put back whatever happened.
+      setCurrentEvent(outer);
+      event.eventPhase = Event.NONE;
+      event.currentTarget = null;
+      event.dispatchFlag = false;
+      event.passiveListener = false;
+      // Dispatch ends with the propagation flags clear, as the DOM's dispatch step has it.
+      event.propagationStopped = false;
+      event.immediateStopped = false;
+    }
     return !event.defaultPrevented;
   }
 
@@ -1132,8 +1160,10 @@ export function dispatchWindow(event: Event): void {
       // dispatch() runs the window's listeners for an event that travelled through the page;
       // a caller that sends that event on afterwards reaches only the phase dispatch left.
       if (entry.capture ? event.windowCaptureRan : event.windowBubbleRan) continue;
+      event.passiveListener = entry.passive;
       if (entry.fn !== null) entry.fn.call(window, event);
       else if (entry.object !== null) (entry.object as { handleEvent(event: Event): void }).handleEvent(event);
+      event.passiveListener = false;
       if (event.immediateStopped) return;
     }
   }

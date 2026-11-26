@@ -3,7 +3,7 @@
 // event the way a browser sends them. Structural keys (Enter, Tab, the arrows) and IME composition
 // are separate steps; this module is the text path shared by them.
 
-import { Element, InputEvent, Node, Range, Text, document, dispatch, trusted } from "./dom.ts";
+import { Element, Event, InputEvent, Node, Range, Text, document, dispatch, trusted } from "./dom.ts";
 import { invalidatePaint } from "./invalidation.ts";
 import { noteHostEdit } from "./editing-history.ts";
 
@@ -104,9 +104,28 @@ export function hasSelectionIn(host: Element): boolean {
   return range !== null && !range.collapsed;
 }
 
+/**
+ * How many text edits are in flight between moving the selection and sending their input event. A
+ * browser sends selectionchange after input, so a change the edit makes is held until then; a
+ * listener that reads editor state on selectionchange must see the state input updated.
+ */
+let editDepth = 0;
+let selectionChangePending = false;
+
+function noteSelectionChange(): void {
+  if (editDepth > 0) {
+    selectionChangePending = true;
+    return;
+  }
+  dispatch(trusted(new Event("selectionchange")), document);
+}
+
 function selectPoint(point: TextPoint): void {
   const sel = document.getSelection();
-  if (sel !== null) sel.collapse(point.node, point.offset);
+  if (sel === null) return;
+  sel.collapse(point.node, point.offset);
+  // A caret move in an editing host sends selectionchange, as a browser's does.
+  noteSelectionChange();
 }
 
 function selectOffsets(host: Element, from: number, to: number): void {
@@ -116,9 +135,11 @@ function selectOffsets(host: Element, from: number, to: number): void {
   if (sel === null) return;
   if (a === null || b === null) {
     sel.collapse(host, 0);
+    noteSelectionChange();
     return;
   }
   sel.setBaseAndExtent(a.node, a.offset, b.node, b.offset);
+  noteSelectionChange();
 }
 
 function beforeInput(host: Element, inputType: string, data: string | null): boolean {
@@ -137,6 +158,11 @@ function afterInput(host: Element, inputType: string, data: string | null): void
     inputType: inputType,
     data: data,
   })), host);
+  // The selection moved while the text changed; its change event follows input, as in a browser.
+  if (selectionChangePending) {
+    selectionChangePending = false;
+    dispatch(trusted(new Event("selectionchange")), document);
+  }
   invalidatePaint();
 }
 
@@ -158,11 +184,16 @@ export function insertTextInto(host: Element, text: string): boolean {
   noteHostEdit(host,
     offsetOfPoint(host, range.startContainer, range.startOffset),
     offsetOfPoint(host, range.endContainer, range.endOffset));
-  if (!range.collapsed) range.deleteContents();
-  const node = document.createTextNode(text);
-  range.insertNode(node);
-  selectPoint({ node: node, offset: node.data.length });
-  afterInput(host, "insertText", text);
+  editDepth++;
+  try {
+    if (!range.collapsed) range.deleteContents();
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    selectPoint({ node: node, offset: node.data.length });
+    afterInput(host, "insertText", text);
+  } finally {
+    editDepth--;
+  }
   return true;
 }
 
@@ -181,10 +212,15 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
     const toAt = offsetOfPoint(host, range.endContainer, range.endOffset);
     noteHostEdit(host, fromAt, toAt);
     const at = fromAt;
-    range.deleteContents();
-    const point = pointAtOffset(host, at);
-    if (point !== null) selectPoint(point); else sel.collapse(host, 0);
-    afterInput(host, inputType, null);
+    editDepth++;
+    try {
+      range.deleteContents();
+      const point = pointAtOffset(host, at);
+      if (point !== null) selectPoint(point); else sel.collapse(host, 0);
+      afterInput(host, inputType, null);
+    } finally {
+      editDepth--;
+    }
     return true;
   }
   // A collapsed caret: find the character on that side, if the host has one.
@@ -213,10 +249,15 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
   const b = pointAtOffset(host, to);
   if (a === null || b === null) return false;
   const cut = new Range(a.node, a.offset, b.node, b.offset);
-  cut.deleteContents();
-  const point = pointAtOffset(host, from);
-  if (point !== null) selectPoint(point); else sel.collapse(host, 0);
-  afterInput(host, inputType, null);
+  editDepth++;
+  try {
+    cut.deleteContents();
+    const point = pointAtOffset(host, from);
+    if (point !== null) selectPoint(point); else sel.collapse(host, 0);
+    afterInput(host, inputType, null);
+  } finally {
+    editDepth--;
+  }
   return true;
 }
 

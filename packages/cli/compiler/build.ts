@@ -2271,7 +2271,12 @@ export async function emitApp(built: AppBuild, out: string | null, dev: boolean 
     } else {
       how = `exit ${sc.status}`;
     }
-    die(`scriptc build failed: ${how}` + (first === "" ? "" : " — " + first));
+    // A listener that can't receive its event is reported as a variadic-function error inside a
+    // dependency, far from the line the app has to change; name the rule in the last line.
+    const listenerHint = /variadic function values stored as/.test(printed)
+      ? " (a function passed to addEventListener must name its event parameter; see compiler-limitations.md)"
+      : "";
+    die(`scriptc build failed: ${how}` + (first === "" ? "" : " — " + first + listenerHint));
   }
 
   // The app's own files, the page's tables, and the macOS wrapper that makes them a Finder app.

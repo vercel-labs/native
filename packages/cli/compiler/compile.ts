@@ -1205,9 +1205,10 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const isRoot = el === htmlEl;
     return rules.some((r) => r.selectors.some((s) => s.pseudo === kind &&
       (name === null || s.pseudoName === name) &&
-      (s.tagNs !== undefined || s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
-      // A class prefix can't be screened out here: the box is made and the rule's conditions
-      // decide at runtime whether it draws anything.
+      // The local name counts whatever namespace the selector names (the namespace itself is not
+      // screened here), and a class prefix can't be screened at all: the box is made and the
+      // rule's conditions decide at runtime whether it draws anything.
+      (s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
       ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(c)))));
   };
 
@@ -1369,7 +1370,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     if (before) addPseudo(idx, P.PE_BEFORE);
     // A text field's ::placeholder carries the style its placeholder text is drawn with. The box
     // itself never lays out or paints; the field reads the style when it draws the text.
-    const placeholder = localTag === "input" && hasPseudoRule(el, P.PE_PLACEHOLDER);
+    const placeholder = (localTag === "input" || localTag === "textarea") && hasPseudoRule(el, P.PE_PLACEHOLDER);
     if (placeholder) addPseudo(idx, P.PE_PLACEHOLDER);
     // A dialog's ::backdrop is painted by the top layer, never in the flow; the UA sheet gives it
     // display: none so that it takes no room here.
@@ -1679,7 +1680,9 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         if (sel.host === true || sel.slotted === true) continue;
         // A ::highlight() carrier takes the rules of its own name only.
         if (pseudo === P.PE_HIGHLIGHT && sel.pseudoName !== node.pseudoName) continue;
-        if (sel.tag && sel.tagNs === undefined && sel.tag !== origin.tag) continue;
+        // A selector's local name has to match the element's whatever namespace it names: the
+        // namespace itself is not screened here, so "*|a" still names anchors only.
+        if (sel.tag && sel.tag !== origin.tag) continue;
         if (sel.root && at !== rootIdx) continue;
         if (!markupMayChange && sel.id !== null && sel.id !== origin.id) continue;
         if (!plausible(sel)) continue;
