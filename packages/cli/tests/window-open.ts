@@ -35,22 +35,30 @@ const exe = join(dir, "app");
 const build = spawnSync("node", ["compiler/cli.ts", "build", dir, "-o", exe], { encoding: "utf8" });
 if (build.status !== 0) throw new Error(`build failed\n${build.stderr}`);
 
-const env: NodeJS.ProcessEnv = { ...process.env, NATIVE_STEPS: "frame 0 | clickat 10 10" };
-delete env.NATIVE_SNAPSHOT;
-const r = spawnSync(exe, [], { encoding: "utf8", env });
-if (r.status !== 0) throw new Error(`run failed\n${r.stderr}`);
-
-const EXPECTED = ["load=null", "click=window"];
-const got = r.stdout.split("\n").slice(0, -1);
-for (const line of got) console.log(`     got ${JSON.stringify(line)}`);
 let failed = 0;
 function check(name: string, ok: boolean, detail = ""): void {
   if (!ok) failed++;
   console.log(`${ok ? "ok  " : "FAIL"} ${name}${ok || detail === "" ? "" : ` — ${detail}`}`);
 }
-check(`lines (${EXPECTED.length})`, got.length === EXPECTED.length, `got ${got.length}`);
-for (let i = 0; i < Math.min(got.length, EXPECTED.length); i++) {
-  check(EXPECTED[i], got[i] === EXPECTED[i], `got ${JSON.stringify(got[i])}`);
+
+// The click a pointer sends and the press an accessibility client's activation sends are both the
+// user's input: the same page run each way must open its window, with the load-time call blocked
+// in both.
+function run(step: string): void {
+  const env: NodeJS.ProcessEnv = { ...process.env, NATIVE_STEPS: `frame 0 | ${step}` };
+  delete env.NATIVE_SNAPSHOT;
+  const r = spawnSync(exe, [], { encoding: "utf8", env });
+  if (r.status !== 0) throw new Error(`run failed\n${r.stderr}`);
+  const EXPECTED = ["load=null", "click=window"];
+  const got = r.stdout.split("\n").slice(0, -1);
+  for (const line of got) console.log(`     got ${JSON.stringify(line)}`);
+  check(`${step}: lines (${EXPECTED.length})`, got.length === EXPECTED.length, `got ${got.length}`);
+  for (let i = 0; i < Math.min(got.length, EXPECTED.length); i++) {
+    check(`${step}: ${EXPECTED[i]}`, got[i] === EXPECTED[i], `got ${JSON.stringify(got[i])}`);
+  }
 }
+
+run("clickat 10 10");
+run("axpress #hit");
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

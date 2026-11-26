@@ -477,6 +477,9 @@ export function pointerMove(x: number, y: number, mods: number = 0): void {
  */
 export function pressElement(el: Element): void {
   if (!el.isConnected || inDisabledFormControl(el)) return;
+  // A press from an accessibility client is the user's own input, as a pointer press is: it counts
+  // as a gesture, so a control it activates may open a window as a clicked one can.
+  noteUserActivation();
   noteInput("pointer");
   const r = el.getBoundingClientRect();
   const x = r.x + r.width / 2;
