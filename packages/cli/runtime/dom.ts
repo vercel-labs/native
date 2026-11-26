@@ -9763,6 +9763,11 @@ export class HTMLTextAreaElement extends HTMLElement {
   set value(value: any) {
     const text = String(value);
     const old = this.textContent;
+    // Writing the text the field already holds changes nothing, and leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    if (text === old) return;
     this.writeText(text, 0, old.length, text.length);
     this.selectionStart = text.length;
     this.selectionEnd = text.length;
@@ -10567,11 +10572,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -12593,13 +12594,18 @@ export class HTMLInputElement extends HTMLElement {
       noteControlChange(this);
       return;
     }
-    // A whole-value write is a replace of the field's text to a live value range; writing the
-    // same text changes nothing.
-    if (v !== this.val) moveValueRanges(this, 0, this.val.length, v.length);
-    this.val = v;
-    this.selStart = v.length;
-    this.selEnd = v.length;
-    this.anchor = v.length;
+    // A whole-value write is a replace of the field's text to a live value range. Writing the
+    // text the field already holds changes nothing, and in particular leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    const text = String(v);
+    if (text === this.value) return;
+    moveValueRanges(this, 0, this.val.length, text.length);
+    this.val = text;
+    this.selStart = text.length;
+    this.selEnd = text.length;
+    this.anchor = text.length;
     // A value decides whether a placeholder shows, whether the field is valid, and its range.
     noteControlChange(this);
   }
