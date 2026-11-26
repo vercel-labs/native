@@ -118,9 +118,13 @@ export interface UIEventInit extends EventInit {
 export class UIEvent extends Event {
   get [Symbol.toStringTag](): string { return "UIEvent"; }
   readonly detail: number;
+  /** The window an event from a view belongs to; null for one a script constructs, as Chrome's. */
+  readonly view: any;
   constructor(...args: any[]) {
     super(eventTypeArg(args), eventInitArg(args));
-    this.detail = dictLong(eventInitArg(args), "detail", 0);
+    const init = eventInitArg(args);
+    this.detail = dictLong(init, "detail", 0);
+    this.view = init.view === undefined || init.view === null ? null : init.view;
   }
 }
 
@@ -147,6 +151,9 @@ export class MouseEvent extends UIEvent {
   readonly screenY: number;
   readonly clientX: number;
   readonly clientY: number;
+  /** The position in the document: the viewport position plus the page's scroll, as a browser's. */
+  readonly pageX: number;
+  readonly pageY: number;
   readonly movementX: number;
   readonly movementY: number;
   readonly button: number;
@@ -171,6 +178,9 @@ export class MouseEvent extends UIEvent {
     this.screenY = dictDouble(init, "screenY", 0);
     this.clientX = dictDouble(init, "clientX", 0);
     this.clientY = dictDouble(init, "clientY", 0);
+    const scroller = document.scrollingElement;
+    this.pageX = this.clientX + (scroller === null ? 0 : scroller.scrollLeft);
+    this.pageY = this.clientY + (scroller === null ? 0 : scroller.scrollTop);
     this.movementX = dictDouble(init, "movementX", 0);
     this.movementY = dictDouble(init, "movementY", 0);
     this.button = dictLong(init, "button", 0);
