@@ -2580,6 +2580,14 @@ export class Node extends EventTarget {
   fixedViewport = false;
   /** When this element last scrolled (ms), for showing the overlay scrollbar. */
   lastScroll = -1e9;
+  /**
+   * The lines a line-clamp ancestor still allows this box (CSS Overflow 4): a flow from a
+   * clamped box passes down what is left of its budget, -1 when there is none.
+   */
+  clampBudget = -1;
+  /** Whether the flow goes on past this box, so its last kept line ends in an ellipsis even when
+   *  the line itself fits the budget (CSS Overflow 4's block-ellipsis). */
+  clampEllipsis = false;
   lines: string[] = [];
   lineWidths: number[] = [];
   /** The first line's `text-indent`, which shifts it and narrows it in the content box. */

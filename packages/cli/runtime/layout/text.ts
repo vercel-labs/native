@@ -863,6 +863,29 @@ function ownTextMinWidth(el: Node): number {
  * Cuts `text` back so that it and an ellipsis fit in `avail`. The ellipsis is drawn where the
  * clipped line ends, as `text-overflow: ellipsis` asks.
  */
+/**
+ * The line a clamp ends: the text is cut at a word boundary, so the ellipsis follows the last
+ * whole word that fits, as Chrome's block-ellipsis does. A cut that already lands on a break
+ * keeps every word.
+ */
+export function ellipsizeWords(el: Node, text: string, avail: number): string {
+  const ell = "\u2026";
+  if (textWidth(el, ell) > avail) return ell;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (textWidth(el, text.slice(0, mid) + ell) <= avail) lo = mid;
+    else hi = mid - 1;
+  }
+  let end = lo;
+  if (end > 0 && end < text.length && text[end] !== " " && text[end - 1] !== " ") {
+    const sp = text.lastIndexOf(" ", end);
+    if (sp > 0) end = sp;
+  }
+  return text.slice(0, end).replace(/ +$/, "") + ell;
+}
+
 export function ellipsize(el: Node, text: string, avail: number): string {
   const ell = "\u2026";
   if (textWidth(el, ell) > avail) return ell;
@@ -1025,15 +1048,24 @@ export function wrapText(el: Node, maxWidth: number): void {
   // `auto` keeps as many lines as the box's max-height holds instead.
   let clamp = el.sv[P.P_LINE_CLAMP];
   if (clamp < 0) clamp = autoClamp(el);
-  if (clamp > 0 && el.lines.length > clamp) {
-    el.lines.length = clamp;
-    el.lineWidths.length = clamp;
-    el.lineForced.length = clamp;
+  // A clamped ancestor counts the lines of its whole flow: what is left of its budget caps this
+  // box, and a box the budget has run out on makes no lines at all (CSS Overflow 4).
+  if (el.clampBudget >= 0 && (clamp <= 0 || el.clampBudget < clamp)) clamp = el.clampBudget;
+  if (clamp === 0 && el.clampBudget === 0) {
+    el.lines.length = 0;
+    el.lineWidths.length = 0;
+    el.lineForced.length = 0;
+  } else if (clamp > 0 && (el.lines.length > clamp || (el.lines.length === clamp && el.clampEllipsis))) {
+    if (el.lines.length > clamp) {
+      el.lines.length = clamp;
+      el.lineWidths.length = clamp;
+      el.lineForced.length = clamp;
+    }
     // block-ellipsis: no-ellipsis keeps the last line as it is, without the ellipsis.
     if (el.sv[P.P_BLOCK_ELLIPSIS] !== P.BE_NO_ELLIPSIS) {
       const i = clamp - 1;
       const avail = maxWidth - (i === 0 ? indent : 0);
-      el.lines[i] = ellipsize(el, el.lines[i], avail);
+      el.lines[i] = ellipsizeWords(el, el.lines[i], avail);
       el.lineWidths[i] = textWidth(el, el.lines[i]);
     }
   }

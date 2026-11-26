@@ -1974,7 +1974,10 @@ export function layoutInlinePieces(el: Node, pieces: Piece[], innerW: number, pl
     }
     let clamp = el.sv[P.P_LINE_CLAMP];
     if (clamp < 0) clamp = autoClamp(el);
+    // A clamped ancestor's budget caps the count: the lines past it make nothing at all.
+    if (el.clampBudget >= 0 && (clamp <= 0 || el.clampBudget < clamp)) clamp = el.clampBudget;
     if (clamp > 0) lines = clampLines(el, lines, clamp, innerW, indent, avails);
+    else if (clamp === 0 && el.clampBudget === 0) lines.length = 0;
     // Where each cleared line has to start: below the floats its break clears, in the run's own
     // coordinates. The floats are all placed before the run is laid out, so they don't move.
     const clears: number[] = [];

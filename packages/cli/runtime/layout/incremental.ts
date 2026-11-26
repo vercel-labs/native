@@ -163,6 +163,8 @@ const pending: Node[] = [];
  */
 export function reuseLayout(el: Node, cbW: number, cbH: number, fixedW: number, fixedH: number, shrink: boolean,
   autoHeight: boolean | undefined, inFlow: boolean, mgP: number, mgN: number): boolean {
+  // A box under a clamp is laid out against a budget its cached inputs don't record.
+  if (el.clampBudget >= 0 || el.clampEllipsis) return false;
   if (forceFull || el === forceNode || el.lN === 0) return false;
   // The frame a box sits in comes from its parent (or, out of flow, from the positioned pass,
   // which sets it before the call), and either may have turned since.
