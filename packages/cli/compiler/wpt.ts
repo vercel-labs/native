@@ -677,7 +677,8 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
     if (mode === "template") {
       if (ch === "\\" && i + 1 < text.length) { out += ch + text[i + 1]; i += 2; continue; }
       if (ch === "`") { modes.pop(); out += ch; i++; continue; }
-      if (ch === "$" && text[i + 1] === "{") { out += "${"; modes.push("code"); braces.push(0); i += 2; continue; }
+      // An interpolation starts an expression: a slash at its start may begin a regular expression.
+      if (ch === "$" && text[i + 1] === "{") { out += "${"; modes.push("code"); braces.push(0); regexOk = true; i += 2; continue; }
       out += ch;
       i++;
       continue;
@@ -699,10 +700,10 @@ function replaceIdentifier(text: string, name: string, replacement: string): str
     if (ch === "{") { braces[braces.length - 1]++; out += ch; i++; regexOk = true; continue; }
     if (ch === "}") {
       if (braces[braces.length - 1] > 0) braces[braces.length - 1]--;
-      else if (modes.length > 1) { modes.pop(); braces.pop(); }
+      else if (modes.length > 1) { modes.pop(); braces.pop(); regexOk = false; }
       out += ch;
       i++;
-      regexOk = true;
+      if (modes[modes.length - 1] === "code") regexOk = true;
       continue;
     }
     if (ch === "(") {

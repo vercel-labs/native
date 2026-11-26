@@ -48,6 +48,10 @@ test(function () {
   assert_true(matched, "the regular expression after an if condition keeps its text");
 }, "a regular expression right after an if condition");
 test(function () {
+  var hit = \`\${/aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest")}\`;
+  assert_equals(hit, "true", "the pattern at the start of an interpolation keeps its text");
+}, "a regular expression at the start of a template interpolation");
+test(function () {
   var pattern = /aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/;
   assert_true(pattern.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest"), "the regular expression keeps its text");
 }, "a regular expression keeps its own text");
