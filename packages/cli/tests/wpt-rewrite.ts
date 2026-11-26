@@ -83,5 +83,12 @@ same("shorthand binding", `var { ${LONG} } = o;`, `var { ${LONG}: ${SHORT} } = o
 same("shorthand binding with a default", `var { ${LONG} = 1 } = o;`, `var { ${LONG}: ${SHORT} = 1 } = o;`);
 same("shorthand inside a nested pattern", `var { a: { ${LONG} } } = o;`, `var { a: { ${LONG}: ${SHORT} } } = o;`);
 
+// An array element and a rest binding spell only a variable, so they are renamed without a key.
+same("array element", `var [${LONG}] = a;`, `var [${SHORT}] = a;`);
+same("array element with a default", `var [${LONG} = 1] = a;`, `var [${SHORT} = 1] = a;`);
+same("second array element", `var [x, ${LONG}] = a;`, `var [x, ${SHORT}] = a;`);
+same("array rest", `var [...${LONG}] = a;`, `var [...${SHORT}] = a;`);
+same("object rest", `var { ...${LONG} } = o;`, `var { ...${SHORT} } = o;`);
+
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

@@ -35,7 +35,8 @@
     "@scriptc/node": "^0.4.16",
     "@scriptc/types": "^0.4.16",
     "esbuild": "^0.27.7",
-    "scriptc": "^0.4.16"
+    "scriptc": "^0.4.16",
+    "typescript": "^5.8.3"
   },
   "optionalDependencies": {
     "@native-sdk/angle-win32-x64": "workspace:*",
@@ -50,8 +51,7 @@
     "@scriptc/libnode-linux-x64-gnu": "^0.4.16"
   },
   "devDependencies": {
-    "@types/node": "^22.15.21",
-    "typescript": "^5.8.3"
+    "@types/node": "^22.15.21"
   },
   "repository": {
     "type": "git",

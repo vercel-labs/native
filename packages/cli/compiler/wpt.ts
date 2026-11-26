@@ -18,7 +18,8 @@ import { dirname, join, relative, resolve, extname, basename } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { homedir, availableParallelism, freemem } from "node:os";
-import * as ts from "typescript";
+import { createRequire } from "node:module";
+import type * as ts from "typescript";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { Diagnostics, type Diagnostic } from "./diagnostics.ts";
@@ -586,6 +587,19 @@ function isModuleText(text: string): boolean {
 }
 
 /**
+ * TypeScript's parser does the lexing for the rewrite below. The CLI depends on it, but only the
+ * WPT runner needs it, so it is loaded the first time a page's names are rewritten: `native build`
+ * does not pay for it, and the published bundle keeps no import of it at the top.
+ */
+let typescriptModule: typeof import("typescript") | undefined;
+function typescript(): typeof import("typescript") {
+  if (typescriptModule === undefined) {
+    typescriptModule = createRequire(import.meta.url)("typescript") as typeof import("typescript");
+  }
+  return typescriptModule;
+}
+
+/**
  * Rewrites the identifiers a script's parse reports, and only those: a comment, a string, a
  * template's text and a regular expression are not identifiers, so what they spell keeps its
  * value. TypeScript's own parser does the lexing, because a scanner alone cannot tell a regular
@@ -593,10 +607,11 @@ function isModuleText(text: string): boolean {
  * those, so its tree carries the answer.
  */
 function rewriteIdentifiers(text: string, short: Map<string, string>): string {
-  const file = ts.createSourceFile("page.js", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const api = typescript();
+  const file = api.createSourceFile("page.js", text, api.ScriptTarget.Latest, true, api.ScriptKind.JS);
   const edits: { start: number; end: number; text: string }[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && !isPropertyName(node)) {
+    if (api.isIdentifier(node) && !isPropertyName(node)) {
       const replacement = short.get(node.text);
       if (replacement !== undefined) {
         // A shorthand spells its key with the variable's name: renaming the variable would rename
@@ -606,7 +621,7 @@ function rewriteIdentifiers(text: string, short: Map<string, string>): string {
         edits.push({ start: node.getStart(file), end: node.getEnd(), text });
       }
     }
-    ts.forEachChild(node, visit);
+    api.forEachChild(node, visit);
   };
   visit(file);
   if (edits.length === 0) return text;
@@ -620,27 +635,33 @@ function rewriteIdentifiers(text: string, short: Map<string, string>): string {
 }
 
 /** Whether the identifier is a shorthand, `{b}` or `{b = 1}`, where the name is the property key
- *  and the variable at once — in an object literal, or in a destructuring pattern. */
+ *  and the variable at once — in an object literal, or in an object destructuring pattern. An array
+ *  element and a rest binding spell only a variable: a colon there would not be a pattern. */
 function isShorthand(node: ts.Identifier): boolean {
+  const api = typescript();
   const parent = node.parent;
   if (parent === undefined) return false;
-  if (ts.isShorthandPropertyAssignment(parent) && parent.name === node) return true;
-  if (ts.isBindingElement(parent) && parent.propertyName === undefined && parent.name === node) return true;
+  if (api.isShorthandPropertyAssignment(parent) && parent.name === node) return true;
+  if (api.isBindingElement(parent) && parent.propertyName === undefined && parent.name === node) {
+    return parent.dotDotDotToken === undefined && parent.parent !== undefined &&
+      api.isObjectBindingPattern(parent.parent);
+  }
   return false;
 }
 
 /** Whether the identifier is a property's own name, which a string elsewhere spells (`a.b`,
  *  `{b: 1}`, `{b() {}}`): a name a rename cannot move, because nothing beside it moves with it. */
 function isPropertyName(node: ts.Identifier): boolean {
+  const api = typescript();
   const parent = node.parent;
   if (parent === undefined) return false;
-  if (ts.isPropertyAccessExpression(parent) && parent.name === node) return true;
-  if (ts.isPropertyAssignment(parent) && parent.name === node) return true;
-  if (ts.isMethodDeclaration(parent) && parent.name === node) return true;
-  if (ts.isGetAccessorDeclaration(parent) && parent.name === node) return true;
-  if (ts.isSetAccessorDeclaration(parent) && parent.name === node) return true;
-  if (ts.isPropertyDeclaration(parent) && parent.name === node) return true;
-  if (ts.isBindingElement(parent) && parent.propertyName === node) return true;
+  if (api.isPropertyAccessExpression(parent) && parent.name === node) return true;
+  if (api.isPropertyAssignment(parent) && parent.name === node) return true;
+  if (api.isMethodDeclaration(parent) && parent.name === node) return true;
+  if (api.isGetAccessorDeclaration(parent) && parent.name === node) return true;
+  if (api.isSetAccessorDeclaration(parent) && parent.name === node) return true;
+  if (api.isPropertyDeclaration(parent) && parent.name === node) return true;
+  if (api.isBindingElement(parent) && parent.propertyName === node) return true;
   return false;
 }
 

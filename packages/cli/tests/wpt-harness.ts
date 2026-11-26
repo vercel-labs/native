@@ -62,6 +62,16 @@ test(function () {
   assert_equals(aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest, 9, "the destructured name keeps the key");
 }, "a shorthand binding keeps its key");
 test(function () {
+  var list = [4, 5];
+  var [aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest] = list;
+  assert_equals(aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest, 4, "the array element binds the variable");
+}, "an array destructuring renames its variable");
+test(function () {
+  var box = { a: 1, b: 2 };
+  var { ...aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest } = box;
+  assert_equals(aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest.a, 1, "the rest binding renames its variable");
+}, "an object rest renames its variable");
+test(function () {
   var pattern = /aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest/;
   assert_true(pattern.test("aFunctionNamedWithAVeryLongIdentifierForTheHarnessTest"), "the regular expression keeps its text");
 }, "a regular expression keeps its own text");
