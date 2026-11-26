@@ -18,6 +18,7 @@ import { dirname, join, relative, resolve, extname, basename } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { homedir, availableParallelism, freemem } from "node:os";
+import * as ts from "typescript";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { Diagnostics, type Diagnostic } from "./diagnostics.ts";
@@ -585,181 +586,69 @@ function isModuleText(text: string): boolean {
 }
 
 /**
+ * Rewrites the identifiers a script's parse reports, and only those: a comment, a string, a
+ * template's text and a regular expression are not identifiers, so what they spell keeps its
+ * value. TypeScript's own parser does the lexing, because a scanner alone cannot tell a regular
+ * expression from a division or a template's text from its interpolations — the parser rescans for
+ * those, so its tree carries the answer.
+ */
+function rewriteIdentifiers(text: string, short: Map<string, string>): string {
+  const file = ts.createSourceFile("page.js", text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const edits: { start: number; end: number; text: string }[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && !isPropertyName(node)) {
+      const replacement = short.get(node.text);
+      if (replacement !== undefined) edits.push({ start: node.getStart(file), end: node.getEnd(), text: replacement });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  if (edits.length === 0) return text;
+  let out = "";
+  let pos = 0;
+  for (const edit of edits) {
+    out += text.slice(pos, edit.start) + edit.text;
+    pos = edit.end;
+  }
+  return out + text.slice(pos);
+}
+
+/** Whether the identifier is a property's own name, which a string elsewhere spells (`a.b`,
+ *  `{b: 1}`, `{b() {}}`): a name a rename cannot move, because nothing beside it moves with it. */
+function isPropertyName(node: ts.Identifier): boolean {
+  const parent = node.parent;
+  if (parent === undefined) return false;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) return true;
+  if (ts.isPropertyAssignment(parent) && parent.name === node) return true;
+  if (ts.isMethodDeclaration(parent) && parent.name === node) return true;
+  if (ts.isGetAccessorDeclaration(parent) && parent.name === node) return true;
+  if (ts.isSetAccessorDeclaration(parent) && parent.name === node) return true;
+  if (ts.isPropertyDeclaration(parent) && parent.name === node) return true;
+  if (ts.isBindingElement(parent) && parent.propertyName === node) return true;
+  return false;
+}
+
+/**
  * scriptc loses a binding whose name is longer than about fifty characters: a function declared
  * under one is not callable from another script of the page, and the reference reads as an
  * undefined global. A page's scripts have such names shortened, consistently, before they are
  * compiled, so the page runs.
  */
-/** Whether the character can be part of an identifier. */
-function identChar(ch: string): boolean {
-  return /[A-Za-z0-9_$]/.test(ch);
-}
-
-/** The keywords a regular expression can follow: `return /re/`, `typeof /re/`, `x in /re/`. */
-const REGEX_KEYWORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete",
-  "void", "do", "else", "yield", "await", "case", "throw"]);
-
-/** The keywords whose parenthesized condition may be followed by a regular expression:
- *  `if (x) /re/.test(y)` is valid JavaScript, and the slash after the ")" is not a division. */
-const CONDITION_KEYWORDS = new Set(["if", "while", "for", "with"]);
-
-/** The word that ends the code copied so far, for telling `if (` from a call. */
-function wordBefore(out: string): string {
-  let j = out.length - 1;
-  while (j >= 0 && (out[j] === " " || out[j] === "\t" || out[j] === "\n" || out[j] === "\r")) j--;
-  let k = j;
-  while (k >= 0 && identChar(out[k])) k--;
-  return out.slice(k + 1, j + 1);
-}
-
-/** The end of the regular expression that starts at `start`, or `start` when the slash is a
- *  division: a regular expression ends at the first unescaped slash outside a character class,
- *  before any newline, and its flags follow. */
-function regexEnd(text: string, start: number): number {
-  let i = start + 1;
-  let inClass = false;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === "\n") return start;
-    if (ch === "\\") { i += 2; continue; }
-    if (inClass) {
-      if (ch === "]") inClass = false;
-      i++;
-      continue;
-    }
-    if (ch === "[") { inClass = true; i++; continue; }
-    if (ch === "/") {
-      i++;
-      while (i < text.length && identChar(text[i])) i++;
-      return i;
-    }
-    i++;
-  }
-  return start;
-}
-
-/**
- * Replaces a name where it is a reference in code: not in a string, a template literal's text, a
- * comment, or a regular expression, any of which keeps the text that spells it. A template's
- * `${…}` is code again, and so is the inside of that.
- */
-function replaceIdentifier(text: string, name: string, replacement: string): string {
-  let out = "";
-  // The rewrite walks the script the way a lexer does: a stack of what the next character is part
-  // of, and the brace depth of each piece of code it is in (a template's interpolation is code
-  // inside a template's text).
-  const modes: string[] = ["code"];
-  const braces: number[] = [0];
-  // The parens inside code, 1 when the "(" opened an if/while/for/with condition: the ")" that
-  // closes that one may be followed by a regular expression, as `if (x) /re/.test(y)` is.
-  const parens: number[] = [];
-  // Whether a regular expression may start at the next slash: after an operator or an opening
-  // bracket, and not after a value.
-  let regexOk = true;
-  let i = 0;
-  while (i < text.length) {
-    const mode = modes[modes.length - 1];
-    const ch = text[i];
-    if (mode === "comment") {
-      out += ch;
-      if (ch === "\n") modes.pop();
-      i++;
-      continue;
-    }
-    if (mode === "'" || mode === '"') {
-      // A string ends at the quote that opened it: an apostrophe inside "…" is text, not the end.
-      out += ch;
-      if (ch === "\\" && i + 1 < text.length) { out += text[i + 1]; i += 2; continue; }
-      if (ch === mode) modes.pop();
-      i++;
-      continue;
-    }
-    if (mode === "template") {
-      if (ch === "\\" && i + 1 < text.length) { out += ch + text[i + 1]; i += 2; continue; }
-      if (ch === "`") { modes.pop(); out += ch; i++; continue; }
-      // An interpolation starts an expression: a slash at its start may begin a regular expression.
-      if (ch === "$" && text[i + 1] === "{") { out += "${"; modes.push("code"); braces.push(0); regexOk = true; i += 2; continue; }
-      out += ch;
-      i++;
-      continue;
-    }
-    if (ch === "/" && text[i + 1] === "/") { out += "//"; modes.push("comment"); i += 2; continue; }
-    if (ch === "/" && text[i + 1] === "*") {
-      const close = text.indexOf("*/", i + 2);
-      const stop = close < 0 ? text.length : close + 2;
-      out += text.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "/" && regexOk) {
-      const stop = regexEnd(text, i);
-      if (stop > i) { out += text.slice(i, stop); i = stop; regexOk = false; continue; }
-    }
-    if (ch === "'" || ch === '"') { out += ch; modes.push(ch); i++; regexOk = false; continue; }
-    if (ch === "`") { out += ch; modes.push("template"); i++; regexOk = false; continue; }
-    if (ch === "{") { braces[braces.length - 1]++; out += ch; i++; regexOk = true; continue; }
-    if (ch === "}") {
-      if (braces[braces.length - 1] > 0) braces[braces.length - 1]--;
-      else if (modes.length > 1) { modes.pop(); braces.pop(); regexOk = false; }
-      out += ch;
-      i++;
-      if (modes[modes.length - 1] === "code") regexOk = true;
-      continue;
-    }
-    if (ch === "(") {
-      parens.push(CONDITION_KEYWORDS.has(wordBefore(out)) ? 1 : 0);
-      out += ch;
-      i++;
-      regexOk = true;
-      continue;
-    }
-    if (ch === ")") {
-      out += ch;
-      i++;
-      regexOk = parens.length > 0 && parens.pop() === 1;
-      continue;
-    }
-    if (ch === "]") { out += ch; i++; regexOk = false; continue; }
-    if (ch === "/") { out += ch; i++; regexOk = true; continue; }
-    if (identChar(ch)) {
-      if (text.startsWith(name, i) && (i === 0 || text[i - 1] !== ".") &&
-        (i + name.length >= text.length || !identChar(text[i + name.length]))) {
-        out += replacement;
-        i += name.length;
-        regexOk = false;
-        continue;
-      }
-      let j = i;
-      while (j < text.length && identChar(text[j])) j++;
-      const word = text.slice(i, j);
-      out += word;
-      i = j;
-      regexOk = REGEX_KEYWORDS.has(word);
-      continue;
-    }
-    if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") { out += ch; i++; continue; }
-    out += ch;
-    i++;
-    regexOk = true;
-  }
-  return out;
-}
-
-function renameLongIdentifiers(text: string): string {
+export function renameLongIdentifiers(text: string): string {
   const names = new Set<string>();
   const re = /[A-Za-z_$][A-Za-z0-9_$]{44,}/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) names.add(m[0]);
   if (names.size === 0) return text;
-  let out = text;
+  // The short name is derived from the long one, so every script of the page shortens it the same
+  // way and a call from one script reaches the declaration in another.
+  const short = new Map<string, string>();
   for (const name of names) {
-    // The short name is derived from the long one, so every script of the page shortens it the
-    // same way and a call from one script reaches the declaration in another.
     let h = 0;
     for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-    out = replaceIdentifier(out, name, `__w${h.toString(36)}`);
+    short.set(name, `__w${h.toString(36)}`);
   }
-  return out;
+  return rewriteIdentifiers(text, short);
 }
 
 /**
