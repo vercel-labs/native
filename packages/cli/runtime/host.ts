@@ -101,6 +101,8 @@ export declare function hostEventPhase(): number;
 export declare function hostRefreshInterval(): number;
 /** How long until the display's next refresh in milliseconds; 0 when the host has no clock. */
 export declare function hostUntilRefresh(): number;
+/** Whether a canvas in the window presents through GL, whose swap waits for the display. */
+export declare function hostGlWindow(): number;
 export declare function hostEventX(): number;
 export declare function hostEventY(): number;
 export declare function hostViewWidth(): number;

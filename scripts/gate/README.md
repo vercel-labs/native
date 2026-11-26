@@ -23,6 +23,12 @@ in the diff.
 | 1. Smoothness | p95 frame time ≤ 16.7 ms on every example, scrolling, animating, and in the three.js scenes | each app runs headlessly with `NATIVE_FRAME_TIMES=1` through 240 frames 16 ms apart plus wheel steps, and the host's per-frame composite time is added to the runtime's stages |
 | 2a. HTML/CSS | pass rate on a fixed WPT subset | `native wpt run` over the directories and revision in `bars.json`, in a checkout of its own under the output directory |
 | 2b. Chrome diff | how much of each example's first frame Chrome would draw the same way | the app is bundled for the browser with the esbuild the CLI already depends on, loaded from a directory holding the app and its files, screenshotted at the page's own window size at 2×, and compared with the native snapshot pixel by pixel |
+
+An example whose frame is animation content rather than a rendering rule is reported but not judged:
+`chrome.timingSensitive` in `bars.json` lists them, with the reason in `chrome.timingSensitiveNote`.
+`canvas-particles` is one — its field is seeded and its primitives probe equal to Chrome's, but every
+mote moves each frame, so a pixel or two of accumulated motion moves most of the differing pixels
+and the score varies run to run.
 | 3. Compile time | cold and warm `native build` per example | the app's own build record and build cache removed for the cold build, with the compiler's cache primed once at the start of the run so each number is the app's own compile; the phase times come from the build's own progress lines |
 | 4. Hot reload | a TypeScript edit to the reloaded page | `native dev` on three examples, an edit appended to the app's script, timed by the `reloaded scripts in N ms` line the dev command prints |
 | 5. React + UI SDK | how many UI SDK screens compile, run, and match Chrome | the builds and parity from above, plus an optional `--screens` report from another run |

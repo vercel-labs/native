@@ -5,6 +5,7 @@
 import type { Element, EventListener, EventListenerOrEventListenerObject, ListenerOptions, ScrollToOptions, Selection, WindowEventMap } from "./dom.ts";
 import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
 import { CSS } from "./cssom.ts";
+import { rasterScale } from "./device.ts";
 import * as domIface from "./dom.ts";
 import * as highlightIface from "./highlights.ts";
 import * as intersectIface from "./intersection.ts";
@@ -20,7 +21,7 @@ import { localStorage, sessionStorage } from "./storage.ts";
 import { ServiceWorkerContainer } from "./updates.ts";
 import { invalidatePaint, invalidateStyle, layoutEpoch, markFullPaint } from "./invalidation.ts";
 import { viewport } from "./viewport.ts";
-import { hostBackingScale, hostQuit, hostPostMessage, hostWindowBlur, hostWindowClose, hostWindowFocus, hostWindowFrame, hostWindowId, hostWindowOpen, hostWindowSetFrame } from "./host.ts";
+import { hostQuit, hostPostMessage, hostWindowBlur, hostWindowClose, hostWindowFocus, hostWindowFrame, hostWindowId, hostWindowOpen, hostWindowSetFrame } from "./host.ts";
 import { mediaMatches, refreshSystemSettings } from "./media.ts";
 import { setTargetText } from "./target-text.ts";
 import { Clipboard } from "./clipboard.ts";
@@ -482,7 +483,10 @@ export class Window {
     return viewport.h;
   }
   get devicePixelRatio(): number {
-    const scale = hostBackingScale();
+    // The scale the picture is drawn at, not just the window's: a headless run rasterises its
+    // snapshot at 2x, and a canvas sized from a devicePixelRatio of 1 would be drawn at half that
+    // resolution and enlarged — soft, where the browser's own canvas is crisp.
+    const scale = rasterScale();
     return scale >= 1 ? scale : 1;
   }
 

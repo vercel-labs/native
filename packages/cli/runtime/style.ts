@@ -2681,8 +2681,15 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     // in an anonymous table (CSS 2.1 9.7, 17.2.1).
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
-  // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
-  if (parent !== null && (isFlexContainer(parent) || isGridContainer(parent) || isLanesContainer(parent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  // A text node is no box of its own: inheriting `display: contents` from the box it sits in
+  // would leave it with nothing to lay out or paint it, so its text is inline there.
+  if (el.isTextNode && sv[P.P_DISPLAY] === P.D_CONTENTS) sv[P.P_DISPLAY] = P.D_INLINE;
+  // Flex and grid items are blockified; whitespace-only text in one isn't rendered. A display:
+  // contents box generates no box, so what it holds are items of the container the contents boxes
+  // are flattened into — the item parent is the nearest ancestor that generates a box.
+  let itemParent = parent;
+  while (itemParent !== null && itemParent.sv[P.P_DISPLAY] === P.D_CONTENTS) itemParent = itemParent.parentElement;
+  if (itemParent !== null && (isFlexContainer(itemParent) || isGridContainer(itemParent) || isLanesContainer(itemParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
