@@ -585,6 +585,29 @@ function isModuleText(text: string): boolean {
 }
 
 /**
+ * scriptc loses a binding whose name is longer than about fifty characters: a function declared
+ * under one is not callable from another script of the page, and the reference reads as an
+ * undefined global. A page's scripts have such names shortened, consistently, before they are
+ * compiled, so the page runs.
+ */
+function renameLongIdentifiers(text: string): string {
+  const names = new Set<string>();
+  const re = /[A-Za-z_$][A-Za-z0-9_$]{44,}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) names.add(m[0]);
+  if (names.size === 0) return text;
+  let out = text;
+  for (const name of names) {
+    // The short name is derived from the long one, so every script of the page shortens it the
+    // same way and a call from one script reaches the declaration in another.
+    let h = 0;
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
+    out = out.replace(new RegExp(`(?<![\\w$.])${name}(?![\\w$])`, "g"), `__w${h.toString(36)}`);
+  }
+  return out;
+}
+
+/**
  * Writes the modules one page needs: one that builds its DOM, one holding its classic scripts in
  * document order (when it has any), and one that pulls them in in that order, so that importing
  * the page mounts it and then runs its scripts, with the DOM available.
@@ -625,7 +648,7 @@ function writePageModules(dir: string, job: Job): string[] {
       // A module script's imports name the page's support modules: they run in this script's scope.
       texts.push(isModuleText(s.text)
         ? inlineImports(s.text, s.path !== null ? dirname(s.path) : join(WPT, job.page.dir), inlined)
-        : s.text);
+        : renameLongIdentifiers(s.text));
     }
     const declared = topLevelDeclarations(texts.join("\n"));
     // A classic script's write to a name nothing declares is a property of the global object in a
