@@ -62,7 +62,9 @@ function check(name: string, ok: boolean, detail = ""): void {
 }
 
 const dir = mkdtempSync(join(tmpdir(), "native-mouse-members-"));
-const deps = join(process.cwd(), "..", "..", "examples", "notes", "node_modules");
+// The React app links the dependencies an installed example already has; ui-dashboard is the
+// example whose package.json names React and its types.
+const deps = join(process.cwd(), "..", "..", "examples", "ui-dashboard", "node_modules");
 symlinkSync(deps, join(dir, "node_modules"), "dir");
 writeFileSync(join(dir, "index.html"), PAGE);
 writeFileSync(join(dir, "app.tsx"), APP);
