@@ -3,10 +3,12 @@
 import * as P from "../../shared/props.ts";
 import { Node, document, boxKids } from "../dom.ts";
 import { fitHeight, layoutBox } from "./box.ts";
-import { aspectRatio, aspectW, borderBottom, borderLeft, borderRight, borderTop, boundedRatioH, clampH, clampW, clipsX, display, isIntrinsicSize, isOutOfFlow, isReplaced, len, lenPhys, padV, place, sizeUnit, specH, specW, viewport, zeroIfNaN, allChildren } from "./box-model.ts";
+import { aspectRatio, aspectW, borderBottom, borderLeft, borderRight, borderTop, boundedRatioH, clampH, clampW, clipsX, clipsY, display, isIntrinsicSize, isOutOfFlow, isReplaced, len, lenPhys, padV, place, sizeUnit, specH, specW, viewport, zeroIfNaN, allChildren } from "./box-model.ts";
 import { contentMinWidth, maxContentWidth } from "./text.ts";
 import { isRtl, isVerticalText, lineHeightPx, usedWritingMode } from "../style.ts";
 import { hasTransform, pageMatrix } from "../transform.ts";
+import { mul } from "../../shared/css/transforms.ts";
+import type { Matrix } from "../../shared/css/transforms.ts";
 import { hasFilterContext } from "../filters.ts";
 import { hasClipPath } from "../clip.ts";
 import { hasMask } from "../mask.ts";
@@ -372,48 +374,67 @@ function growOverflow(el: Node, cb: Node | null, mr: number, mb: number): void {
  * perspective projects keeps to its layout box for scrolling.
  */
 export function growTransformedOverflow(page: Node): void {
-  const walk = (el: Node): void => {
+  const walk = (el: Node, m: Matrix | null, stopAt: Node | null, sx: number, sy: number): void => {
     for (const c of allChildren(el)) {
       if (display(c) === P.D_NONE) continue;
-      walk(c);
-      if (!hasTransform(c)) continue;
-      let px = 0;
-      let py = 0;
-      for (let a: Node | null = c; a !== null; a = a.parentElement) {
-        px += a.x;
-        py += a.y;
-      }
-      const m = pageMatrix(c, px, py);
-      if (m === null) continue;
-      let maxX = -Infinity;
-      let maxY = -Infinity;
-      for (const [lx, ly] of [[0, 0], [c.w, 0], [c.w, c.h], [0, c.h]]) {
-        const x = px + lx;
-        const y = py + ly;
-        const tx = m.a * x + m.c * y + m.e;
-        const ty = m.b * x + m.d * y + m.f;
-        if (tx > maxX) maxX = tx;
-        if (ty > maxY) maxY = ty;
-      }
-      for (let a = c.parentElement; a !== null; a = a.parentElement) {
-        let ox = 0;
-        let oy = 0;
-        for (let b: Node | null = a; b !== null; b = b.parentElement) {
-          ox += b.x;
-          oy += b.y;
-        }
-        // A box that a transform leaves entirely before an ancestor's start edge is in the
-        // unreachable part of its overflow and grows nothing there (CSS Overflow 3).
-        if (maxX - ox <= 0.01 || maxY - oy <= 0.01) continue;
-        if (maxX - ox > a.naturalW) a.naturalW = maxX - ox;
-        // naturalH is the box's own block extent, border box and all, so the bottom border the
-        // content reaches over is part of it.
-        const bottom = maxY - oy + borderBottom(a);
-        if (bottom > a.naturalH) a.naturalH = bottom;
-      }
+      const px = sx + c.x;
+      const py = sy + c.y;
+      // A fixed box anchored to the viewport paints where the viewport is: it scrolls with
+      // nothing, so its reach stops at the box and grows no box outside it, nor does anything
+      // inside it. A transform, filter or container above it anchors it instead, and then it
+      // moves with the page.
+      const stop = c.sv[P.P_POSITION] === P.POS_FIXED && containingBlock(c) === null ? c : stopAt;
+      const own = hasTransform(c) ? pageMatrix(c, px, py) : null;
+      // The ancestors' transforms carry the box too: a translation inside a translated box
+      // paints at the sum of the two, so the reach is the composed matrix, outermost last.
+      const total = own === null ? m : m === null ? own : mul(own, m);
+      if (total !== null) growReach(c, total, px, py, stop);
+      walk(c, total, stop, px, py);
     }
   };
-  walk(page);
+  walk(page, null, null, page.x, page.y);
+}
+
+/**
+ * Grows the ancestors of a box by the corners it paints at, through the composed transform `m`.
+ * A box that clips has painted its content inside itself: what it hides does not reach the
+ * ancestors above it on that axis, which is where the growing stops.
+ */
+function growReach(c: Node, m: Matrix, px: number, py: number, stopAt: Node | null): void {
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [lx, ly] of [[0, 0], [c.w, 0], [c.w, c.h], [0, c.h]]) {
+    const x = px + lx;
+    const y = py + ly;
+    const tx = m.a * x + m.c * y + m.e;
+    const ty = m.b * x + m.d * y + m.f;
+    if (tx > maxX) maxX = tx;
+    if (ty > maxY) maxY = ty;
+  }
+  let clippedX = false;
+  let clippedY = false;
+  // The box itself is the boundary when it is anchored to the viewport: nothing above it moves.
+  for (let a = c === stopAt ? null : c.parentElement; a !== null; a = a.parentElement) {
+    let ox = 0;
+    let oy = 0;
+    for (let b: Node | null = a; b !== null; b = b.parentElement) {
+      ox += b.x;
+      oy += b.y;
+    }
+    // A box that a transform leaves entirely before an ancestor's start edge is in the
+    // unreachable part of its overflow and grows nothing there (CSS Overflow 3).
+    if (!clippedX && maxX - ox > 0.01 && maxX - ox > a.naturalW) a.naturalW = maxX - ox;
+    if (!clippedY && maxY - oy > 0.01) {
+      // naturalH is the box's own block extent, border box and all, so the bottom border the
+      // content reaches over is part of it.
+      const bottom = maxY - oy + borderBottom(a);
+      if (bottom > a.naturalH) a.naturalH = bottom;
+    }
+    if (a === stopAt) break;
+    if (clipsX(a)) clippedX = true;
+    if (clipsY(a)) clippedY = true;
+    if (clippedX && clippedY) break;
+  }
 }
 
 /** The scrolling of the ancestors above a fixed box, which its own position leaves out. */
