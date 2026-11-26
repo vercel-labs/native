@@ -11930,6 +11930,31 @@ export function setAxGeometryHook(fn: (() => void) | null): void {
   axGeometryHook = fn;
 }
 
+/**
+ * Drops the focus when the element holding it can no longer be rendered (display: none on it or
+ * an ancestor): a browser's focus fixup does the same after the style change that hid it.
+ */
+export function dropFocusIfUnrendered(): boolean {
+  const el = focusState.el;
+  if (el === null || !hiddenByStyle(el)) return false;
+  setFocus(null);
+  return true;
+}
+
+/** Whether the style hides a node: it has no box, or something above it in the flattened tree —
+ *  a slot it was assigned to, the host of its shadow tree — is display: none. */
+function hiddenByStyle(el: Element): boolean {
+  if (isUnrendered(el)) return true;
+  let n: Node | null = el;
+  while (n !== null) {
+    if (n !== el && n instanceof Element && n.sv[P.P_DISPLAY] === P.D_NONE) return true;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return false;
+}
+
 export function setFocus(el: Element | null, visible?: boolean): void {
   const prev = focusState.el;
   const ring = el !== null && (visible ?? (alwaysFocusVisible(el) || lastInputIsKey));
