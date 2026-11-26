@@ -3623,18 +3623,46 @@ function paintBackdrop(el: Element): void {
   let bw = viewport.w;
   let bh = viewport.h;
   // A backdrop is always a positioned box, whatever position its style says (static and relative
-  // compute to absolute in the top layer), so its insets and size decide the box.
+  // compute to absolute in the top layer), so its insets and size decide the box: an inset of
+  // auto is resolved against the opposite one, as CSS Position resolves any out-of-flow box.
   {
     const leftAuto = backdrop.su[P.P_LEFT] === P.U_AUTO;
     const topAuto = backdrop.su[P.P_TOP] === P.U_AUTO;
     const rightAuto = backdrop.su[P.P_RIGHT] === P.U_AUTO;
     const bottomAuto = backdrop.su[P.P_BOTTOM] === P.U_AUTO;
-    bx = leftAuto ? 0 : len(backdrop, P.P_LEFT, viewport.w);
-    by = topAuto ? 0 : len(backdrop, P.P_TOP, viewport.h);
-    if (backdrop.su[P.P_WIDTH] !== P.U_AUTO) bw = len(backdrop, P.P_WIDTH, viewport.w);
-    else bw = viewport.w - bx - (rightAuto ? 0 : len(backdrop, P.P_RIGHT, viewport.w));
-    if (backdrop.su[P.P_HEIGHT] !== P.U_AUTO) bh = len(backdrop, P.P_HEIGHT, viewport.h);
-    else bh = viewport.h - by - (bottomAuto ? 0 : len(backdrop, P.P_BOTTOM, viewport.h));
+    const wAuto = backdrop.su[P.P_WIDTH] === P.U_AUTO;
+    const hAuto = backdrop.su[P.P_HEIGHT] === P.U_AUTO;
+    const left = leftAuto ? 0 : len(backdrop, P.P_LEFT, viewport.w);
+    const right = rightAuto ? 0 : len(backdrop, P.P_RIGHT, viewport.w);
+    const top = topAuto ? 0 : len(backdrop, P.P_TOP, viewport.h);
+    const bottom = bottomAuto ? 0 : len(backdrop, P.P_BOTTOM, viewport.h);
+    const w = wAuto ? 0 : len(backdrop, P.P_WIDTH, viewport.w);
+    const h = hAuto ? 0 : len(backdrop, P.P_HEIGHT, viewport.h);
+    if (!leftAuto && !rightAuto) {
+      bx = left;
+      bw = wAuto ? viewport.w - left - right : w;
+    } else if (!leftAuto) {
+      bx = left;
+      bw = wAuto ? viewport.w - left : w;
+    } else if (!rightAuto) {
+      bw = wAuto ? viewport.w - right : w;
+      bx = viewport.w - right - bw;
+    } else {
+      // Both sides are auto: the box keeps its static position at the viewport's corner.
+      bw = wAuto ? viewport.w : w;
+    }
+    if (!topAuto && !bottomAuto) {
+      by = top;
+      bh = hAuto ? viewport.h - top - bottom : h;
+    } else if (!topAuto) {
+      by = top;
+      bh = hAuto ? viewport.h - top : h;
+    } else if (!bottomAuto) {
+      bh = hAuto ? viewport.h - bottom : h;
+      by = viewport.h - bottom - bh;
+    } else {
+      bh = hAuto ? viewport.h : h;
+    }
     if (bw < 0) bw = 0;
     if (bh < 0) bh = 0;
   }
