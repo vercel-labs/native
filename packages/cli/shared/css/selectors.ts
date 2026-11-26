@@ -272,6 +272,17 @@ function scanFrag(text: string): Frag | null {
   return { subject: scans[scans.length - 1], chain };
 }
 
+/** Whether every compound of an :is()/:where() argument builds into a matchable compound for
+ *  this parse: an item that doesn't is one the list drops. */
+function fragBuilds(frag: Frag, dom: boolean): boolean {
+  for (const s of [frag.subject, ...frag.chain.map((c) => c.scan)]) {
+    const variants = expandScan(s, dom);
+    if (variants === null || variants.length === 0) return false;
+    for (const v of variants) if (buildCompound(v.simples, dom) === null) return false;
+  }
+  return true;
+}
+
 /** Parses a compound (no combinators) into simple selectors, :is()/:where() and :not(). */
 function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false, dom: boolean = false, shadow: boolean = false): Scan | null {
   const simples: Simple[] = [];
@@ -418,8 +429,9 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
       if (name === "is" || name === "where" || name === "not") {
         if (arg === null) return null;
         const args = splitTopLevel(arg, ",").map((a) => a.trim());
-        if (args.length === 0 || args.some((a) => a === "")) return null;
         if (name === "not") {
+          // :not() takes a plain selector list, where one malformed item invalidates the whole.
+          if (args.length === 0 || args.some((a) => a === "")) return null;
           // Its arguments stay compounds: the runtime tests each encoded compound on its own.
           if (inNot) return null; // nested :not() isn't supported
           let max = 0;
@@ -439,7 +451,7 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
               max = Math.max(max, argSpec);
               continue;
             }
-            const variants = expandScan(s);
+            const variants = expandScan(s, dom);
             if (variants === null) return null;
             for (const v of variants) {
               const b = buildCompound(v.simples, dom);
@@ -454,10 +466,13 @@ function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false
           }
           notSpec += max;
         } else {
+          // The argument list is forgiving: an item this build can't match is dropped, as a
+          // browser drops an item it can't parse, and a list left with nothing matches nothing.
           const frags: Frag[] = [];
           for (const a of args) {
+            if (a === "") continue;
             const f = scanFrag(a);
-            if (f === null) return null;
+            if (f === null || !fragBuilds(f, dom)) continue;
             frags.push(f);
           }
           groups.push({ where: name === "where", args: frags });
@@ -487,12 +502,12 @@ interface BuiltLink { compound: Compound; comb: number }
 interface Variant { simples: Simple[]; nots: Compound[]; notSels: string[]; has: string[]; chain: BuiltLink[] }
 
 /** Every way the compound's :is()/:where() arguments can apply, as simple-selector lists. */
-function expandScan(scan: Scan): Variant[] | null {
+function expandScan(scan: Scan, dom: boolean = false): Variant[] | null {
   let acc: Variant[] = [{ simples: scan.simples.slice(), nots: scan.nots.slice(), notSels: scan.notSels.slice(), has: scan.has.slice(), chain: [] }];
   for (const g of scan.groups) {
     const variants: Variant[] = [];
     for (const a of g.args) {
-      const vs = expandFrag(a);
+      const vs = expandFrag(a, dom);
       if (vs === null) return null;
       for (const v of vs) variants.push(v);
     }
@@ -518,10 +533,10 @@ function expandScan(scan: Scan): Variant[] | null {
 }
 
 /** Expands one :is()/:where() argument, keeping the chain its combinators describe. */
-function expandFrag(frag: Frag): Variant[] | null {
+function expandFrag(frag: Frag, dom: boolean = false): Variant[] | null {
   const expanded: Variant[][] = [];
   for (const s of [frag.subject, ...frag.chain.map((c) => c.scan)]) {
-    const vs = expandScan(s);
+    const vs = expandScan(s, dom);
     if (vs === null) return null;
     expanded.push(vs);
   }
@@ -540,7 +555,7 @@ function expandFrag(frag: Frag): Variant[] | null {
     for (let k = 1; k < c.length; k++) {
       // A chain link is a single compound, so an argument's own ancestors can't sit inside one.
       if (c[k].chain.length > 0) return null;
-      const b = buildCompound(c[k].simples);
+      const b = buildCompound(c[k].simples, dom);
       if (b === null) return null;
       if (b.never) { never = true; break; }
       b.compound.nots = c[k].nots;
@@ -893,7 +908,7 @@ function parseCompoundVariants(text: string, dom: boolean, shadow: boolean = fal
     for (const s of extra) if (s.kind !== "pseudo") return null;
     const inner = scanCompound(arg, false, false, false, false);
     if (inner === null || inner.groups.length > 0 || inner.has.length > 0 || inner.pseudo !== P.PE_NONE) return null;
-    const vs = expandScan(inner);
+    const vs = expandScan(inner, dom);
     if (vs === null || vs.length === 0) return null;
     const spec = 1 + scanSpec(inner);
     const out: Built[] = [];
@@ -910,7 +925,7 @@ function parseCompoundVariants(text: string, dom: boolean, shadow: boolean = fal
     if (out.length === 0) return null;
     return { variants: out, pseudo: P.PE_NONE, pseudoName: "" };
   }
-  const variants = expandScan(scan);
+  const variants = expandScan(scan, dom);
   if (variants === null) return null;
   const spec = scanSpec(scan);
   const out: Built[] = [];
