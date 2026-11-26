@@ -1173,6 +1173,7 @@ export class DOMTokenList {
     if (this.owner === null) invalidateStyle();
     else if (this.owner.isConnected) invalidateStyleOf(this.owner);
     if (liveHead !== null) refreshLiveCollections();
+    else refreshLabelsIfHeld();
   }
 
   /** Replaces the whole list from a space-separated string (className / class attribute). */
@@ -1570,8 +1571,10 @@ function noteChildList(target: Node, added: Node[], removed: Node[], previousSib
   markLayoutDirty(target);
   // A positioned box taken out grew the scroll extents of the boxes it was in.
   for (const r of removed) if (holdsPositioned(r)) boxChanges.growthStale = true;
-  // The live getElements* lists read the tree, which has just changed.
+  // The live getElements* lists read the tree, which has just changed, and a labels list a
+  // script kept names elements by where they are.
   if (liveHead !== null) refreshLiveCollections();
+  else refreshLabelsIfHeld();
 }
 /** Whether a subtree holds a box incremental layout counts as positioned. */
 function holdsPositioned(n: Node): boolean {
@@ -1600,7 +1603,13 @@ function noteAttribute(target: Element, name: string, oldValue: string | null): 
   }
   notifyAttribute(target, name, oldValue);
   // Only these attributes decide which lists an element belongs to or answers for.
-  if (liveHead !== null && (name === "id" || name === "class" || name === "name")) refreshLiveCollections();
+  if (name === "id" || name === "class" || name === "name") {
+    if (liveHead !== null) refreshLiveCollections();
+    else refreshLabelsIfHeld();
+  } else if (name === "type" || name === "for") {
+    // An input's type decides whether it is labelable, and a label's for= names its control.
+    refreshLabelsIfHeld();
+  }
 }
 function noteCharacterData(target: Node, oldValue: string): void {
   if (OBSERVERS.length > 0) mutationRelay.noteCharacterData(target, oldValue);
@@ -7054,6 +7063,11 @@ function fillLabels(el: HTMLElement, list: NodeListCtor): void {
   }
 }
 
+/** Brings the labels lists already handed out up to date, when a page holds any. */
+function refreshLabelsIfHeld(): void {
+  if (labelLists.size > 0) refreshAllLabels();
+}
+
 /** Brings every labels list already handed out up to date. */
 function refreshAllLabels(): void {
   for (const el of labelLists.keys()) {
@@ -10613,9 +10627,15 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  const d = parent.sv[P.P_DISPLAY];
-  if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
-    d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
+  // A `display: contents` wrapper generates no box, so the text takes part in the formatting
+  // context of the nearest ancestor that does: that box decides whether whitespace renders.
+  let boxed: Node | null = parent;
+  while (boxed !== null && !boxed.isTextNode && boxed.sv[P.P_DISPLAY] === P.D_CONTENTS) boxed = boxed.parentNode;
+  if (boxed !== null) {
+    const d = boxed.sv[P.P_DISPLAY];
+    if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
+      d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
+  }
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
     if (a.firstLetterPseudo !== null || a.firstLetterFloat !== null) return true;
     // `dir=auto` (and a <bdi>) takes its direction from the text below it, and :dir() sees that.
