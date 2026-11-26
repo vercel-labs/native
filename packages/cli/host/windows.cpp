@@ -3636,11 +3636,40 @@ static void paint_shadow(const Cmd *c, int inset) {
   if (!g_d2d || !(c->w > 0) || !(c->h > 0)) return;
   double spread = c->line_width;
   double pad = fabs(c->dx) + fabs(c->dy) + c->blur * 3 + fabs(spread) + 2;
-  D2D1_RECT_F bounds;
-  if (!rect_bounds(D2D1::RectF((FLOAT)(c->x - pad), (FLOAT)(c->y - pad), (FLOAT)(c->x + c->w + pad),
-                               (FLOAT)(c->y + c->h + pad)),
-                   &bounds))
-    return;
+  // The box the shadow covers, in the page's own space, cut to the page. A shadow is the same
+  // picture wherever its element sits and however it is turned, so it is rastered and blurred
+  // here and laid down under the transform in effect: a shadow that moves or turns keeps the
+  // bitmap it was made with, and a turned one draws that silhouette turned.
+  D2D1_RECT_F bounds = D2D1::RectF((FLOAT)(c->x - pad), (FLOAT)(c->y - pad),
+                                   (FLOAT)(c->x + c->w + pad), (FLOAT)(c->y + c->h + pad));
+  // Cut to what the frame can see, in the page's own space: the view is the transform's inverse
+  // of the viewport. Clamping to 0..view drops a shadow whose page coordinates are outside that
+  // box because the page is scrolled, or because a transform brings them into view.
+  D2D1_MATRIX_3X2_F to_page = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+  g_d2d->GetTransform(&to_page);
+  {
+    D2D1::Matrix3x2F inv = *D2D1::Matrix3x2F::ReinterpretBaseType(&to_page);
+    if (!inv.Invert()) return;
+    double vx[4], vy[4];
+    double cx[4] = {0.0, g_view_w, 0.0, g_view_w};
+    double cy[4] = {0.0, 0.0, g_view_h, g_view_h};
+    for (int k = 0; k < 4; k++) {
+      vx[k] = cx[k] * inv._11 + cy[k] * inv._21 + inv._31;
+      vy[k] = cx[k] * inv._12 + cy[k] * inv._22 + inv._32;
+    }
+    double vx0 = vx[0], vx1 = vx[0], vy0 = vy[0], vy1 = vy[0];
+    for (int k = 1; k < 4; k++) {
+      if (vx[k] < vx0) vx0 = vx[k];
+      if (vx[k] > vx1) vx1 = vx[k];
+      if (vy[k] < vy0) vy0 = vy[k];
+      if (vy[k] > vy1) vy1 = vy[k];
+    }
+    if (bounds.left < (FLOAT)vx0) bounds.left = (FLOAT)vx0;
+    if (bounds.top < (FLOAT)vy0) bounds.top = (FLOAT)vy0;
+    if (bounds.right > (FLOAT)vx1) bounds.right = (FLOAT)vx1;
+    if (bounds.bottom > (FLOAT)vy1) bounds.bottom = (FLOAT)vy1;
+  }
+  if (!(bounds.right > bounds.left) || !(bounds.bottom > bounds.top)) return;
   int pw = (int)ceil((bounds.right - bounds.left) * g_scale);
   int ph = (int)ceil((bounds.bottom - bounds.top) * g_scale);
   if (pw < 1 || ph < 1 || (double)pw * ph > 64.0 * 1024 * 1024) return;
@@ -3666,10 +3695,9 @@ static void paint_shadow(const Cmd *c, int inset) {
   }
   // The silhouette: the border box grown by the spread for an outer shadow, and the ring the
   // offset leaves inside the box for an inset one.
-  D2D1_MATRIX_3X2_F m = shadow_page_transform();
   dc->BeginDraw();
   dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-  dc->SetTransform(matrix_product(D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top), m));
+  dc->SetTransform(D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top));
   ID2D1SolidColorBrush *white = solid_brush_on(dc, 0xffffffffu, 1);
   if (white) {
     if (!inset) {
