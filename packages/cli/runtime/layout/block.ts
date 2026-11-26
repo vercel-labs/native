@@ -166,6 +166,13 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     }
     const isRun = entry.block === null;
     if (isRun || (entry.block !== null && isFloat(entry.block))) {
+      // The block child just placed has spent its lines of the budget, and the run that follows
+      // it is laid out with what is left: the child's lines are only counted once the flow
+      // reaches the next block child, which is too late for this run.
+      if (clampPending !== null) {
+        clampBlocks += flowLines(clampPending);
+        clampPending = null;
+      }
       // The container's own runs share its budget with the block children: what those took is
       // spent before a run's lines are counted.
       if (clampBase >= 0) el.clampBudget = Math.max(0, clampBase - clampBlocks);
@@ -259,9 +266,11 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     const alone = flowKids <= 1 && hasBreak(c);
     if (clampBase >= 0 && !alone && !isFloat(c) && !isBfcRoot(c)) {
       c.clampBudget = Math.max(0, clampBase - el.lineBaseline.length - clampBlocks);
-      // Content after this box means the clamp cuts the flow here, and the last line it keeps
-      // ends in an ellipsis even when that line fits.
-      c.clampEllipsis = false;
+      // Content after this box, or after the box that holds it, means the clamp cuts the flow
+      // there, and the last line it keeps ends in an ellipsis even when that line fits. The
+      // continuation the container was given has to reach the deepest box that shows the line:
+      // a wrapper with nothing after it inside would otherwise drop it.
+      c.clampEllipsis = el.clampEllipsis;
       for (let k = i + 1; k < entries.length; k++) {
         const e = entries[k];
         if (e.block !== null || !isBlankPieces(e.pieces)) { c.clampEllipsis = true; break; }
