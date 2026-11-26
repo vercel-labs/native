@@ -9890,6 +9890,11 @@ export class HTMLTextAreaElement extends HTMLElement {
   set value(value: any) {
     const text = String(value);
     const old = this.textContent;
+    // Writing the text the field already holds changes nothing, and leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    if (text === old) return;
     this.writeText(text, 0, old.length, text.length);
     this.selectionStart = text.length;
     this.selectionEnd = text.length;
@@ -12780,13 +12785,18 @@ export class HTMLInputElement extends HTMLElement {
       noteControlChange(this);
       return;
     }
-    // A whole-value write is a replace of the field's text to a live value range; writing the
-    // same text changes nothing.
-    if (v !== this.val) moveValueRanges(this, 0, this.val.length, v.length);
-    this.val = v;
-    this.selStart = v.length;
-    this.selEnd = v.length;
-    this.anchor = v.length;
+    // A whole-value write is a replace of the field's text to a live value range. Writing the
+    // text the field already holds changes nothing, and in particular leaves the caret where the
+    // page put it, as a browser does; a framework that controls a field rewrites its value after
+    // every keystroke, and moving the caret to the end there would send the next character to the
+    // end of the field.
+    const text = String(v);
+    if (text === this.value) return;
+    moveValueRanges(this, 0, this.val.length, text.length);
+    this.val = text;
+    this.selStart = text.length;
+    this.selEnd = text.length;
+    this.anchor = text.length;
     // A value decides whether a placeholder shows, whether the field is valid, and its range.
     noteControlChange(this);
   }
