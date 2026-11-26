@@ -99,10 +99,24 @@ function App() {
   else visible = visible.slice().sort((a, b) => b.id - a.id);
 
   const rows = Math.ceil(visible.length / COLS);
-  const startRow = Math.max(0, Math.floor(scrollTop / ROW_H) - 2);
-  const endRow = Math.min(rows, Math.ceil((scrollTop + viewportH) / ROW_H) + 2);
+  // Removing a favourite can shorten a favourites-only list under a scrolled window. The grid
+  // clamps its scrollTop when its content shrinks, but that clamp may not reach this state (and
+  // a list shorter than the viewport leaves the scrollbar at 0), so the window is clamped here
+  // and the effect below syncs the element and the state.
+  const maxTop = Math.max(0, rows * ROW_H - viewportH);
+  const top = Math.min(scrollTop, maxTop);
+  const startRow = Math.max(0, Math.floor(top / ROW_H) - 2);
+  const endRow = Math.min(rows, Math.ceil((top + viewportH) / ROW_H) + 2);
   const shownRows: number[] = [];
   for (let row = startRow; row < endRow; row++) shownRows.push(row);
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (grid === null) return;
+    const limit = Math.max(0, Math.ceil(visible.length / COLS) * ROW_H - grid.clientHeight);
+    if (grid.scrollTop > limit) grid.scrollTop = limit;
+    if (scrollTop > limit) setScrollTop(limit);
+  }, [visible.length, viewportH, scrollTop]);
 
   const selected = selectedId === null ? null : PHOTOS[selectedId - 1];
 
