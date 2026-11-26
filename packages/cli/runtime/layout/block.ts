@@ -146,6 +146,12 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
   const clampBase = el.sv[P.P_LINE_CLAMP] > 0 ? el.sv[P.P_LINE_CLAMP] : el.clampBudget;
   let clampBlocks = 0;
   let clampPending: Node | null = null;
+  // The children that take part in the flow, counted once: a clamp only needs to know whether one
+  // child holds the whole flow.
+  const flowKids = entries.filter((e) => e.block !== null && !isFloat(e.block)).length;
+  // The budget this box came in with: the runs below lend it the block children's spend, and it
+  // is put back once the flow is placed.
+  const clampIncoming = el.clampBudget;
   for (let i = 0; i < entries.length; i++) {
     const entry = entries[i];
     if (entry.abs !== null) {
@@ -160,6 +166,9 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     }
     const isRun = entry.block === null;
     if (isRun || (entry.block !== null && isFloat(entry.block))) {
+      // The container's own runs share its budget with the block children: what those took is
+      // spent before a run's lines are counted.
+      if (clampBase >= 0) el.clampBudget = Math.max(0, clampBase - clampBlocks);
       // The whole anonymous box, from its first piece of inline content to the last, including
       // the floats in it.
       const before = el.fragKind.length;
@@ -242,9 +251,12 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     // A box that was not clamped last time must not keep the budget it had then, and the layout
     // it kept from under that budget is stale.
     if (clampBase < 0 && (c.clampBudget >= 0 || c.clampEllipsis)) clearClamp(c);
+    // A child that became a formatting context of its own keeps its lines to itself, so a budget
+    // an earlier pass left on it has to go: its text is not part of the clamp any more.
+    if (isBfcRoot(c) && (c.clampBudget >= 0 || c.clampEllipsis) && !isFloat(c)) clearClamp(c);
     // One block child holding a flow full of forced breaks lays its lines out in runs the budget
     // can't count straight; the clamp inside it is left to itself.
-    const alone = entries.filter((e) => e.block !== null && !isFloat(e.block)).length <= 1 && hasBreak(c);
+    const alone = flowKids <= 1 && hasBreak(c);
     if (clampBase >= 0 && !alone && !isFloat(c) && !isBfcRoot(c)) {
       c.clampBudget = Math.max(0, clampBase - el.lineBaseline.length - clampBlocks);
       // Content after this box means the clamp cuts the flow here, and the last line it keeps
@@ -594,6 +606,9 @@ export function layoutBlock(el: Node, innerW: number, innerH: number, pl: number
     pendP = Math.max(0, mb, c.escBotP);
     pendN = Math.min(0, mb, c.escBotN);
   }
+  // The runs above lent the container's budget to the block children's spend; the box leaves
+  // with the budget it came in with.
+  el.clampBudget = clampIncoming;
   if (leading) {
     // Everything collapsed through, so the margin is at both edges of this box at once: it
     // escapes upward, and downward too when nothing separates it from the bottom edge.
