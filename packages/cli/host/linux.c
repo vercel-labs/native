@@ -1687,6 +1687,9 @@ double host_refresh_interval(void) { return 1000.0 / 60.0; }
 /** How long until the display's next refresh in milliseconds; 0 when nothing displays. */
 double host_until_refresh(void) { return 0; }
 
+/** No display link here: the runtime's timer paces frames. */
+int32_t host_gl_window(void) { return 0; }
+
 int32_t host_poll(double timeout) {
   (void)timeout;
   // Whatever assistive clients asked for arrives on the bus: an event, or an action on a node.
