@@ -2256,7 +2256,21 @@ export async function emitApp(built: AppBuild, out: string | null, dev: boolean 
     const first = lines.find((line) => /^\S+:\d+:\d+: error|^error\b|undefined symbol|LNK\d{4}|^fatal/i.test(line))
       ?? lines.find((line) => /error|undefined symbol|LNK\d|fatal/i.test(line) && !/^hint:/i.test(line) && !line.startsWith("native:"))
       ?? "";
-    const how = sc.error !== undefined ? sc.error.message : `exit ${sc.status}`;
+    // A compiler the system ended reports no status: the usual cause is the out-of-memory
+    // killer, since a build compiles the whole SDK runtime along with the app. "exit null" alone
+    // reads like a compiler bug, so name the signal and the memory a build needs.
+    let how: string;
+    if (sc.error !== undefined) {
+      how = sc.error.message;
+    } else if (sc.status === null && sc.signal === "SIGKILL") {
+      how = "scriptc was killed by the system, most likely the out-of-memory killer: a build compiles " +
+        "the whole SDK runtime and needs more than 4 GB of memory at its peak. Add swap or free " +
+        "memory, then build again";
+    } else if (sc.status === null && sc.signal !== undefined && sc.signal !== null) {
+      how = `scriptc was killed by ${sc.signal}`;
+    } else {
+      how = `exit ${sc.status}`;
+    }
     die(`scriptc build failed: ${how}` + (first === "" ? "" : " — " + first));
   }
 

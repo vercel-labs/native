@@ -715,7 +715,11 @@ export function layoutFlexRow(el: Node, innerW: number, innerH: number, pl: numb
         y = alignOffset(alignFor(el, c), lineCross[l] - outerH, alignSafe(el, c));
       }
       // wrap-reverse turns the cross axis around, so the line and the item are measured from it.
-      if (crossReverse) y = lineCross[l] - outerH - y;
+      // A baseline-aligned item is placed from the shared baseline instead, which the line already
+      // holds in the container's own coordinates (CSS Flexbox 8.5: a line's baselines sit at the
+      // same place whichever way its cross axis runs), so its offset is not turned again.
+      const alongBaseline = alignFor(el, c) === P.A_BASELINE || alignFor(el, c) === P.A_LAST_BASELINE;
+      if (crossReverse && !alongBaseline) y = lineCross[l] - outerH - y;
       c.x = pl + (reverse !== rtl ? innerW - pos - outerW : pos) + ml;
       c.y = pt + lineY + y + mt;
       place(c);

@@ -5,6 +5,7 @@
 
 import { Element, Event, InputEvent, Node, Range, Text, document, dispatch, trusted } from "./dom.ts";
 import { invalidatePaint } from "./invalidation.ts";
+import { noteHostEdit } from "./editing-history.ts";
 
 /** Whether a point is inside the host (at any depth). */
 export function pointInside(host: Element, node: Node | null | undefined): boolean {
@@ -178,6 +179,11 @@ export function insertTextInto(host: Element, text: string): boolean {
     sel.collapse(host, 0);
     range = new Range(host, 0, host, 0);
   }
+  // The snapshot carries the selection the change starts from, so an undo can put the caret
+  // back where the typing began.
+  noteHostEdit(host,
+    offsetOfPoint(host, range.startContainer, range.startOffset),
+    offsetOfPoint(host, range.endContainer, range.endOffset));
   editDepth++;
   try {
     if (!range.collapsed) range.deleteContents();
@@ -202,7 +208,10 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
   const inputType = forward ? "deleteContentForward" : "deleteContentBackward";
   if (range !== null && !range.collapsed) {
     if (!beforeInput(host, inputType, null)) return false;
-    const at = offsetOfPoint(host, range.startContainer, range.startOffset);
+    const fromAt = offsetOfPoint(host, range.startContainer, range.startOffset);
+    const toAt = offsetOfPoint(host, range.endContainer, range.endOffset);
+    noteHostEdit(host, fromAt, toAt);
+    const at = fromAt;
     editDepth++;
     try {
       range.deleteContents();
@@ -235,6 +244,7 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
     to = at;
   }
   if (!beforeInput(host, inputType, null)) return false;
+  noteHostEdit(host, from, to);
   const a = pointAtOffset(host, from);
   const b = pointAtOffset(host, to);
   if (a === null || b === null) return false;
@@ -248,6 +258,80 @@ export function deleteTextIn(host: Element, forward: boolean): boolean {
   } finally {
     editDepth--;
   }
+  return true;
+}
+
+/** One character before a text offset; a surrogate pair moves as one. */
+function previousChar(text: string, at: number): number {
+  if (at <= 0) return 0;
+  const low = text.charCodeAt(at - 1);
+  if (at >= 2 && low >= 0xdc00 && low <= 0xdfff) return at - 2;
+  return at - 1;
+}
+
+function nextChar(text: string, at: number): number {
+  if (at >= text.length) return text.length;
+  const high = text.charCodeAt(at);
+  if (high >= 0xd800 && high <= 0xdbff && at + 1 < text.length) return at + 2;
+  return at + 1;
+}
+
+export type CaretMove = "left" | "right" | "home" | "end";
+
+/**
+ * Moves the caret in an editing host, or extends the selection with Shift held. Returns false
+ * when the caret is already at that edge.
+ */
+export function moveCaretIn(host: Element, where: CaretMove, extend: boolean): boolean {
+  const sel = document.getSelection();
+  if (sel === null) return false;
+  const range = selectionIn(host);
+  if (range === null) return false;
+  const total = textNodes(host).reduce((n: number, t: Text) => n + t.data.length, 0);
+  if (!extend && !range.collapsed && (where === "left" || where === "right")) {
+    // A plain arrow collapses the selection to the edge it points at. Home and End are not
+    // edge-relative: they go to the start or end of the host even when something is selected.
+    const at = where === "left" ? offsetOfPoint(host, range.startContainer, range.startOffset)
+      : offsetOfPoint(host, range.endContainer, range.endOffset);
+    const point = pointAtOffset(host, at);
+    if (point !== null) selectPoint(point); else sel.collapse(host, 0);
+    invalidatePaint();
+    return true;
+  }
+  // Extension moves from the selection's focus, not the ordered range's end: in a backward
+  // selection the focus is the start, and moving from the end would extend the wrong way.
+  const focusNode = sel.focusNode ?? range.endContainer;
+  const focusOffset = sel.focusNode === null ? range.endOffset : sel.focusOffset;
+  const focusAt = offsetOfPoint(host, focusNode, focusOffset);
+  let to: number;
+  if (where === "home") to = 0;
+  else if (where === "end") to = total;
+  else {
+    const text = textNodes(host).map((t: Text) => t.data).join("");
+    to = where === "left" ? previousChar(text, focusAt) : nextChar(text, focusAt);
+  }
+  // A plain Home or End collapses a nonempty selection to the host's start or end even when the
+  // selection's focus already sits there (Shift+Home and Shift+End leave it there). Left as a
+  // selection, the next typed text would replace it instead of being inserted at the boundary.
+  if (!extend && (where === "home" || where === "end")) {
+    const point = pointAtOffset(host, to);
+    if (point === null) return false;
+    const changed = !range.collapsed || focusAt !== to;
+    selectPoint(point);
+    if (changed) invalidatePaint();
+    return changed;
+  }
+  if (to === focusAt) return false;
+  const point = pointAtOffset(host, to);
+  if (point === null) return false;
+  if (extend) {
+    const anchor = sel.anchorNode;
+    if (anchor !== null) sel.setBaseAndExtent(anchor, sel.anchorOffset, point.node, point.offset);
+    else sel.collapse(point.node, point.offset);
+  } else {
+    selectPoint(point);
+  }
+  invalidatePaint();
   return true;
 }
 

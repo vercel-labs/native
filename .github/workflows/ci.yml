@@ -3,6 +3,14 @@
 # against the headless host, on macOS against the windowed host, and on Windows against the Win32
 # host, whose windows run there have a desktop. The Linux apps need the host's development libraries and a C toolchain; see
 # packages/cli/host/linux.c, packages/cli/host/windows.cpp and packages/cli/docs/cli.md.
+#
+# There are two tiers. A pull request runs `checks` beside a capped slice of the examples, one per
+# shard, so it settles in minutes: a build and two headless runs of the app each shard names below.
+# A push to next, or a manual dispatch, runs the full suite — every example in all four Linux
+# shards, on the macOS host, and on the Windows host — and is what a merge is verified by. The slice
+# covers the runtime's main paths (DOM events and text, React state, Canvas 2D with pointer input,
+# WebGL 2 on the GPU), while the full run covers every app, the other frameworks and both other
+# hosts.
 name: ci
 
 on:
@@ -10,6 +18,8 @@ on:
     branches: [next]
   pull_request:
     branches: [next]
+  # Run the full suite by hand, for example on a release candidate.
+  workflow_dispatch:
 
 jobs:
   checks:
@@ -32,10 +42,25 @@ jobs:
     # or disk partway through ("the hosted runner lost communication"), with no useful log left
     # behind. Four shards each build and run a quarter of the apps, so a job lasts a quarter as
     # long and writes a quarter as much, and a failure names the shard it came from.
+    #
+    # A pull request instead builds one app in each shard, the `fast_example` below: that keeps the
+    # job names and the aggregate check unchanged while capping the tier at one build. The four apps
+    # sit in different shards so each job still adds no wall clock beyond its own build, and together
+    # they exercise the runtime paths a pull request most often breaks: counter covers DOM events and
+    # text, ui-dashboard React's state and rendering, canvas-particles Canvas 2D animation with
+    # pointer input, and webgl-cube WebGL 2 drawing through the GPU.
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        include:
+          - shard: 1
+            fast_example: webgl-cube
+          - shard: 2
+            fast_example: ui-dashboard
+          - shard: 3
+            fast_example: canvas-particles
+          - shard: 4
+            fast_example: counter
     timeout-minutes: 150
     steps:
       # The image's toolchains (Android, .NET, GHC, CodeQL, ...) take tens of gigabytes this job
@@ -70,17 +95,31 @@ jobs:
       - name: Drop the FFmpeg build tree
         run: rm -rf packages/cli/host/ffmpeg/build packages/cli/host/ffmpeg/src
       - run: pnpm install --frozen-lockfile
-      - name: Build and run every example (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
+      # A pull request runs this shard's fast example alone; a push or manual dispatch runs the
+      # shard's whole slice of the suite. Both go through tests/scratch.ts so a run's build
+      # directories land under TMPDIR and disappear with the job.
+      - name: Build and run the examples this shard covers
+        working-directory: packages/cli
         env:
           # Each app is built once, so the native cache's copy of every app's executable is only
           # space. (The compiler's own cache is bounded on its own, at 4 GB.)
           NATIVE_NO_CACHE: "1"
-        run: pnpm turbo run test:examples --filter=@native-sdk/cli -- --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+          # shard 1 of 4, or just the one app the fast tier names for this shard.
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+          FAST_EXAMPLE: ${{ matrix.fast_example }}
+          TIER: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
+        run: |
+          if [ "$TIER" = fast ]; then
+            node tests/scratch.ts node tests/examples.ts "$FAST_EXAMPLE"
+          else
+            node tests/scratch.ts node tests/examples.ts --shard "$SHARD"
+          fi
 
   # The branch protects one check named linux-examples. It keeps that name and stays the Linux
   # examples gate: it is green only when every shard did, and red when one failed or was cancelled
   # (`always()` so a failed shard still runs this job instead of skipping it, which would leave the
-  # required check missing).
+  # required check missing). On a pull request the shards ran the fast slice; the check means the
+  # same thing there — the tier the run selected passed — and the full suite reports on the merge.
   linux-examples:
     name: linux-examples
     needs: linux-examples-shards
@@ -94,7 +133,11 @@ jobs:
           echo "linux-examples: four shards -> $SHARDS"
           test "$SHARDS" = "success"
 
+  # Both other hosts are the full tier's. macOS builds every example with the windowed host; Windows
+  # downloads zig and builds eight apps, the IME and the accessibility tree. Either costs longer
+  # than the whole fast tier, so a pull request leaves them to the push that merges it.
   macos-examples:
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -110,6 +153,7 @@ jobs:
         run: pnpm turbo run test:examples --filter=@native-sdk/cli
 
   windows-examples:
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

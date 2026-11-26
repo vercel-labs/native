@@ -21,7 +21,19 @@ function individual(prop: string, value: string, p: number, out: Decl[]): string
     out.push({ p, v: -1, u: P.U_LIST });
     return null;
   }
-  const parts = v.split(/\s+/).filter((s) => s !== "");
+  // A minified value can put the next component right after a function's `)`, as Tailwind's
+  // `translate: calc(.25rem*5)0` does; the `)` and the `0` are separate tokens, so split there too.
+  let spaced = "";
+  let depth = 0;
+  for (const ch of v) {
+    spaced += ch;
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) spaced += " ";
+    }
+  }
+  const parts = spaced.trim().split(/\s+/).filter((s) => s !== "");
   let call = "";
   // A third value is the plane's depth, which is the 3d function with the two-value one's
   // coordinates in front of it.
