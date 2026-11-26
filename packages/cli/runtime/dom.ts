@@ -5897,13 +5897,13 @@ export class Element extends Node {
     return want;
   }
 
-  /** Dispatches a bubbling click event starting at this element, as a browser's click() does. */
+  /** Dispatches a bubbling click event starting at this element, as a browser's click() does:
+   *  the click event itself is untrusted, while the input and change events its activation
+   *  sends are trusted, as Chrome's are. */
   click(): void {
     // A disabled control takes neither a click event nor its default action, as in a browser.
     if (inDisabledFormControl(this)) return;
-    if (dispatch(trusted(new MouseEvent("click", { bubbles: true, cancelable: true, composed: true })), this)) {
-      runClickDefault(this);
-    }
+    dispatchClick(this, () => new MouseEvent("click", { bubbles: true, cancelable: true, composed: true }), false);
   }
 
   /**
@@ -7724,6 +7724,73 @@ export function openSelectMenu(el: HTMLSelectElement): void {
  * A click's default action on a checkbox or radio: the box ticks, a radio ticks and unchecks the
  * rest of its group, and the "input" and "change" events follow. A disabled control does nothing.
  */
+/** What a click on a checkbox or radio changed, so a canceled click can put it back. */
+interface ClickActivation {
+  el: HTMLInputElement;
+  checked: boolean;
+  indeterminate: boolean;
+  groupPrev: HTMLInputElement | null;
+}
+
+/** The state a click activates on a checkbox or radio, applied before the click event runs. */
+function preClickActivate(target: Node): ClickActivation | null {
+  let n: Node | null = target;
+  while (n !== null) {
+    if (n instanceof HTMLInputElement) {
+      const kind = controlKind(n.type);
+      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
+        const act: ClickActivation = { el: n, checked: n.checked, indeterminate: n.indeterminate, groupPrev: null };
+        if (kind === CONTROL_RADIO) {
+          if (!n.checked) {
+            const group: HTMLInputElement[] = [];
+            radioGroup(n, group);
+            for (const o of group) if (o !== n && o.checked) act.groupPrev = o;
+            n.checked = true;
+          }
+        } else {
+          n.indeterminate = false;
+          n.checked = !n.checked;
+        }
+        return act;
+      }
+      return null;
+    }
+    if (n instanceof HTMLButtonElement) return null;
+    n = n.parentNode;
+  }
+  return null;
+}
+
+/** The input and change events a completed click activation sends. */
+function finishClickActivation(act: ClickActivation): void {
+  dispatch(trusted(new Event("input", { bubbles: true })), act.el);
+  dispatch(trusted(new Event("change", { bubbles: true })), act.el);
+}
+
+/** Puts back what a canceled click's pre-activation changed. */
+function cancelClickActivation(act: ClickActivation): void {
+  const el = act.el;
+  if (act.groupPrev !== null) act.groupPrev.checked = true;
+  el.checked = act.checked;
+  el.indeterminate = false;
+}
+
+/**
+ * Dispatches a click at `target` and runs what it activates: a checkbox or radio is toggled
+ * before the click event, the event is dispatched, and a canceled event puts the toggle back.
+ */
+export function dispatchClick(target: Node, makeEvent: () => MouseEvent, user: boolean): boolean {
+  const act = preClickActivate(target);
+  const accepted = dispatch(makeEvent(), target);
+  if (act !== null) {
+    if (accepted) finishClickActivation(act);
+    else cancelClickActivation(act);
+  } else if (accepted) {
+    runClickDefault(target, user);
+  }
+  return accepted;
+}
+
 function activateControl(el: HTMLInputElement): void {
   if (controlDisabled(el)) return;
   if (controlKind(el.type) === CONTROL_RADIO) {
@@ -7848,16 +7915,13 @@ export function runClickDefault(target: Node, user: boolean = false): void {
     if (picker instanceof HTMLInputElement || picker instanceof HTMLButtonElement) break;
     picker = picker.parentNode;
   }
-  // A checkbox or radio ticks when it is clicked, in a form or not. A range took its new value
-  // when the press landed, so the click has nothing left to do.
+  // A checkbox or radio was toggled around its click event (see dispatchClick); a range took its
+  // new value when the press landed, so the click has nothing left to do.
   let box: Node | null = target;
   while (box !== null) {
     if (box instanceof HTMLInputElement) {
       const kind = controlKind(box.type);
-      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) {
-        activateControl(box);
-        return;
-      }
+      if (kind === CONTROL_CHECKBOX || kind === CONTROL_RADIO) return;
       if (kind === CONTROL_RANGE) return;
       break;
     }
@@ -10567,11 +10631,7 @@ function textDataMovesStyle(parent: Node): boolean {
   // An :empty condition, a :has() argument or a counter reads the text below an element, so an
   // edit inside it can change what a selector matches.
   if (textRunDependence.affectSelectors) return true;
-  // A display: contents wrapper generates no box, so the flex, grid or lanes container that
-  // decides a whitespace-only run's display is the nearest ancestor that does.
-  let box: Node | null = parent;
-  while (box !== null && box.sv[P.P_DISPLAY] === P.D_CONTENTS) box = box.parentElement;
-  const d = box === null ? P.D_NONE : box.sv[P.P_DISPLAY];
+  const d = parent.sv[P.P_DISPLAY];
   if (d === P.D_FLEX || d === P.D_INLINE_FLEX || d === P.D_GRID || d === P.D_INLINE_GRID ||
     d === P.D_GRID_LANES || d === P.D_INLINE_GRID_LANES) return true;
   for (let a: Node | null = parent; a !== null; a = a.parentNode) {
@@ -12511,6 +12571,8 @@ export class HTMLInputElement extends HTMLElement {
   anchor = 0;
   /** The value at focus or the last change event, for deciding when "change" fires. */
   committed = "";
+  /** Whether a user's typing changed the value since the last commit. */
+  userEdited = false;
   /** A checkbox's state. The box itself isn't drawn yet, but the property is the value frameworks set. */
   private checkedFlag = false;
   /** A checkbox whose state a script put between checked and unchecked. */
@@ -12969,6 +13031,7 @@ export class HTMLInputElement extends HTMLElement {
     const e = this.selEnd;
     moveValueRanges(this, s, e - s, text.length);
     this.val = this.val.slice(0, s) + text + this.val.slice(e);
+    this.userEdited = true;
     this.moveCaret(s + text.length, false);
     noteControlChange(this);
     if (axChangeHook !== null) axChangeHook();
@@ -13082,12 +13145,13 @@ export class HTMLInputElement extends HTMLElement {
     return this.checkValidity();
   }
 
-  /** Fires "change" if the value differs from the last committed value. */
+  /** Fires "change" when a user's edit changed the value; a value a script set sends none. */
   commit(): void {
-    if (this.val !== this.committed) {
-      this.committed = this.val;
-      dispatch(trusted(new Event("change", { bubbles: true })), this);
-    }
+    const edited = this.userEdited;
+    const changed = this.val !== this.committed;
+    this.committed = this.val;
+    this.userEdited = false;
+    if (edited && changed) dispatch(trusted(new Event("change", { bubbles: true })), this);
   }
 }
 
