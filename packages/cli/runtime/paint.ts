@@ -3,7 +3,7 @@
 import * as P from "../shared/props.ts";
 import { firstLetterLength } from "../shared/css/first-letter.ts";
 import { autoInsetPx } from "../shared/css/anim.ts";
-import { Element, HTMLElement, HTMLCanvasElement, HTMLDialogElement, HTMLVideoElement, HTMLInputElement, HTMLOptionElement, HTMLSelectElement, HTMLTextAreaElement, EMPTY_LINE, DOMRect, document, focusState, controlKind, CONTROL_NONE, buttonInputType, isInTopLayer, topLayerElements, rangeStreamSpan, langOf, boxKids, dateKind, dateFieldView, editingHostFor } from "./dom.ts";
+import { Element, HTMLElement, HTMLCanvasElement, HTMLDialogElement, HTMLVideoElement, HTMLInputElement, HTMLMeterElement, HTMLOptionElement, HTMLProgressElement, HTMLSelectElement, HTMLTextAreaElement, EMPTY_LINE, DOMRect, document, focusState, controlKind, CONTROL_NONE, buttonInputType, isInTopLayer, topLayerElements, rangeStreamSpan, langOf, boxKids, dateKind, dateFieldView, editingHostFor } from "./dom.ts";
 import type { Node, Text, ValueRangeGeometry } from "./dom.ts";
 import { lineHeightPx, fontKey, isFlexContainer, isGridContainer, lastLineAlign, lineAlign, isRtl, isLanesContainer, usedWritingMode } from "./style.ts";
 import { hostBegin, hostCompositorOn, hostDamageBegin, hostDamageCanMerge, hostPresentDamage, hostVerifyDamage, hostClipPushShape, hostFillRect, hostVideoDraw, hostFillLine, hostFillRing, hostFillPoly, hostClipPushPoly, hostFillRoundRect, hostFillRoundRing, hostText, hostTextShadow, hostPresent, hostClipPush, hostClipPushRound, hostClipPop, hostCanvasDraw, hostShadowOuter, hostShadowInset, hostTransformPush, hostTransformPushIndexed, hostStatePop, hostEffectPush, hostEffectPushIndexed, hostEffectPop, hostMaskPop, hostPerspectivePush, hostPerspectivePop, hostLayerPush, hostLayerPop } from "./host.ts";
@@ -11,7 +11,7 @@ import { drawImagePath, orientedImage } from "./images.ts";
 import { viewport, measure, isOutOfFlow, baselineOffset, fontMetrics, textWidth, letterSpacingPx, wordSpacingPx, FRAG_TEXT, absolutePosition, containingBlock } from "./layout.ts";
 import { itemTextSpacing, trailingSeparators } from "./layout/inline.ts";
 import { layoutPasses } from "./layout/box.ts";
-import { paintControl } from "./controls.ts";
+import { paintControl, paintMeter, paintProgress } from "./controls.ts";
 import { paintDatePicker } from "./date-picker.ts";
 import { borderBottom, borderLeft, borderPx, borderRight, borderTop, clipMargin, display, clipsX, clipsY, flattenContents, isBfcRoot, isFloat, isReplaced, isSvgElement, len, objectSize, propagatesBodyOverflow, viewportOverflowX, viewportOverflowY, viewportScrollsX, viewportScrollsY } from "./layout/box-model.ts";
 import { paintSvg } from "./svg.ts";
@@ -2965,6 +2965,8 @@ function paintBox(el: Node, x: number, y: number, parentOpacity: number, skipBg:
     else paintControl(el, x, y, opacity);
   }
   if (draw && el instanceof HTMLSelectElement) paintSelectLabel(el, x, y, opacity);
+  if (draw && el instanceof HTMLMeterElement) paintMeter(el, x, y, opacity);
+  else if (draw && el instanceof HTMLProgressElement) paintProgress(el, x, y, opacity);
 
   // Inline content is what Appendix E puts after the floats: held back for them when nothing
   // here clips it, painted where it stands otherwise.
