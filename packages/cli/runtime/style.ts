@@ -765,6 +765,9 @@ function resolveDynamicRules(el: Element): void {
   const placeholder: number[] = [];
   const carriers = new Map<number, number[]>();
   let states = 0;
+  // A document's author rules style the document's own elements, not a shadow tree's: the rules
+  // that tree's sheets carry are matched when the sheet is read (see selectorFitsSheet).
+  const inShadow = shadowRootOf(el) !== null;
   for (let c = 0; c < candidates.length; c++) {
     const i = candidates[c];
     const tag = tables.dynTags[i];
@@ -772,6 +775,7 @@ function resolveDynamicRules(el: Element): void {
     if (tag !== "" && tag !== el.localName) continue;
     if (id !== "" && id !== el.id) continue;
     const r = tables.dynRules[i];
+    if (inShadow && !tables.ruleUa[r]) continue;
     const pseudo = tables.dynPseudo[i];
     if (pseudo === P.PE_NONE) rules.push(r);
     else if (pseudo === P.PE_BEFORE) before.push(r);
@@ -3896,6 +3900,8 @@ function selectorFitsSheet(el: Element, sel: Selector, root: any): boolean {
     return slot !== null && shadowRootOf(slot) === root && compoundFits(el, sel);
   }
   if (root !== null && !insideShadowTree(el, root)) return false;
+  // A document's sheet styles the document's own elements, not the trees its elements host.
+  if (root === null && shadowRootOf(el) !== null) return false;
   return selectorFits(el, sel);
 }
 

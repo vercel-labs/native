@@ -8282,7 +8282,18 @@ function validBits(el: Element): number {
 }
 
 function focusWithinBits(el: Element): number {
-  return focusState.el !== null && el.contains(focusState.el) ? P.S_FOCUS_WITHIN : 0;
+  const focused = focusState.el;
+  if (focused === null) return 0;
+  // The focused node lies within every ancestor of the flattened tree: inside a shadow tree or
+  // a slot, that chain runs through the host and past the slot's ancestors, not the DOM's own.
+  let n: Node | null = focused;
+  while (n !== null) {
+    if (n === el) return P.S_FOCUS_WITHIN;
+    if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
+    if (n instanceof ShadowRoot) { n = n.host; continue; }
+    n = n.parentNode;
+  }
+  return 0;
 }
 
 /** A box's top edge relative to a scroll container's padding box, in unscrolled content px. */
@@ -15780,8 +15791,17 @@ function findById(el: Node, id: string): Element | null {
 }
 
 /** A node just put into the tree: parse the <style> elements it holds, or the one it feeds. */
+/** Marks the elements of a freshly inserted subtree to resolve their rules again: a document's
+ *  author rules stop at a shadow boundary, so a subtree that moves between trees changes what
+ *  applies to it. */
+function markTreeStale(node: Element): void {
+  if (node.dynamic) node.rulesStale = true;
+  for (const k of node.kids) if (k instanceof Element) markTreeStale(k);
+}
+
 function refreshAdded(node: Node): void {
   if (node.nodeType === 1) {
+    markTreeStale(node as Element);
     if (CUSTOM_DEFS > 0) {
       // A defined tag makes the node an instance of its class before its callbacks run, and the
       // elements that are in the document report themselves connected once the subtree is in.
