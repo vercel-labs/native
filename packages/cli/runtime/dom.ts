@@ -12879,10 +12879,11 @@ export class HTMLInputElement extends HTMLElement {
   get list(): HTMLDataListElement | null {
     const id = this.getAttribute("list");
     if (id === null || id === "") return null;
-    // The list is the one in the tree the field is in: a field inside a shadow tree finds the
-    // datalist beside it there rather than one in the page around the host.
+    // The list is the one in the tree the field is in: a field inside a shadow tree, a detached
+    // fragment or another document finds the datalist beside it there rather than one in the
+    // page around it. A field whose tree is only itself has no list at all.
     const root = this.getRootNode();
-    const el = root instanceof ShadowRoot ? root.getElementById(id) : document.getElementById(id);
+    const el = root instanceof DocumentFragment || root instanceof Document ? root.getElementById(id) : null;
     return el instanceof HTMLDataListElement ? el : null;
   }
   /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
