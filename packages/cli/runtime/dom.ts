@@ -1182,6 +1182,11 @@ export class DOMTokenList {
   private changed(): void {
     if (this.owner === null) invalidateStyle();
     else if (this.owner.isConnected) invalidateStyleOf(this.owner);
+    // An element created by script keeps the rules it matched when it was made. A class it gains
+    // later names rules that were never in that set, so ask the style pass to work them out again,
+    // as the id setter does for an id. A compiled element's rules already cover every class a
+    // script can add, since the build keeps them all.
+    if (this.owner !== null && this.owner.dynamic) this.owner.rulesStale = true;
     if (liveHead !== null) refreshLiveCollections();
   }
 
