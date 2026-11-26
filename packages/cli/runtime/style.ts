@@ -2572,7 +2572,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     applyCounters(el);
   }
   // Generated content: the pseudo-element's text comes from `content`, and one whose content
-  // is none isn't generated at all, so it gets no box. A marker draws the list marker instead.
+  // is none isn't generated at all, so it gets no box. A marker draws the list marker instead,
+  // and a ::backdrop is no generated content either: the top layer paints its box.
   if (el instanceof Element) {
     if (!runningPrepass) {
       if (el.pseudoKind === P.PE_MARKER) applyMarker(el);
@@ -2580,7 +2581,7 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
         el.pseudoKind !== P.PE_FIRST_LINE && el.pseudoKind !== P.PE_FIRST_LETTER &&
         el.pseudoKind !== P.PE_SELECTION && el.pseudoKind !== P.PE_HIGHLIGHT &&
         el.pseudoKind !== P.PE_TARGET_TEXT && el.pseudoKind !== P.PE_SCROLL_MARKER &&
-        el.pseudoKind !== P.PE_SCROLL_MARKER_GROUP) applyContent(el);
+        el.pseudoKind !== P.PE_SCROLL_MARKER_GROUP && el.pseudoKind !== P.PE_BACKDROP) applyContent(el);
     }
     // Every list item has a marker box, including one that only became a list item at runtime.
     if (sv[P.P_DISPLAY] === P.D_LIST_ITEM && el.markerPseudo === null) el.ensureMarker();
@@ -2618,15 +2619,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     // in an anonymous table (CSS 2.1 9.7, 17.2.1).
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
-  // A text node is no box of its own: inheriting `display: contents` from the box it sits in
-  // would leave it with nothing to lay out or paint it, so its text is inline there.
-  if (el.isTextNode && sv[P.P_DISPLAY] === P.D_CONTENTS) sv[P.P_DISPLAY] = P.D_INLINE;
-  // Flex and grid items are blockified; whitespace-only text in one isn't rendered. A display:
-  // contents box generates no box, so what it holds are items of the container the contents boxes
-  // are flattened into — the item parent is the nearest ancestor that generates a box.
-  let itemParent = parent;
-  while (itemParent !== null && itemParent.sv[P.P_DISPLAY] === P.D_CONTENTS) itemParent = itemParent.parentElement;
-  if (itemParent !== null && (isFlexContainer(itemParent) || isGridContainer(itemParent) || isLanesContainer(itemParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
+  if (parent !== null && (isFlexContainer(parent) || isGridContainer(parent) || isLanesContainer(parent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
@@ -2859,6 +2853,23 @@ function ensureChainIndex(): void {
   }
 }
 
+/** True when a generated box of `el` has a rule that tests the identity `el` just changed: the
+ *  subject of a pseudo-element rule is the element that generates the box (see ruleApplies), so
+ *  a class or attribute write there can start or stop matching one of its rules. */
+function pseudoRulesTestIdentity(el: Element, ident: IdentityChange): boolean {
+  const classes = ident.classes;
+  for (const c of el.kids) {
+    if (!(c instanceof Element) || c.pseudoKind === P.PE_NONE) continue;
+    for (const r of c.rules) {
+      if (classes !== null && classes.length > 0) {
+        for (const k of tables.ruleClasses[r]) if (classes.indexOf(k) >= 0) return true;
+      }
+      if (ident.other && r < tables.ruleAttrs.length && tables.ruleAttrs[r].length > 0) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * True when the change to `el` can alter what a rule matches in its descendants: a class the page
  * names on an ancestor, an id or attribute test, a moved state a `:nth-*` or state rule below it
@@ -2873,6 +2884,9 @@ function descendantsCanSeeChange(el: Element, ident: IdentityChange, stateDelta:
   if (identityMoved && runtimeRulesExist()) return true;
   // A filter or a complex :not() argument can look at the element from a descendant's rule too.
   if (identityMoved && sideLookingRulesExist()) return true;
+  // A generated box is styled by the element that makes it, so a write here can move a rule its
+  // ::before, ::after or ::backdrop tests this element's classes or attributes in.
+  if (identityMoved && pseudoRulesTestIdentity(el, ident)) return true;
   // A filtered ancestor compound matches through its descendants' positions, so a restyled root
   // can change what a rule below it matches even when the root's own style did not move.
   if (chainNthOfRulesExist()) return true;

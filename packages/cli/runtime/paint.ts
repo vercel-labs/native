@@ -3595,7 +3595,9 @@ function paintTopLayer(): void {
   if (layer.length === 0) return;
   paintingTopLayer = true;
   for (const el of layer) {
-    if (el instanceof Element) paintBackdrop(el);
+    // Only a modal dialog draws a ::backdrop: a popover on the top layer has none, and a dialog
+    // the page doesn't render draws neither itself nor its backdrop.
+    if (el instanceof HTMLDialogElement && el.isModal && display(el) !== P.D_NONE) paintBackdrop(el);
     paintContext(el, el.x, el.y, 1, false);
   }
   paintingTopLayer = false;
@@ -3613,14 +3615,37 @@ function paintBackdrop(el: Element): void {
     for (const kid of boxKids(el)) if (kid.pseudoKind === P.PE_BACKDROP) backdrop = kid;
     if (backdrop === null) return;
   }
+  // A backdrop the author hides is not drawn; one positioned and sized by its own style is
+  // drawn in that box, which is the whole viewport for the sheet's fixed inset:0.
+  if (backdrop.sv[P.P_DISPLAY] === P.D_NONE) return;
+  let bx = 0;
+  let by = 0;
+  let bw = viewport.w;
+  let bh = viewport.h;
+  // A backdrop is always a positioned box, whatever position its style says (static and relative
+  // compute to absolute in the top layer), so its insets and size decide the box.
+  {
+    const leftAuto = backdrop.su[P.P_LEFT] === P.U_AUTO;
+    const topAuto = backdrop.su[P.P_TOP] === P.U_AUTO;
+    const rightAuto = backdrop.su[P.P_RIGHT] === P.U_AUTO;
+    const bottomAuto = backdrop.su[P.P_BOTTOM] === P.U_AUTO;
+    bx = leftAuto ? 0 : len(backdrop, P.P_LEFT, viewport.w);
+    by = topAuto ? 0 : len(backdrop, P.P_TOP, viewport.h);
+    if (backdrop.su[P.P_WIDTH] !== P.U_AUTO) bw = len(backdrop, P.P_WIDTH, viewport.w);
+    else bw = viewport.w - bx - (rightAuto ? 0 : len(backdrop, P.P_RIGHT, viewport.w));
+    if (backdrop.su[P.P_HEIGHT] !== P.U_AUTO) bh = len(backdrop, P.P_HEIGHT, viewport.h);
+    else bh = viewport.h - by - (bottomAuto ? 0 : len(backdrop, P.P_BOTTOM, viewport.h));
+    if (bw < 0) bw = 0;
+    if (bh < 0) bh = 0;
+  }
   const color = backdrop.sv[P.P_BACKGROUND_COLOR];
   const opacity = backdrop.sv[P.P_OPACITY];
   const filters = elementFilter(backdrop);
   const behind = elementBackdropFilter(backdrop);
   const layered = filters.length > 0 || behind.length > 0;
-  if (layered) hostEffectPush(backdrop.serial, P.PK_EFFECT, 0, 0, viewport.w, viewport.h, filterSpec(backdrop, filters, behind));
+  if (layered) hostEffectPush(backdrop.serial, P.PK_EFFECT, bx, by, bw, bh, filterSpec(backdrop, filters, behind));
   if ((color & 255) * opacity >= 1) {
-    hostFillRect(0, 0, viewport.w, viewport.h, 0, withOpacity(color, opacity));
+    hostFillRect(bx, by, bw, bh, 0, withOpacity(color, opacity));
   }
   if (layered) hostEffectPop();
 }
