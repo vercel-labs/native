@@ -404,6 +404,44 @@ const RUNNER_CACHE = join(homedir(), ".cache", "native", "wpt-runners");
 const SLOTS_DIR = join(homedir(), ".cache", "native", "wpt-slots");
 
 /**
+ * Keeps the compiled-runner cache within NATIVE_WPT_CACHE_MB (default 8 GB). A run builds many
+ * runners of a few hundred megabytes each, and a machine that runs the suite repeatedly fills its
+ * volume with them until a run is killed for disk. The oldest entries go first; a build that
+ * finished moments ago is the one a rerun would hit, so the newest always stay.
+ */
+function pruneRunnerCache(): void {
+  if (!existsSync(RUNNER_CACHE)) return;
+  const entries: { path: string; size: number; at: number }[] = [];
+  let total = 0;
+  for (const name of readdirSync(RUNNER_CACHE)) {
+    // A copy another run is writing is renamed into place when it is complete; pruning it
+    // mid-flight would make that run's rename fail.
+    if (name.indexOf(".tmp") >= 0) continue;
+    const path = join(RUNNER_CACHE, name);
+    try {
+      const st = statSync(path);
+      if (!st.isFile()) continue;
+      entries.push({ path, size: st.size, at: st.mtimeMs });
+      total += st.size;
+    } catch {}
+  }
+  const max = Math.max(256, Number(process.env.NATIVE_WPT_CACHE_MB ?? 8192)) * 1024 * 1024;
+  if (total <= max) return;
+  entries.sort((a, b) => a.at - b.at);
+  // A runner another run selected moments ago may still be copied: leave recent entries alone on
+  // this pass, and the next run prunes them.
+  const cutoff = Date.now() - 10 * 60 * 1000;
+  for (const entry of entries) {
+    if (total <= max) break;
+    if (entry.at > cutoff) continue;
+    try {
+      rmSync(entry.path, { force: true });
+      total -= entry.size;
+    } catch {}
+  }
+}
+
+/**
  * How a runner is compiled. The dev posture is -O0 with scriptc's cached LLVM object shards, so
  * every batch after the first reuses the runtime's shards instead of optimizing them again: a
  * release build spends minutes optimizing the same runtime for every batch, which is most of a
@@ -821,7 +859,13 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
     let cached = useCache || store ? runnerKey(gen.main, gen.files) : "";
     const copyCached = (): boolean => {
       if (cached === "" || !existsSync(cached)) return false;
-      copyFileSync(cached, exe);
+      // Another run prunes the shared cache while this one selects a hit: losing that race is a
+      // cache miss for this batch, not a failure of the run.
+      try {
+        copyFileSync(cached, exe);
+      } catch {
+        return false;
+      }
       chmodSync(exe, 0o755);
       cacheStats.hits++;
       reused = true;
@@ -1174,6 +1218,7 @@ async function run(args: string[]): Promise<void> {
     }
   }));
   releaseSlot();
+  pruneRunnerCache();
   process.stderr.write(`\nnative wpt: compiled runners: ${cacheStats.misses} built, ${cacheStats.hits} reused from ${relative(process.cwd(), RUNNER_CACHE) || RUNNER_CACHE}\n`);
 
   for (const r of runnable) {
