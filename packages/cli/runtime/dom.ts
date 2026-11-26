@@ -12965,7 +12965,15 @@ export class HTMLInputElement extends HTMLElement {
     const declared = stepAttr === null ? 1 : Number(stepAttr);
     const step = isFinite(declared) && declared > 0 ? declared : 1;
     if (min > max) return;
-    let current = this.val === "" ? (t === "range" ? spec.value : isFinite(min) && min > 0 ? min : 0) : Number(this.val);
+    if (t === "number" && this.val === "") {
+      // An empty field steps to the bound on the side it is stepped toward and stays empty when
+      // there is no such bound, as the stepping algorithm says: it is not one step past the min.
+      const bound = n > 0 ? min : max;
+      if (!isFinite(bound)) return;
+      this.value = String(bound);
+      return;
+    }
+    let current = this.val === "" ? (t === "range" ? spec.value : 0) : Number(this.val);
     if (isNaN(current)) current = t === "range" ? spec.value : 0;
     if (current < min || current > max) return;
     // A number or range with no min steps from zero; an endless bound is no bound at all.
@@ -13069,10 +13077,21 @@ export class HTMLInputElement extends HTMLElement {
     const id = this.getAttribute("list");
     if (id === null || id === "") return null;
     // The list is the one in the tree the field is in: a field inside a shadow tree, a detached
-    // fragment or another document finds the datalist beside it there rather than one in the
-    // page around it. A field whose tree is only itself has no list at all.
+    // fragment, a detached element's subtree or another document finds the datalist there rather
+    // than one in the page around it.
     const root = this.getRootNode();
-    const el = root instanceof DocumentFragment || root instanceof Document ? root.getElementById(id) : null;
+    let el: Element | null = null;
+    if (root instanceof DocumentFragment || root instanceof Document) {
+      el = root.getElementById(id);
+    } else if (root instanceof Element) {
+      // A detached subtree's root is the element the field was built in: look through it.
+      if (root.id === id) el = root;
+      else {
+        const all: Element[] = [];
+        collectElements(root, all);
+        for (const c of all) if (c.id === id) { el = c; break; }
+      }
+    }
     return el instanceof HTMLDataListElement ? el : null;
   }
   /** The indeterminate attribute, which a reset puts the indeterminate state back to. */
