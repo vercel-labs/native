@@ -3,7 +3,7 @@
 // event the way a browser sends them. Structural keys (Enter, Tab, the arrows) and IME composition
 // are separate steps; this module is the text path shared by them.
 
-import { Element, InputEvent, Node, Range, Text, document, dispatch, trusted } from "./dom.ts";
+import { Element, Event, InputEvent, Node, Range, Text, document, dispatch, trusted } from "./dom.ts";
 import { invalidatePaint } from "./invalidation.ts";
 
 /** Whether a point is inside the host (at any depth). */
@@ -105,7 +105,10 @@ export function hasSelectionIn(host: Element): boolean {
 
 function selectPoint(point: TextPoint): void {
   const sel = document.getSelection();
-  if (sel !== null) sel.collapse(point.node, point.offset);
+  if (sel === null) return;
+  sel.collapse(point.node, point.offset);
+  // A caret move in an editing host sends selectionchange, as a browser's does.
+  dispatch(trusted(new Event("selectionchange")), document);
 }
 
 function selectOffsets(host: Element, from: number, to: number): void {
@@ -115,9 +118,11 @@ function selectOffsets(host: Element, from: number, to: number): void {
   if (sel === null) return;
   if (a === null || b === null) {
     sel.collapse(host, 0);
+    dispatch(trusted(new Event("selectionchange")), document);
     return;
   }
   sel.setBaseAndExtent(a.node, a.offset, b.node, b.offset);
+  dispatch(trusted(new Event("selectionchange")), document);
 }
 
 function beforeInput(host: Element, inputType: string, data: string | null): boolean {
