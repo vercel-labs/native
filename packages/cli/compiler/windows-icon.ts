@@ -8,7 +8,8 @@
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { readPng, resizePng, writePng, type Raster } from "./png.ts";
+import { platformIcon, type IconChoice } from "./app-icon.ts";
+import { writePng } from "./png.ts";
 
 /** The sizes a Windows app's .ico carries: the shell's small and large icons, and the large tile. */
 export const ICO_SIZES: readonly number[] = [16, 24, 32, 48, 64, 256];
@@ -16,9 +17,8 @@ export const ICO_SIZES: readonly number[] = [16, 24, 32, 48, 64, 256];
 /** The resource id host/windows.cpp loads the app icon by, for WM_SETICON. */
 export const APP_ICON_ID = 1;
 
-/** An .ico holding the picture at each size, each entry PNG-encoded (Windows Vista and later). */
-export function icoOf(img: Raster, sizes: readonly number[] = ICO_SIZES): Buffer {
-  const images = sizes.map((size) => writePng(resizePng(img, size)));
+/** An .ico holding one PNG-encoded image per size, in the order the sizes are given. */
+export function icoOf(images: readonly Buffer[], sizes: readonly number[] = ICO_SIZES): Buffer {
   const header = Buffer.alloc(6);
   header.writeUInt16LE(0, 0);
   header.writeUInt16LE(1, 2);
@@ -45,13 +45,14 @@ export function icoOf(img: Raster, sizes: readonly number[] = ICO_SIZES): Buffer
  * or null when the PNG can't be read or `zig rc` fails. The caller adds the object to the link, so
  * the icon lands in the executable's resource directory.
  */
-export function windowsIconObject(buildDir: string, png: string): string | null {
-  const raster = readPng(png);
+export function windowsIconObject(buildDir: string, choice: IconChoice): string | null {
+  const raster = choice.raster;
   if (raster === null) {
-    process.stderr.write(`native: the app icon '${png}' isn't a PNG this build can read; the executable has no icon\n`);
+    process.stderr.write(`native: the app icon '${choice.icon.source}' isn't a PNG this build can read; the executable has no icon\n`);
     return null;
   }
-  writeFileSync(join(buildDir, "app.ico"), icoOf(raster));
+  const images = ICO_SIZES.map((size) => writePng(platformIcon(raster, size, choice.template)));
+  writeFileSync(join(buildDir, "app.ico"), icoOf(images));
   writeFileSync(join(buildDir, "app.rc"), `${APP_ICON_ID} ICON "app.ico"\n`);
   const object = join(buildDir, "app-icon.obj");
   const r = spawnSync("zig", ["rc", "/:output-format", "coff", "/:target", "x64", "/fo", object, "app.rc"], {
