@@ -18,8 +18,6 @@ import { dirname, join, relative, resolve, extname, basename } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { homedir, availableParallelism, freemem } from "node:os";
-import { createRequire } from "node:module";
-import type * as ts from "typescript";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
 import { Diagnostics, type Diagnostic } from "./diagnostics.ts";
@@ -587,108 +585,6 @@ function isModuleText(text: string): boolean {
 }
 
 /**
- * TypeScript's parser does the lexing for the rewrite below. The CLI depends on it, but only the
- * WPT runner needs it, so it is loaded the first time a page's names are rewritten: `native build`
- * does not pay for it, and the published bundle keeps no import of it at the top.
- */
-let typescriptModule: typeof import("typescript") | undefined;
-function typescript(): typeof import("typescript") {
-  if (typescriptModule === undefined) {
-    typescriptModule = createRequire(import.meta.url)("typescript") as typeof import("typescript");
-  }
-  return typescriptModule;
-}
-
-/**
- * Rewrites the identifiers a script's parse reports, and only those: a comment, a string, a
- * template's text and a regular expression are not identifiers, so what they spell keeps its
- * value. TypeScript's own parser does the lexing, because a scanner alone cannot tell a regular
- * expression from a division or a template's text from its interpolations — the parser rescans for
- * those, so its tree carries the answer.
- */
-function rewriteIdentifiers(text: string, short: Map<string, string>): string {
-  const api = typescript();
-  const file = api.createSourceFile("page.js", text, api.ScriptTarget.Latest, true, api.ScriptKind.JS);
-  const edits: { start: number; end: number; text: string }[] = [];
-  const visit = (node: ts.Node): void => {
-    if (api.isIdentifier(node) && !isPropertyName(node)) {
-      const replacement = short.get(node.text);
-      if (replacement !== undefined) {
-        // A shorthand spells its key with the variable's name: renaming the variable would rename
-        // the key too, and change which property a string elsewhere reaches. So the key is written
-        // out beside the new name — `{long}` becomes `{long: __w…}`, as `{long: long}` reads.
-        const text = isShorthand(node) ? `${node.text}: ${replacement}` : replacement;
-        edits.push({ start: node.getStart(file), end: node.getEnd(), text });
-      }
-    }
-    api.forEachChild(node, visit);
-  };
-  visit(file);
-  if (edits.length === 0) return text;
-  let out = "";
-  let pos = 0;
-  for (const edit of edits) {
-    out += text.slice(pos, edit.start) + edit.text;
-    pos = edit.end;
-  }
-  return out + text.slice(pos);
-}
-
-/** Whether the identifier is a shorthand, `{b}` or `{b = 1}`, where the name is the property key
- *  and the variable at once — in an object literal, or in an object destructuring pattern. An array
- *  element and a rest binding spell only a variable: a colon there would not be a pattern. */
-function isShorthand(node: ts.Identifier): boolean {
-  const api = typescript();
-  const parent = node.parent;
-  if (parent === undefined) return false;
-  if (api.isShorthandPropertyAssignment(parent) && parent.name === node) return true;
-  if (api.isBindingElement(parent) && parent.propertyName === undefined && parent.name === node) {
-    return parent.dotDotDotToken === undefined && parent.parent !== undefined &&
-      api.isObjectBindingPattern(parent.parent);
-  }
-  return false;
-}
-
-/** Whether the identifier is a property's own name, which a string elsewhere spells (`a.b`,
- *  `{b: 1}`, `{b() {}}`): a name a rename cannot move, because nothing beside it moves with it. */
-function isPropertyName(node: ts.Identifier): boolean {
-  const api = typescript();
-  const parent = node.parent;
-  if (parent === undefined) return false;
-  if (api.isPropertyAccessExpression(parent) && parent.name === node) return true;
-  if (api.isPropertyAssignment(parent) && parent.name === node) return true;
-  if (api.isMethodDeclaration(parent) && parent.name === node) return true;
-  if (api.isGetAccessorDeclaration(parent) && parent.name === node) return true;
-  if (api.isSetAccessorDeclaration(parent) && parent.name === node) return true;
-  if (api.isPropertyDeclaration(parent) && parent.name === node) return true;
-  if (api.isBindingElement(parent) && parent.propertyName === node) return true;
-  return false;
-}
-
-/**
- * scriptc loses a binding whose name is longer than about fifty characters: a function declared
- * under one is not callable from another script of the page, and the reference reads as an
- * undefined global. A page's scripts have such names shortened, consistently, before they are
- * compiled, so the page runs.
- */
-export function renameLongIdentifiers(text: string): string {
-  const names = new Set<string>();
-  const re = /[A-Za-z_$][A-Za-z0-9_$]{44,}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text)) !== null) names.add(m[0]);
-  if (names.size === 0) return text;
-  // The short name is derived from the long one, so every script of the page shortens it the same
-  // way and a call from one script reaches the declaration in another.
-  const short = new Map<string, string>();
-  for (const name of names) {
-    let h = 0;
-    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-    short.set(name, `__w${h.toString(36)}`);
-  }
-  return rewriteIdentifiers(text, short);
-}
-
-/**
  * Writes the modules one page needs: one that builds its DOM, one holding its classic scripts in
  * document order (when it has any), and one that pulls them in in that order, so that importing
  * the page mounts it and then runs its scripts, with the DOM available.
@@ -729,7 +625,7 @@ function writePageModules(dir: string, job: Job): string[] {
       // A module script's imports name the page's support modules: they run in this script's scope.
       texts.push(isModuleText(s.text)
         ? inlineImports(s.text, s.path !== null ? dirname(s.path) : join(WPT, job.page.dir), inlined)
-        : renameLongIdentifiers(s.text));
+        : s.text);
     }
     const declared = topLevelDeclarations(texts.join("\n"));
     // A classic script's write to a name nothing declares is a property of the global object in a
