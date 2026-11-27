@@ -1,3 +1,4 @@
+import { svgDetach } from "./svg-detach.ts";
 import { textRunDependence } from "./text-runs.ts";
 // The DOM subset native supports. Anything not declared here is a type error at build time,
 // which is how unsupported DOM APIs get reported.
@@ -3288,6 +3289,7 @@ export class Node extends EventTarget {
     // A popover that leaves the document closes, going away from the screen it was on.
     if (wasConnected && openPopoverCount > 0) hidePopoversIn(child);
     if (wasConnected && CUSTOM_DEFS > 0) disconnectedSubtree(child);
+    if (wasConnected && svgDetach.fn !== null) svgDetach.fn(child);
     // A transition doesn't survive the element leaving the document: it is canceled there.
     if (wasConnected) cancelTransitionOnDetach(child);
     noteStructureChange(this);
@@ -3381,6 +3383,7 @@ export class Node extends EventTarget {
     this.ownText = "";
     if (wasConnected && openPopoverCount > 0) for (const c of removed) hidePopoversIn(c);
     if (wasConnected && CUSTOM_DEFS > 0) for (const c of removed) disconnectedSubtree(c);
+    if (wasConnected && svgDetach.fn !== null) for (const c of removed) svgDetach.fn(c);
     // One childList record carries both sides: replace all is a single mutation, as a browser
     // reports it (removedChildren and addedChildren together), so inserting the new nodes one by
     // one through appendChild would report one record per node instead.
