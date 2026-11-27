@@ -308,6 +308,20 @@ export class Window {
   readonly customElements = customElements;
   readonly localStorage = localStorage;
   readonly sessionStorage = sessionStorage;
+  // The JavaScript built-ins, which a browser's window carries as its own properties: a page that
+  // looks one up by name -- WPT's reflection suite does `window[JsType]` to cast its expectations --
+  // finds it. The rest of the standard globals (Object, Array, Math, JSON, RegExp, Symbol, Map, Set,
+  // Promise, WeakMap, WeakSet, parseInt, parseFloat, isNaN, isFinite) have no scriptc lowering as
+  // values yet, so they stay bare names the compiled page calls instead of properties it reads.
+  readonly String = String;
+  readonly Number = Number;
+  readonly Boolean = Boolean;
+  readonly Date = Date;
+  readonly Error = Error;
+  readonly TypeError = TypeError;
+  readonly RangeError = RangeError;
+  readonly encodeURIComponent = encodeURIComponent;
+  readonly decodeURIComponent = decodeURIComponent;
   // Every name a page can reach through `window` as the global object: the DOM interfaces it
   // can test with `name in window` or `window[name]`, and the other module's classes.
   // CustomEvent is left out: scriptc can't take a generic class as a value (issue 48).
