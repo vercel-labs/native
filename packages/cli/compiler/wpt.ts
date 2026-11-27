@@ -1011,8 +1011,21 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
   // A build that never succeeded is split, whoever the error was attributed to: the pages that
   // share the module failed with it. A runner that died before its first page began is split the
   // same way, for the same reason: the batch is one program, and smaller programs build and run.
-  const why = first.built === false ? "build failed"
-    : first.startup === true ? "the runner died before its first page" : "";
+  const why = first.built === false ? "build failed" : "";
+  // A program that dies before its first page cannot say which of its pages did it, and no split
+  // of it is needed to find out: the pages are run one per program, so the page whose program
+  // cannot start is the one reported as a crash and every other page is measured.
+  if (first.startup === true && jobs.length > 1) {
+    const outputs = new Map(first.outputs);
+    const failures = new Map(first.failures);
+    process.stderr.write(`\nnative wpt: batch ${index}: the runner died before its first page for ${jobs.length} page(s); running them one per program to find the one that breaks it\n`);
+    for (let n = 0; n < jobs.length; n++) {
+      const part = await runBatch(index * 1000 + n + 1, [jobs[n]], outDir, hostObjs, depth + 1);
+      for (const [k, v] of part.outputs) outputs.set(k, v);
+      for (const [k, v] of part.failures) failures.set(k, v);
+    }
+    return { outputs, failures, built: true };
+  }
   if (jobs.length <= 1 || why === "") return first;
   if (depth === 0 && first.built === false) {
     // Say once what scriptc said, since no page's own reason carries it at this level.
