@@ -136,7 +136,9 @@ export const INSPECT_HTML = String.raw`<!doctype html>
   }
 
   function connect() {
-    var ws = new WebSocket('ws://' + location.host + '/devtools/page/native');
+    var session = location.pathname.split('/')[1];
+    var scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var ws = new WebSocket(scheme + location.host + '/' + session + '/devtools/page/native');
     state.ws = ws;
     ws.onopen = function () {
       statusEl.textContent = 'connected';
