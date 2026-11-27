@@ -1,0 +1,11 @@
+{
+  "name": "@native-sdk/example-places",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "native build . -o build/places"
+  },
+  "devDependencies": {
+    "@native-sdk/cli": "workspace:*"
+  }
+}

@@ -32,6 +32,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sqlite3.h>
+#include "svg-filter.h"
 #include <mach-o/dyld.h>
 #include <pthread.h>
 
@@ -1207,7 +1208,19 @@ static NSFont *font_for(double size, double weight) {
     // font's palette 0. A font with no run keeps its descriptor untouched.
     NSArray *features = merged_feature_list(matched ? matched.features : @"", info ? info.features : @[]);
     BOOL hasLang = info != nil && info.lang.length > 0;
-    if ((info && (info.variations.count > 0 || info.palette >= 0)) || features.count > 0 || hasLang) {
+    // A face that covers a weight range is a variable one: font-weight sets its wght axis,
+    // font-size its opsz axis and a font-stretch its wdth axis, as a browser does. The run's own
+    // font-variation-settings override each of them, and a static face has no axis to set.
+    NSMutableDictionary *axes = info != nil && info.variations.count > 0 ? [info.variations mutableCopy] : nil;
+    if (matched != nil && matched.hi > matched.lo) {
+      if (axes == nil) axes = [NSMutableDictionary dictionary];
+      if (axes[@(axis_code(@"wght"))] == nil && w >= matched.lo && w <= matched.hi)
+        axes[@(axis_code(@"wght"))] = @(w);
+      if (axes[@(axis_code(@"opsz"))] == nil) axes[@(axis_code(@"opsz"))] = @((double)size);
+      if (axes[@(axis_code(@"wdth"))] == nil && g_stretch_request != 100)
+        axes[@(axis_code(@"wdth"))] = @(g_stretch_request);
+    }
+    if ((axes != nil && axes.count > 0) || (info && info.palette >= 0) || features.count > 0 || hasLang) {
       NSMutableDictionary *attrs = [f.fontDescriptor.fontAttributes mutableCopy];
       if (features.count > 0) attrs[(__bridge id)kCTFontFeatureSettingsAttribute] = features;
       // The language the run is in, which CoreText's cascade follows when the family list has no
@@ -1217,7 +1230,7 @@ static NSFont *font_for(double size, double weight) {
         NSArray *cascadeList = language_cascade(f, info.lang);
         if (cascadeList != nil) attrs[(__bridge id)kCTFontCascadeListAttribute] = cascadeList;
       }
-      if (info.variations.count > 0) attrs[(__bridge id)kCTFontVariationAttribute] = info.variations;
+      if (axes != nil && axes.count > 0) attrs[(__bridge id)kCTFontVariationAttribute] = axes;
       if (info.palette >= 0) {
         attrs[(__bridge id)kCTFontPaletteAttribute] = @(info.palette);
         if (info.paletteColors.count > 0) attrs[(__bridge id)kCTFontPaletteColorsAttribute] = info.paletteColors;
@@ -2861,6 +2874,40 @@ void host_canvas_set_filter(int32_t id, const uint8_t *def, size_t n) {
     c->filter[at].a = a;
     c->filter[at].b = c->filter[at].c = c->filter[at].d = 0;
   }
+}
+
+// An inline SVG filter: the region's pixels are read out of the bitmap, the chain runs over them
+// (the portable engine in svg-filter.c), and the result replaces them. The region is in bitmap
+// pixels, already clamped to the bitmap by the runtime.
+void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t linear,
+                            double x, double y, double w, double h) {
+  Canvas *c = canvas_at(id);
+  if (!c || !c->ctx || !(w > 0) || !(h > 0)) return;
+  uint8_t *data = CGBitmapContextGetData(c->ctx);
+  if (!data) return;
+  size_t rowBytes = CGBitmapContextGetBytesPerRow(c->ctx);
+  int x0 = (int)floor(x), y0 = (int)floor(y);
+  int x1 = (int)ceil(x + w), y1 = (int)ceil(y + h);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)c->w) x1 = (int)c->w;
+  if (y1 > (int)c->h) y1 = (int)c->h;
+  int iw = x1 - x0, ih = y1 - y0;
+  if (iw <= 0 || ih <= 0) return;
+  uint8_t *buf = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+  if (!buf) return;
+  // kCGImageAlphaPremultipliedLast is premultiplied RGBA, which is the engine's layout.
+  for (int row = 0; row < ih; row++) {
+    memcpy(buf + (size_t)row * (size_t)iw * 4,
+           data + (size_t)(y0 + row) * rowBytes + (size_t)x0 * 4, (size_t)iw * 4);
+  }
+  svg_filter_apply(buf, iw, ih, (const char *)def, n, linear != 0);
+  for (int row = 0; row < ih; row++) {
+    memcpy(data + (size_t)(y0 + row) * rowBytes + (size_t)x0 * 4,
+           buf + (size_t)row * (size_t)iw * 4, (size_t)iw * 4);
+  }
+  free(buf);
+  canvas_changed(c);
 }
 
 // --- Gradients --------------------------------------------------------------
@@ -5772,10 +5819,15 @@ static size_t replay_range(CGContextRef ctx, size_t i, ReplayState *st) {
         continue;
       }
       CmdList *saved = g_list;
+      size_t saved_limit = g_replay_limit;
       if (c->layer >= 0 && c->layer < g_layer_count) {
         g_list = &g_layers[c->layer].list;
+        // The limit is an index into the list being replayed, so a layer reached from a chunk
+        // paints its own commands to their end rather than to the end of the chunk's range.
+        g_replay_limit = (size_t)-1;
         replay_range(ctx, 0, st);
       }
+      g_replay_limit = saved_limit;
       g_list = saved;
       continue;
     }
@@ -7683,12 +7735,26 @@ static NSArray *ax_children(void) {
 // The display's period in milliseconds, and how long until its next refresh, both read from the
 // display link; zero until a window with a screen exists.
 static double g_refresh_ms = 0;
-static double g_next_refresh_ms = 0;
+// The display's next target refresh, on CACurrentMediaTime's clock. A window that doesn't present
+// through GL starts its frames on this cadence; a GL window's own swap already waits for it.
+static double g_next_target = 0;
 // The display link itself, kept for as long as the window: it fires on the main run loop.
 static id g_display_link = nil;
 
 double host_refresh_interval(void) { return g_refresh_ms; }
-double host_until_refresh(void) { return g_next_refresh_ms; }
+double host_until_refresh(void) {
+  double until = g_next_target - CACurrentMediaTime();
+  return until > 0 ? until * 1000.0 : 0;
+}
+
+/** Whether a canvas in the window presents through GL, whose swap waits for the display itself. */
+int32_t host_gl_window(void) {
+  for (int i = 0; i < g_canvas_count; i++) {
+    Canvas *c = g_canvases[i];
+    if (c != NULL && c->gl != NULL) return 1;
+  }
+  return 0;
+}
 
 @implementation NativeView
 - (void)refreshTick:(id)link {
@@ -7698,9 +7764,7 @@ double host_until_refresh(void) { return g_next_refresh_ms; }
     CADisplayLink *dl = (CADisplayLink *)link;
     double period = dl.targetTimestamp - dl.timestamp;
     if (period > 0 && period < 0.1) g_refresh_ms = period * 1000.0;
-    double now = CACurrentMediaTime();
-    double until = dl.targetTimestamp - now;
-    g_next_refresh_ms = until > 0 ? until * 1000.0 : 0;
+    g_next_target = dl.targetTimestamp;
   }
 }
 - (BOOL)isFlipped { return YES; }
@@ -8186,6 +8250,43 @@ static id g_settings_observer = nil;
 }
 @end
 
+/** The frame at the size it was given, moved so its titlebar and window controls stay on
+ *  `screen`. AppKit's own constraint shrinks a frame past the screen; a browser keeps the page's
+ *  size and lets the window hang past the display, with its titlebar where the user can reach it. */
+static NSRect frame_kept_on_screen(NSRect frame, NSScreen *screen) {
+  NSRect visible = screen.visibleFrame;
+  if (NSHeight(frame) > NSHeight(visible)) {
+    frame.origin.y = NSMaxY(visible) - NSHeight(frame);
+  } else if (frame.origin.y < NSMinY(visible)) {
+    frame.origin.y = NSMinY(visible);
+  } else if (NSMaxY(frame) > NSMaxY(visible)) {
+    frame.origin.y = NSMaxY(visible) - NSHeight(frame);
+  }
+  // The window controls sit at the frame's top left, so a frame wider than the screen keeps its
+  // left edge on it.
+  if (NSWidth(frame) > NSWidth(visible)) {
+    frame.origin.x = NSMinX(visible);
+  } else if (frame.origin.x < NSMinX(visible)) {
+    frame.origin.x = NSMinX(visible);
+  } else if (NSMaxX(frame) > NSMaxX(visible)) {
+    frame.origin.x = NSMaxX(visible) - NSWidth(frame);
+  }
+  return frame;
+}
+
+/** The window a page draws in. It keeps the frame it is given: a page wider or taller than the
+ *  display is laid out at its own size, as it is in a browser, instead of being shrunk to fit the
+ *  screen the way AppKit shrinks an ordinary window. Only where it sits is constrained, so the
+ *  titlebar and the controls stay on the screen. */
+@interface NativeWindow : NSWindow
+@end
+@implementation NativeWindow
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen {
+  NSScreen *on = screen != nil ? screen : (self.screen != nil ? self.screen : [NSScreen mainScreen]);
+  return on != nil ? frame_kept_on_screen(frameRect, on) : frameRect;
+}
+@end
+
 void host_open(double width, double height, const uint8_t *title, size_t title_len, const uint8_t *options, size_t options_len) {
   @autoreleasepool {
     signal(SIGPIPE, SIG_IGN);
@@ -8229,7 +8330,7 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
     // Every style but the default draws the page under the titlebar, with the traffic lights over it.
     g_tb_overlay = ![tbStyle isEqualToString:@"default"];
     if (g_tb_overlay) mask |= NSWindowStyleMaskFullSizeContentView;
-    g_window = [[NSWindow alloc]
+    g_window = [[NativeWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, width, height)
                   styleMask:mask
                     backing:NSBackingStoreBuffered
@@ -8281,6 +8382,11 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
     } else {
       [g_window center];
     }
+    // Placement is the frame in the page's size moved onto the screen: `center` puts a window
+    // taller than the display halfway above it, which leaves the titlebar and its controls out of
+    // reach.
+    NSScreen *home = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+    if (home != nil) [g_window setFrame:frame_kept_on_screen(g_window.frame, home) display:NO];
     [g_window makeKeyAndOrderFront:nil];
     if (g_view != nil) {
       // Follow the display: the link's period is what the frame loop paces itself with, and a
@@ -8288,7 +8394,7 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
       NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
       if (screen != nil && screen.maximumFramesPerSecond > 0) {
         g_refresh_ms = 1000.0 / (double)screen.maximumFramesPerSecond;
-        g_next_refresh_ms = 0;
+        g_next_target = 0;
       }
       if (@available(macOS 14.0, *)) {
         CADisplayLink *link = [g_view displayLinkWithTarget:g_view selector:@selector(refreshTick:)];
@@ -8693,7 +8799,24 @@ void host_set_cursor_image(int32_t id, double hx, double hy) {
   if (g_window) [g_window invalidateCursorRectsForView:g_view];
 }
 
-double host_backing_scale(void) { return g_window ? g_window.backingScaleFactor : 1.0; }
+double host_backing_scale(void) {
+  if (g_window == nil) return 1.0;
+  // A window that isn't on a screen yet reports a scale of 1, and a page's first script can run
+  // before the window is shown: the screen it opens on gives the scale its frames draw at, so a
+  // canvas sized from devicePixelRatio is sized for the pixels it will have.
+  NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+  return screen != nil ? screen.backingScaleFactor : g_window.backingScaleFactor;
+}
+
+double host_display_scale(void) {
+  @autoreleasepool {
+    // The display's own scale, before there is a window on it: a page's first script runs before
+    // run() opens the window, and the screen the window opens on is the one its frames draw for.
+    NSScreen *screen = g_window != nil ? g_window.screen : nil;
+    if (screen == nil) screen = [NSScreen mainScreen];
+    return screen != nil ? screen.backingScaleFactor : 1.0;
+  }
+}
 
 int32_t host_reduced_motion(void) {
   @autoreleasepool {
@@ -9672,9 +9795,17 @@ void host_window_set_frame(double x, double y, double w, double h) {
     frame = [g_window frameRectForContentRect:NSMakeRect(0, 0, content.width, content.height)];
     frame.origin = g_window.frame.origin;
   }
-  NSRect visible = g_window.screen != nil ? g_window.screen.visibleFrame : [NSScreen mainScreen].visibleFrame;
-  if (x >= 0) frame.origin.x = visible.origin.x + x;
-  if (y >= 0) frame.origin.y = visible.origin.y + visible.size.height - y - frame.size.height;
+  NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+  if (screen != nil) {
+    NSRect visible = screen.visibleFrame;
+    if (x >= 0) frame.origin.x = visible.origin.x + x;
+    if (y >= 0) frame.origin.y = visible.origin.y + visible.size.height - y - frame.size.height;
+    // A frame larger than the display keeps the size the page asked for; it is moved so its
+    // titlebar and controls stay on the screen.
+    if (NSWidth(frame) > NSWidth(visible) || NSHeight(frame) > NSHeight(visible)) {
+      frame = frame_kept_on_screen(frame, screen);
+    }
+  }
   [g_window setFrame:frame display:YES];
 }
 
@@ -10041,9 +10172,12 @@ void host_present_region(const uint8_t *rects, size_t n, double width, double he
     host_present(width, height);
     return;
   }
-  if (window_compositing() && g_pic_chunked) {
+  if (window_compositing()) {
     // A transform-only frame is the compositor's own work: the tiles stay and are drawn again
     // under the new matrices, and the frame becomes the picture a damaged frame patches next.
+    // A picture the compositor couldn't chunk is not patchable: the window shows that picture,
+    // not the view's backing, so the frame is presented whole instead of over a backing that
+    // never held it.
     host_present(width, height);
     return;
   }
@@ -10320,14 +10454,27 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
       out->kind = COMP_CMD_LAYER_REF;
       out->layer = c->layer;
       return 1;
+    // The one kind carries how it opens, splits and closes: the walk needs to know which mask
+    // command closes the state the push opened.
     case CMD_MASK_PUSH:
+      out->kind = COMP_CMD_MASK;
+      out->op = 0;
+      return 1;
     case CMD_MASK_SPLIT:
+      out->kind = COMP_CMD_MASK;
+      out->op = 1;
+      return 1;
     case CMD_MASK_POP:
       out->kind = COMP_CMD_MASK;
+      out->op = 2;
       return 1;
     case CMD_PERSPECTIVE_PUSH:
+      out->kind = COMP_CMD_PERSPECTIVE;
+      out->op = 0;
+      return 1;
     case CMD_PERSPECTIVE_POP:
       out->kind = COMP_CMD_PERSPECTIVE;
+      out->op = 2;
       return 1;
     default: {
       out->kind = COMP_CMD_DRAW;
@@ -11073,9 +11220,32 @@ static uint64_t key_cmd(uint64_t h, const Cmd *c) {
   return h;
 }
 
+/** Folds the pixels a run of commands rasters into `h`, following a layer ref into the list it
+ *  paints: a chunk under a mask or a projection holds such a ref where the walk can't split, and
+ *  what it draws is the layer's commands. Answers 0 when the run can't be keyed: a canvas draws
+ *  pixels its script changes without a new command, and so does a video, which draws the frame it
+ *  is on; a chain of layers deeper than the walk follows has more than the key should hold. */
+static int key_range(uint64_t *out, CmdList *l, size_t first, size_t count, int depth) {
+  uint64_t h = *out;
+  for (size_t i = 0; i < count; i++) {
+    const Cmd *cmd = &l->cmds[first + i];
+    if (cmd->kind == CMD_CANVAS || cmd->kind == CMD_VIDEO) return 0;
+    if (cmd->kind == CMD_LAYER_REF) {
+      if (depth >= 6 || cmd->layer < 0 || cmd->layer >= g_layer_count) return 0;
+      CmdList *inner = &g_layers[cmd->layer].list;
+      h = key_mix(h, 0x6c62272e07bb0142ull);
+      if (!key_range(&h, inner, 0, inner->count, depth + 1)) return 0;
+      continue;
+    }
+    h = key_cmd(h, cmd);
+  }
+  *out = h;
+  return 1;
+}
+
 /** The key of a chunk rastered under `raster_m` (with its clips baked in when it isn't `own`)
  *  into a frame of `pw` x `ph`; 0 when its commands don't pin its pixels down: a canvas draws
- *  pixels its script changes without a new command, and a layer ref paints a list of its own. */
+ *  pixels its script changes without a new command. */
 static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *raster_m, int pw,
                           int ph) {
   if (c->count <= 0) return 0;
@@ -11103,11 +11273,7 @@ static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *ras
       h = key_double(h, c->clips[k].r);
     }
   }
-  for (int i = 0; i < c->count; i++) {
-    const Cmd *cmd = &l->cmds[c->first + i];
-    if (cmd->kind == CMD_CANVAS || cmd->kind == CMD_LAYER_REF) return 0;
-    h = key_cmd(h, cmd);
-  }
+  if (!key_range(&h, l, (size_t)c->first, (size_t)c->count, 0)) return 0;
   return h == 0 ? 1 : h;
 }
 

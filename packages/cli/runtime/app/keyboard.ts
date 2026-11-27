@@ -1,9 +1,10 @@
 // Keyboard input: key events, focus cycling and text-field editing.
 
 import * as P from "../../shared/props.ts";
-import { Node, Element, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, InputEvent, KeyboardEvent, document, dispatch, trusted, implicitSubmit, markPaintDirty, invalidatePaint, focusState, setFocus, noteInput, dismissPopover, openSelectMenu, controlKind, rangeSpec, setRangeValue, CONTROL_NONE, CONTROL_RANGE, inDisabledFormControl, dateKind, dateSegments, dateTypeText, dateStepActive, dateMoveActive, dateClearActive, dateSetActive, editingHostFor } from "../dom.ts";
-import { deleteTextIn, insertTextInto, selectHost } from "../editable.ts";
+import { Node, Element, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, InputEvent, KeyboardEvent, document, dispatch, trusted, implicitSubmit, markPaintDirty, invalidatePaint, focusState, setFocus, noteInput, noteUserActivation, dismissPopover, openSelectMenu, controlKind, rangeSpec, setRangeValue, CONTROL_NONE, CONTROL_RANGE, inDisabledFormControl, dateKind, dateSegments, dateTypeText, dateStepActive, dateMoveActive, dateClearActive, dateSetActive, editingHostFor } from "../dom.ts";
+import { deleteTextIn, insertTextInto, moveCaretIn, selectHost } from "../editable.ts";
 import { datePickerKey, closeDatePicker } from "../date-picker.ts";
+import { focusgroupBehavior, moveInSegment, rememberSegmentItem, segmentFor, segmentStop } from "./focusgroup.ts";
 import { caret, textAreaLineStarts } from "../paint.ts";
 import { textWidth } from "../layout.ts";
 import { padV } from "../layout/box-model.ts";
@@ -17,8 +18,12 @@ import { compositionCancel, compositionEnd, compositionStart, compositionUpdate,
 // ---------------------------------------------------------------------------
 // Keyboard
 
+/** A key a test presses by name rather than by character (a modifier): it types nothing. */
+const KEY_MODIFIER = -3;
+
 function keyName(code: number, text: string): string {
   if (code === KEY_TEXT) return text;
+  if (code === KEY_MODIFIER) return text;
   if (code === KEY_BACKSPACE) return "Backspace";
   if (code === KEY_ENTER) return "Enter";
   if (code === KEY_LEFT) return "ArrowLeft";
@@ -39,6 +44,13 @@ function keyName(code: number, text: string): string {
 
 /** The physical key's name, as a browser reports it: "KeyA", "Space", "ArrowLeft" and so on. */
 function keyCodeName(code: number, text: string): string {
+  if (code === KEY_MODIFIER) {
+    if (text === "Shift") return "ShiftLeft";
+    if (text === "Control") return "ControlLeft";
+    if (text === "Alt") return "AltLeft";
+    if (text === "Meta") return "MetaLeft";
+    return text;
+  }
   if (code === KEY_TEXT) {
     if (text === " ") return "Space";
     if (text.length === 1 && text >= "a" && text <= "z") return "Key" + text.toUpperCase();
@@ -94,10 +106,36 @@ function sequentialFocus(): Element[] {
   return positive.concat(rest);
 }
 
+/** The page's tab stops: a focusgroup segment counts once, at the item Tab enters it at. */
+function tabStops(list: Element[]): Element[] {
+  const stops: Element[] = [];
+  for (const el of list) {
+    const seg = segmentFor(el);
+    if (seg === null || seg === el) {
+      stops.push(el);
+      continue;
+    }
+    if (segmentStop(seg) === el) stops.push(el);
+  }
+  return stops;
+}
+
 function cycleFocus(step: number): void {
-  const list = sequentialFocus();
+  const focused = focusState.el;
+  // Leaving a segment remembers the item it held, so Tab or Shift+Tab comes back to it.
+  if (focused !== null && focused instanceof Element) {
+    const seg = segmentFor(focused);
+    if (seg !== null && seg !== focused) rememberSegmentItem(seg, focused);
+  }
+  const list = tabStops(sequentialFocus());
   if (list.length === 0) return;
-  const i = focusState.el !== null ? list.indexOf(focusState.el) : -1;
+  let i = focused !== null ? list.indexOf(focused) : -1;
+  if (i < 0 && focused !== null && focused instanceof Element) {
+    // Focus was on an item that is not the segment's stop: leave from the segment's own place.
+    const seg = segmentFor(focused);
+    const stop = seg === null ? null : segmentStop(seg);
+    if (stop !== null) i = list.indexOf(stop);
+  }
   const next = list[(i + step + list.length) % list.length];
   setFocus(next, true);
   if (next instanceof HTMLInputElement) next.select();
@@ -284,6 +322,9 @@ function lineEndAt(v: string, at: number): number {
  * character is typed text.
  */
 export function __nativeSendKeys(element: any, keys: any): void {
+  // The keys come from the keyboard, and so does the shadow the focus they bring casts:
+  // :focus-visible matches it even when the element took focus before the key events.
+  noteInput("key");
   if (element !== null && element !== undefined && typeof element.focus === "function") element.focus();
   let mods = 0;
   const text = String(keys);
@@ -307,6 +348,41 @@ export function __nativeSendKeys(element: any, keys: any): void {
     else if (at === 0x00e03d) mods |= MOD_META;
     else keyDown(KEY_TEXT, mods, ch);
   }
+}
+
+/**
+ * One WebDriver key value from a test_driver.Actions source: presses or releases it through the
+ * same path the host's keys take, so the event is trusted, and answers the modifier state that
+ * holds afterwards. The values are WebDriver's: U+E003 Backspace, U+E007 Enter, U+E008 Shift,
+ * U+E03D Meta and so on; every other character is typed text.
+ */
+export function actionKey(value: string, mods: number, down: boolean): number {
+  const ch = value.length === 0 ? 0 : value.charCodeAt(0);
+  let code = KEY_TEXT;
+  let text = value;
+  let mod = 0;
+  if (ch === 0x00e003) { code = KEY_BACKSPACE; text = ""; }
+  else if (ch === 0x00e004) { code = KEY_TAB; text = ""; }
+  else if (ch === 0x00e006 || ch === 0x00e007) { code = KEY_ENTER; text = ""; }
+  else if (ch === 0x00e00c) { code = KEY_ESCAPE; text = ""; }
+  else if (ch === 0x00e00d) { text = " "; }
+  else if (ch === 0x00e010) { code = KEY_END; text = ""; }
+  else if (ch === 0x00e011) { code = KEY_HOME; text = ""; }
+  else if (ch === 0x00e012) { code = KEY_LEFT; text = ""; }
+  else if (ch === 0x00e013) { code = KEY_UP; text = ""; }
+  else if (ch === 0x00e014) { code = KEY_RIGHT; text = ""; }
+  else if (ch === 0x00e015) { code = KEY_DOWN; text = ""; }
+  else if (ch === 0x00e017) { code = KEY_DELETE; text = ""; }
+  else if (ch === 0x00e008) { mod = MOD_SHIFT; code = KEY_MODIFIER; text = "Shift"; }
+  else if (ch === 0x00e009) { mod = MOD_CTRL; code = KEY_MODIFIER; text = "Control"; }
+  else if (ch === 0x00e00a) { mod = MOD_ALT; code = KEY_MODIFIER; text = "Alt"; }
+  else if (ch === 0x00e03d) { mod = MOD_META; code = KEY_MODIFIER; text = "Meta"; }
+  if (down) {
+    keyDown(code, mods | mod, text);
+    return mods | mod;
+  }
+  keyUp(code, mods & ~mod, text);
+  return mods & ~mod;
 }
 
 /**
@@ -336,6 +412,7 @@ export function keyUp(code: number, mods: number, text: string = ""): void {
 
 export function keyDown(code: number, mods: number, text: string, repeat: boolean = false): void {
   noteInput("key");
+  noteUserActivation();
   const target: Node = focusState.el !== null ? focusState.el :
     document.body !== null ? document.body : document.documentElement;
   const ev = trusted(new KeyboardEvent("keydown", {
@@ -373,6 +450,24 @@ export function keyDown(code: number, mods: number, text: string, repeat: boolea
     closeDatePicker();
     cycleFocus(ev.shiftKey ? -1 : 1);
     return;
+  }
+  // A focusgroup segment takes the arrow keys along its axis and Home/End to its ends, as Chrome
+  // does; a field or an editing host keeps them for its own caret.
+  if (code === KEY_LEFT || code === KEY_RIGHT || code === KEY_UP || code === KEY_DOWN || code === KEY_HOME || code === KEY_END) {
+    const plain = (mods & (MOD_META | MOD_CTRL | MOD_ALT | MOD_SHIFT)) === 0;
+    if (plain && target instanceof Element && !(target instanceof HTMLInputElement) &&
+      !(target instanceof HTMLTextAreaElement) && !(target instanceof HTMLSelectElement) && editingHostFor(target) === null) {
+      const seg = segmentFor(target);
+      if (seg !== null && seg !== target && focusgroupBehavior(seg) !== null) {
+        const key = code === KEY_LEFT ? "left" : code === KEY_RIGHT ? "right" : code === KEY_UP ? "up"
+          : code === KEY_DOWN ? "down" : code === KEY_HOME ? "home" : "end";
+        const to = moveInSegment(seg, target, key);
+        if (to !== null) {
+          setFocus(to, true);
+          return;
+        }
+      }
+    }
   }
   // Escape is the open auto popover's light dismiss; a cancelled keydown never gets here.
   if (code === KEY_ESCAPE) {
@@ -433,6 +528,12 @@ export function keyDown(code: number, mods: number, text: string, repeat: boolea
       deleteTextIn(host, true);
       return;
     }
+    const extend = (mods & MOD_SHIFT) !== 0;
+    if (code === KEY_LEFT) { moveCaretIn(host, "left", extend); return; }
+    if (code === KEY_RIGHT) { moveCaretIn(host, "right", extend); return; }
+    if (code === KEY_HOME) { moveCaretIn(host, "home", extend); return; }
+    if (code === KEY_END) { moveCaretIn(host, "end", extend); return; }
+    if (code === KEY_UP || code === KEY_DOWN) return;
   }
   // A textarea edits its own text: Enter is a newline, and the caret walks the text it has.
   if (target instanceof HTMLTextAreaElement) {

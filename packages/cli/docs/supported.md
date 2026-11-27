@@ -902,7 +902,14 @@ Native SDK supports a growing subset of the web platform. Anything outside it is
   the path's `clip-rule` (`nonzero` or `evenodd`) honoured, the clip resolved in the element's own user space so it moves with its
   `transform`, and nested clips intersecting. A basic shape on an SVG element (`inset()`, `circle()`, `ellipse()`, `polygon()` or
   `path()`, with `evenodd`) resolves against the box it names: `fill-box`, `padding-box`, `content-box` and `margin-box` are the
-  object's own bounds, `border-box` and `stroke-box` those grown by half its stroke, and `view-box` the viewport. A `<text>` is drawn with the host's line layout along its baseline: `x` and `y` place the
+  object's own bounds, `border-box` and `stroke-box` those grown by half its stroke, and `view-box` the viewport. A `filter` of
+  `url(#id)` (the presentation attribute, a `style=""`, or a rule; on an SVG element)
+  names a `<filter>` in the same `<svg>`, whose
+  primitives run over the element's finished picture in device pixels: `feGaussianBlur`, `feOffset`, `feColorMatrix` (all four
+  types), `feBlend`, `feMerge`, `feFlood`, `feComposite` and `feDropShadow`, wired by `in`/`in2`/`result`, clipped by the filter
+  region (`filterUnits`, `x`/`y`/`width`/`height`) and each primitive's subregion, with `primitiveUnits` and
+  `color-interpolation-filters` (`sRGB`, or the default `auto` which interpolates in linear RGB as Chrome does). The other filter
+  primitives pass their input through unchanged. A `<text>` is drawn with the host's line layout along its baseline: `x` and `y` place the
   baseline's start, `dx`/`dy` shift it, whitespace collapses as a browser collapses it, and `<tspan>` and `<a>` inside take their own
   `x`/`y`/`dx`/`dy`, `font-family`, `font-size`, `font-weight`, `font-style`, `fill`, `stroke` and the rest of the paint properties,
   so one text can mix sizes and colours. `text-anchor` (`start`, `middle`, `end`) moves a run of text to its anchor point. The glyphs
@@ -961,7 +968,12 @@ Native SDK supports a growing subset of the web platform. Anything outside it is
   take the event with `preventDefault()`. A cut clears the field's selection, and a paste puts the clipboard's text and
   markup in the payload and then inserts its text at a field's caret unless the handler took the event (an input takes
   it on one line, a textarea keeps its newlines). `document.execCommand("copy" | "cut" | "paste" | "selectAll" | "insertText")`
-  runs those commands, and `queryCommandSupported()` answers for them. The clipboard is the system's: the macOS host
+  runs those commands, and `queryCommandSupported()` answers for them. In a contenteditable host
+  it also runs `bold`, `italic`, `underline`, `formatBlock`, `createLink`, `removeFormat`, `undo`
+  and `redo`; `queryCommandState()` reports whether the caret is bold, italic, underlined, in a
+  link or in a list, and `queryCommandEnabled()` answers for a command. `undo` and `redo` walk
+  snapshots of the host's markup taken before each editing command and keystroke, not a browser's
+  own undo stack. The clipboard is the system's: the macOS host
   reads and writes NSPasteboard, and the headless Linux host keeps it in files, `NATIVE_PASTEBOARD` naming the text one.
 - **IndexedDB:** `indexedDB.open(name, version)`, `deleteDatabase(name)` and `databases()`, with `upgradeneeded` (and `blocked`) when a version is newer, `versionchange` on the open connections, and error/success requests. A database holds object stores with an inline or out-of-line key path and an optional key generator; `add`, `put`, `get`, `getKey`, `getAll`, `getAllKeys`, `count`, `delete` and `clear` run in a transaction (`readonly`, `readwrite`, or the upgrade's `versionchange`), which reports `complete`, `abort` or `error` and rolls its writes back when it aborts. `IDBKeyRange` bounds the multi-record reads, and keys of every kind — numbers, dates, strings, buffers and arrays — compare in the standard's order. Values are structured-cloned, dates, buffers and Blobs included. Each database is a SQLite file in the app's own data directory, beside its localStorage file. Indexes (`createIndex`, `index`, `deleteIndex`, `indexNames`) read a store's records by a second key in index-key order, and a cursor (`openCursor`, `openKeyCursor`) over a store or an index walks them in `next`, `nextunique`, `prev` or `prevunique` order through `continue()`, `continue(key)`, `advance()` and, on a value cursor, `update()` and `delete()`.
 - **Drag and drop:** a press that moves on an element that drags — `draggable="true"`, or a link or an image with no
@@ -1156,14 +1168,13 @@ or a remote URL), drawing an image's `alt` text when it can't be loaded,
 `toDataURL`, `createPattern`, and canvas shadows, `drop-shadow()` filters and
 `isPointInPath`, a `<style>` element inside an SVG file (its presentation attributes and `style=""` attributes apply;
 a stylesheet in the file doesn't),
-and in an `<svg>`, inline or an image: patterns, masking, filters, markers, `textPath` and glyph positioning (`textLength`,
-`letter-spacing`), and the reference elements besides `<use>` and `<clipPath>`,
-a gradient's `spreadMethod` other than the default `pad` and a focal circle outside its end circle, an element's or a group's
-`opacity` composited as one layer (it multiplies into each drawing below it instead, so a translucent box's background
-and its children fade one by one rather than as a group), `list-style-image`, a counter style's `speak-as` descriptor and the
+and in an `<svg>`, inline or an image: masking, markers, `textPath` and glyph positioning (`textLength`,
+`letter-spacing`), the filter primitives other than the list above, and the reference elements besides `<use>` and `<clipPath>`,
+a gradient's `spreadMethod` other than the default `pad` and a focal circle outside its end circle,
+`list-style-image`, a reference filter (`filter: url(#id)`) on an HTML box (it renders on an element inside an inline `<svg>`), a counter style's `speak-as` descriptor and the
 `additive-symbols`/`symbols` forms of the scripts beyond the predefined sets above, background clipping to text (`background-clip: text`), remote `@font-face` fonts (a family that isn't available falls back to the system font;
 `@font-face` files are copied into the app's bundle), `local()` in an `@font-face` `src`,
-and its children fade one by one rather than as a group), `list-style-image`, `counter-reset`/`counter-increment` and the `reversed` attribute of `<ol>`,
+and its children fade one by one rather than as a group), `list-style-image`, a reference filter (`filter: url(#id)`) on an HTML box (it renders on an element inside an inline `<svg>`), `counter-reset`/`counter-increment` and the `reversed` attribute of `<ol>`,
 background clipping to text (`background-clip: text`), remote `@font-face` fonts (a family that isn't available falls back to the system font;
 `@font-face` files are copied into the app's bundle),
 `palette-mix()` for `font-palette`, and the light/dark choice `font-palette: normal` would make under a

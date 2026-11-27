@@ -96,6 +96,7 @@ export function documentMode(src: string): number {
 }
 
 import { type Diagnostics, locator } from "./diagnostics.ts";
+import { NAMED_ENTITIES } from "../shared/entities.ts";
 
 export interface HElement {
   kind: "element";
@@ -160,26 +161,15 @@ const SECTIONS = new Set(["tbody", "thead", "tfoot"]);
 const CELL_STOP = new Set(["table", "tbody", "thead", "tfoot", "tr"]);
 const SECTION_STOP = new Set(["table", "tbody", "thead", "tfoot"]);
 
-const ENTITIES: Record<string, string> = {
-  amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", minus: "−", times: "×",
-  middot: "·", mdash: "—", ndash: "–", hellip: "…", copy: "©",
-  ensp: " ", emsp: " ", thinsp: " ", hairsp: " ",
-  newline: "\n", tab: "\t", lrm: "‎", rlm: "‏", zerowidthspace: "​", nobreak: "⁠",
-  shy: "­", plusmn: "±", divide: "÷", ne: "≠", le: "≤", ge: "≥",
-  frac12: "½", frac14: "¼", frac34: "¾", deg: "°", micro: "µ", para: "¶", sect: "§",
-  bullet: "•", lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”", sbquo: "‚", bdquo: "„",
-  laquo: "«", raquo: "»", prime: "′", reg: "®", trade: "™", euro: "€", pound: "£",
-  yen: "¥", cent: "¢", curren: "¤", larr: "←", rarr: "→", uarr: "↑", darr: "↓",
-  harr: "↔", iquest: "¿", iexcl: "¡",
-};
-
 export function decodeEntities(s: string): string {
   return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi, (m, name: string) => {
     if (name[0] === "#") {
       const code = name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
       return Number.isFinite(code) ? String.fromCodePoint(code) : m;
     }
-    return ENTITIES[name.toLowerCase()] ?? m;
+    // The names are case-sensitive: `&amp;` and `&AMP;` are both references, `&Amp;` is not.
+    const chars = NAMED_ENTITIES[name];
+    return chars === undefined ? m : chars;
   });
 }
 

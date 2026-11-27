@@ -166,6 +166,8 @@ interface OutRule {
   /** The origin the rule came from ("ua", "author" or "inline"); revert rolls back to the UA's. */
   origin: string;
   classes: string[];
+  /** Class-prefix conditions on the subject compound (".foo-*"). */
+  classPrefixes: string[];
   states: number;
   /** The subject compound is :root, which the runtime tests against the document's root element. */
   root: boolean;
@@ -397,8 +399,14 @@ function jsxElements(src: string): { tags: string[]; any: boolean; unknown: bool
 
 export function compileApp(htmlPath: string, diags: Diagnostics, options: CompileOptions = {}): CompiledApp {
   const appDir = dirname(htmlPath);
-  const resolveUrl = (href: string) =>
-    href.startsWith("/") && options.root ? join(options.root, href) : join(appDir, href.split(/[?#]/)[0]);
+  const resolveUrl = (href: string) => {
+    const path = href.split(/[?#]/)[0];
+    if (!path.startsWith("/") || !options.root) return join(appDir, path);
+    // The WPT server serves the checkout at "/" and again under "/external/wpt/", and a page may
+    // link a stylesheet or a script either way; the prefix names the same file.
+    const under = path.startsWith("/external/wpt/") ? path.slice("/external/wpt/".length) : path;
+    return join(options.root, under);
+  };
   const inlineScripts: string[] = [];
   /** Counts <script> elements as the document is scanned, for document.currentScript. */
   let scriptOrder = 0;
@@ -720,6 +728,13 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   const handlers: HandlerAttribute[] = [];
   const scriptText: string[] = [];
 
+  // A <style> inside a <template> styles whatever tree the template's content is cloned into,
+  // and the build can't know that tree: the sheet is parsed when the content lands, where its
+  // root is known (a shadow tree's sheet styles that tree alone).
+  const inTemplate = new Set<HElement>();
+  for (const t of findAll(doc, (e) => e.tag === "template")) {
+    for (const e of findAll(t, () => true)) inTemplate.add(e);
+  }
   const all = findAll(doc, () => true);
   for (const el of all) {
     // An inline event handler is script too: what it does to the DOM decides whether a selector
@@ -766,7 +781,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         media: el.attrs.get("media") ?? "", disabled: el.attrs.has("disabled"),
       });
     }
-    if (el.tag === "style") {
+    if (el.tag === "style" && !inTemplate.has(el)) {
       sheets.push({
         text: textOf(el), file: htmlFile, line: el.line, col: el.col, node: el,
         media: el.attrs.get("media") ?? "", disabled: false,
@@ -1196,8 +1211,11 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     const isRoot = el === htmlEl;
     return rules.some((r) => r.selectors.some((s) => s.pseudo === kind &&
       (name === null || s.pseudoName === name) &&
-      (s.tagNs !== undefined || s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
-      s.classes.every((c) => classes.includes(c))));
+      // The local name counts whatever namespace the selector names (the namespace itself is not
+      // screened here), and a class prefix can't be screened at all: the box is made and the
+      // rule's conditions decide at runtime whether it draws anything.
+      (s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
+      ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(c)))));
   };
 
   /** A child node for generated content. It carries no attributes: its style is all rules. */
@@ -1358,7 +1376,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     if (before) addPseudo(idx, P.PE_BEFORE);
     // A text field's ::placeholder carries the style its placeholder text is drawn with. The box
     // itself never lays out or paints; the field reads the style when it draws the text.
-    const placeholder = localTag === "input" && hasPseudoRule(el, P.PE_PLACEHOLDER);
+    const placeholder = (localTag === "input" || localTag === "textarea") && hasPseudoRule(el, P.PE_PLACEHOLDER);
     if (placeholder) addPseudo(idx, P.PE_PLACEHOLDER);
     // A dialog's ::backdrop is painted by the top layer, never in the flow; the UA sheet gives it
     // display: none so that it takes no room here.
@@ -1533,12 +1551,15 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     return false;
   };
   const chainIsStatic = (chain: ChainLink[]) =>
-    treeIsStatic && !markupMayChange && chain.every((c) => c.classes.length === 0 && c.states === 0 &&
+    treeIsStatic && !markupMayChange && chain.every((c) => c.classes.length === 0 && (c.classPrefixes ?? []).length === 0 && c.states === 0 &&
       c.nthStart.length === 0 && c.nthEnd.length === 0 && c.attrs.length === 0 && c.nots.length === 0 &&
       (c.lang === undefined || c.lang.length === 0) && (c.notSels === undefined || c.notSels.length === 0) &&
       (c.dir ?? 0) === 0 && c.has.length === 0 && c.comb <= COMB_CHILD);
-  const plausible = (sel: Selector) => markupMayChange ||
-    (sel.classes.every((c) => possibleClasses.has(c)) && sel.chain.every((l) => l.classes.every((c) => possibleClasses.has(c))));
+  // A class-prefix condition names no class the build can list, so it can never be ruled out
+  // here: the rule stays for the runtime to test.
+  const plausible = (sel: Selector) => markupMayChange || (sel.classPrefixes ?? []).length > 0 ||
+    (sel.classes.every((c) => possibleClasses.has(c)) &&
+      sel.chain.every((l) => (l.classPrefixes ?? []).length > 0 || l.classes.every((c) => possibleClasses.has(c))));
   let staticChains = 0;
   let chainStates = 0;
 
@@ -1565,7 +1586,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
       outRules.push(r);
       ruleKey.set(key, id);
       ruleSheetOf.push(sheet);
-      if (r.classes.length > 0 || r.states !== 0 || r.chain.length > 0 || r.attrs.length > 0 ||
+      if (r.classes.length > 0 || r.classPrefixes.length > 0 || r.states !== 0 || r.chain.length > 0 || r.attrs.length > 0 ||
         r.nots.length > 0 || r.has.length > 0 || r.empty || r.chainEmpty.some((e) => e) ||
         r.chainHas.some((h) => h.length > 0) ||
         r.nthStart.length > 0 || r.nthEnd.length > 0 || r.media !== "" || r.container !== "") conditionalRules++;
@@ -1601,7 +1622,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
 
   const outRule = (sel: Selector, decls: Decl[], important: boolean, media: string, container: string,
     scope: string, starting: boolean, origin: string): OutRule => ({
-    important, origin, classes: sel.classes, states: sel.states, stateMask: compoundStates(sel), root: sel.root, dir: sel.dir ?? 0,
+    important, origin, classes: sel.classes, classPrefixes: sel.classPrefixes ?? [], states: sel.states, stateMask: compoundStates(sel), root: sel.root, dir: sel.dir ?? 0,
     nthStart: sel.nthStart, nthEnd: sel.nthEnd,
     nthStartOf: sel.nthStartOf ?? [], nthEndOf: sel.nthEndOf ?? [],
     attrs: sel.attrs, lang: sel.lang ?? [], nots: sel.nots, notSels: sel.notSels ?? [],
@@ -1665,7 +1686,9 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         if (sel.host === true || sel.slotted === true) continue;
         // A ::highlight() carrier takes the rules of its own name only.
         if (pseudo === P.PE_HIGHLIGHT && sel.pseudoName !== node.pseudoName) continue;
-        if (sel.tag && sel.tagNs === undefined && sel.tag !== origin.tag) continue;
+        // A selector's local name has to match the element's whatever namespace it names: the
+        // namespace itself is not screened here, so "*|a" still names anchors only.
+        if (sel.tag && sel.tag !== origin.tag) continue;
         if (sel.root && at !== rootIdx) continue;
         if (!markupMayChange && sel.id !== null && sel.id !== origin.id) continue;
         if (!plausible(sel)) continue;
@@ -1749,7 +1772,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         .sort((a, b) => (lastAt.get(a) as number) - (lastAt.get(b) as number))
         .map((k) => merged.get(k) as Decl);
       node.rules.push(intern({
-        important: pendingImportant, origin: pendingOrigin, classes: [], states: 0, stateMask: 0, root: false, dir: 0, empty: false, chainEmpty: [], nthStart: [], nthEnd: [],
+        important: pendingImportant, origin: pendingOrigin, classes: [], classPrefixes: [], states: 0, stateMask: 0, root: false, dir: 0, empty: false, chainEmpty: [], nthStart: [], nthEnd: [],
         nthStartOf: [], nthEndOf: [], attrs: [], lang: [], nots: [], notSels: [], has: [], chainHas: [], chain: [], decls: flatten(mergedDecls),
         customs: mergedDecls.some((d) => d.prop !== undefined && d.prop.startsWith("--")),
         pseudo, media: "", container: "", scope: "", starting: false,
@@ -1767,7 +1790,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
       }
       if (c.decls.length === 0) continue;
       const sheet = sheetRuns ? ruleSheet.get(c.rule) ?? -1 : -1;
-      if (c.rule.media === "" && c.rule.container === "" && c.rule.scope === "" && !c.rule.starting && c.sel.classes.length === 0 && c.sel.states === 0 && c.sel.chain.length === 0 &&
+      if (c.rule.media === "" && c.rule.container === "" && c.rule.scope === "" && !c.rule.starting && c.sel.classes.length === 0 && (c.sel.classPrefixes ?? []).length === 0 && c.sel.states === 0 && c.sel.chain.length === 0 &&
         c.sel.attrs.length === 0 && c.sel.nots.length === 0 && c.sel.has.length === 0 &&
         (c.sel.lang === undefined || c.sel.lang.length === 0) &&
         (c.sel.notSels === undefined || c.sel.notSels.length === 0) && (c.sel.dir ?? 0) === 0 &&
@@ -1893,6 +1916,8 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     "// tables and a script's own URLs are relative to the bundle the host locates at startup.",
     `export const BUNDLED: boolean = ${options.bundle !== undefined ? "true" : "false"};`,
     table("RULE_CLASSES", "string[][]", outRules.map((r) => r.classes), true),
+    "// Class-prefix conditions on the subject compound (\".foo-*\").",
+    table("RULE_CLASS_PREFIXES", "string[][]", outRules.map((r) => r.classPrefixes), true),
     table("RULE_STATES", "number[]", outRules.map((r) => r.states)),
     "// True for a rule whose declarations set a custom property (or hold a var()).",
     table("RULE_CUSTOMS", "boolean[]", outRules.map((r) => r.customs)),
@@ -1923,6 +1948,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     table("RULE_CHAIN_TAG", "string[][]", outRules.map((r) => r.chain.map((l) => l.tag ?? ""))),
     table("RULE_CHAIN_ID", "string[][]", outRules.map((r) => r.chain.map((l) => l.id ?? ""))),
     table("RULE_CHAIN_CLASSES", "string[][][]", outRules.map((r) => r.chain.map((l) => l.classes))),
+    table("RULE_CHAIN_CLASS_PREFIXES", "string[][][]", outRules.map((r) => r.chain.map((l) => l.classPrefixes ?? []))),
     table("RULE_CHAIN_STATES", "number[][]", outRules.map((r) => r.chain.map((l) => l.states))),
     table("RULE_CHAIN_NTH_START", "number[][][]", outRules.map((r) => r.chain.map((l) => l.nthStart))),
     table("RULE_CHAIN_NTH_END", "number[][][]", outRules.map((r) => r.chain.map((l) => l.nthEnd))),

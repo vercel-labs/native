@@ -1,6 +1,6 @@
 // Compiled app tables, mounting them as a DOM, and the style/layout/paint frame pipeline.
 
-import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
+import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, resetInput, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
 import { setDocumentMode } from "../quirk.ts";
 import { setPageCharset } from "../dom.ts";
 import { clearPaintDamage, layoutEpoch, stateUsage, takeStyleRoots, paintMarkTrace } from "../invalidation.ts";
@@ -46,7 +46,7 @@ import * as P from "../../shared/props.ts";
 import { pointer } from "./pointer.ts";
 import { clearSmoothScrolls } from "./smooth.ts";
 import { clearAdopted, refreshSheet, setSheetLiveSink, resetRuntimeLayers } from "../sheets.ts";
-import { applyWindowEnvironment, clearAllTimers, window, reportUnhandledRejection } from "../window.ts";
+import { applyWindowEnvironment, clearAllTimers, resetLoadGate, window, reportUnhandledRejection } from "../window.ts";
 import { clearLiveCollections, clearLiveRanges, setValueRangeGeometryHook } from "../dom.ts";
 import { resetAccessibleProperties } from "../a11y.ts";
 import { clearRegistrations, registerCustomProperty } from "../registered.ts";
@@ -75,6 +75,8 @@ export interface AppTables {
   /** The encoding the page's own markup declares (a meta charset), lowercased. */
   charset?: string;
   ruleClasses: string[][];
+  /** Class-prefix conditions on each rule's subject compound (".foo-*"). */
+  ruleClassPrefixes: string[][];
   ruleStates: number[];
   /** True for a rule whose declarations set a custom property (or hold a var()). */
   ruleCustoms?: boolean[];
@@ -143,6 +145,7 @@ export interface AppTables {
   chainTag: string[][];
   chainId: string[][];
   chainClasses: string[][][];
+  chainClassPrefixes: string[][][];
   chainStates: number[][];
   chainNthStart: number[][][];
   chainNthEnd: number[][][];
@@ -325,6 +328,7 @@ export function applyTables(t: AppTables): void {
   resetDisabledSheets();
   resetAppendedSubtreeCheck();
   tables.ruleClasses = t.ruleClasses;
+  tables.ruleClassPrefixes = t.ruleClassPrefixes;
   tables.ruleStates = t.ruleStates;
   tables.ruleCustoms = t.ruleCustoms === undefined ? [] : t.ruleCustoms;
   tables.ruleNthStart = t.ruleNthStart;
@@ -359,6 +363,7 @@ export function applyTables(t: AppTables): void {
   tables.chainTag = t.chainTag;
   tables.chainId = t.chainId;
   tables.chainClasses = t.chainClasses;
+  tables.chainClassPrefixes = t.chainClassPrefixes;
   tables.chainStates = t.chainStates;
   tables.chainNthStart = t.chainNthStart;
   tables.chainNthEnd = t.chainNthEnd;
@@ -784,6 +789,8 @@ export function resetPage(): void {
   clearRegistrations();
   resetCounterStyles();
   setFocus(null);
+  // The next page's own focus decisions start with no interaction behind them.
+  resetInput();
   pointer.hovered = [];
   pointer.pressed = null;
   pointer.down = false;
@@ -795,6 +802,7 @@ export function resetPage(): void {
   // listeners die with it, and the document it listened on starts over.
   clearAllTimers();
   window.reset();
+  resetLoadGate();
   document.listeners.clear();
   // The WPT runner reads a testharness page's result off the window. The last page's result must
   // not stand in for this one's, so a page that reports nothing is not credited with it.
@@ -806,6 +814,8 @@ export function frame(): void {
   // A layout that moves boxes moves the accessibility tree with them.
   const moves = dirty.layout || dirty.style;
   flushStyleAndLayout();
+  // A focused element that the style change hid loses the focus before anything observes it.
+  if (dropFocusIfUnrendered()) flushStyleAndLayout();
   // Sizes and positions are final for this frame, so the observers hear about them after the
   // layout pass.
   deliverResizeObservers();
