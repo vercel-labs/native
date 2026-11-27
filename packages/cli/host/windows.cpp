@@ -6316,6 +6316,10 @@ int32_t host_snapshot_composited(const uint8_t *path, size_t path_len, double wi
 
 double host_backing_scale(void) { return g_scale; }
 
+/** The display's scale, with or without a window on it: the default device scale, which a window
+ *  replaces with its own monitor's. */
+double host_display_scale(void) { return g_scale; }
+
 }  // extern "C"
 
 // ---------------------------------------------------------------------------

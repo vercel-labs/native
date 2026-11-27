@@ -8714,6 +8714,16 @@ double host_backing_scale(void) {
   return screen != nil ? screen.backingScaleFactor : g_window.backingScaleFactor;
 }
 
+double host_display_scale(void) {
+  @autoreleasepool {
+    // The display's own scale, before there is a window on it: a page's first script runs before
+    // run() opens the window, and the screen the window opens on is the one its frames draw for.
+    NSScreen *screen = g_window != nil ? g_window.screen : nil;
+    if (screen == nil) screen = [NSScreen mainScreen];
+    return screen != nil ? screen.backingScaleFactor : 1.0;
+  }
+}
+
 int32_t host_reduced_motion(void) {
   @autoreleasepool {
     // Tests pin the preference instead of reading the machine's accessibility setting.
