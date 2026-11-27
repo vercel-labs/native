@@ -8245,6 +8245,43 @@ static id g_settings_observer = nil;
 }
 @end
 
+/** The frame at the size it was given, moved so its titlebar and window controls stay on
+ *  `screen`. AppKit's own constraint shrinks a frame past the screen; a browser keeps the page's
+ *  size and lets the window hang past the display, with its titlebar where the user can reach it. */
+static NSRect frame_kept_on_screen(NSRect frame, NSScreen *screen) {
+  NSRect visible = screen.visibleFrame;
+  if (NSHeight(frame) > NSHeight(visible)) {
+    frame.origin.y = NSMaxY(visible) - NSHeight(frame);
+  } else if (frame.origin.y < NSMinY(visible)) {
+    frame.origin.y = NSMinY(visible);
+  } else if (NSMaxY(frame) > NSMaxY(visible)) {
+    frame.origin.y = NSMaxY(visible) - NSHeight(frame);
+  }
+  // The window controls sit at the frame's top left, so a frame wider than the screen keeps its
+  // left edge on it.
+  if (NSWidth(frame) > NSWidth(visible)) {
+    frame.origin.x = NSMinX(visible);
+  } else if (frame.origin.x < NSMinX(visible)) {
+    frame.origin.x = NSMinX(visible);
+  } else if (NSMaxX(frame) > NSMaxX(visible)) {
+    frame.origin.x = NSMaxX(visible) - NSWidth(frame);
+  }
+  return frame;
+}
+
+/** The window a page draws in. It keeps the frame it is given: a page wider or taller than the
+ *  display is laid out at its own size, as it is in a browser, instead of being shrunk to fit the
+ *  screen the way AppKit shrinks an ordinary window. Only where it sits is constrained, so the
+ *  titlebar and the controls stay on the screen. */
+@interface NativeWindow : NSWindow
+@end
+@implementation NativeWindow
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen {
+  NSScreen *on = screen != nil ? screen : (self.screen != nil ? self.screen : [NSScreen mainScreen]);
+  return on != nil ? frame_kept_on_screen(frameRect, on) : frameRect;
+}
+@end
+
 void host_open(double width, double height, const uint8_t *title, size_t title_len, const uint8_t *options, size_t options_len) {
   @autoreleasepool {
     signal(SIGPIPE, SIG_IGN);
@@ -8288,7 +8325,7 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
     // Every style but the default draws the page under the titlebar, with the traffic lights over it.
     g_tb_overlay = ![tbStyle isEqualToString:@"default"];
     if (g_tb_overlay) mask |= NSWindowStyleMaskFullSizeContentView;
-    g_window = [[NSWindow alloc]
+    g_window = [[NativeWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, width, height)
                   styleMask:mask
                     backing:NSBackingStoreBuffered
@@ -8340,6 +8377,11 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
     } else {
       [g_window center];
     }
+    // Placement is the frame in the page's size moved onto the screen: `center` puts a window
+    // taller than the display halfway above it, which leaves the titlebar and its controls out of
+    // reach.
+    NSScreen *home = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+    if (home != nil) [g_window setFrame:frame_kept_on_screen(g_window.frame, home) display:NO];
     [g_window makeKeyAndOrderFront:nil];
     if (g_view != nil) {
       // Follow the display: the link's period is what the frame loop paces itself with, and a
@@ -9748,9 +9790,17 @@ void host_window_set_frame(double x, double y, double w, double h) {
     frame = [g_window frameRectForContentRect:NSMakeRect(0, 0, content.width, content.height)];
     frame.origin = g_window.frame.origin;
   }
-  NSRect visible = g_window.screen != nil ? g_window.screen.visibleFrame : [NSScreen mainScreen].visibleFrame;
-  if (x >= 0) frame.origin.x = visible.origin.x + x;
-  if (y >= 0) frame.origin.y = visible.origin.y + visible.size.height - y - frame.size.height;
+  NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+  if (screen != nil) {
+    NSRect visible = screen.visibleFrame;
+    if (x >= 0) frame.origin.x = visible.origin.x + x;
+    if (y >= 0) frame.origin.y = visible.origin.y + visible.size.height - y - frame.size.height;
+    // A frame larger than the display keeps the size the page asked for; it is moved so its
+    // titlebar and controls stay on the screen.
+    if (NSWidth(frame) > NSWidth(visible) || NSHeight(frame) > NSHeight(visible)) {
+      frame = frame_kept_on_screen(frame, screen);
+    }
+  }
   [g_window setFrame:frame display:YES];
 }
 
