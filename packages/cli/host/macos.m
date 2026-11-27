@@ -6993,8 +6993,15 @@ static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGA
           pad += c->size * 0.25;
         } else if (c->kind == CMD_LINE) {
           // A text decoration records its span in w and its thickness in line_width, with the
-          // offset already in y: its box is that span and that thickness, not a zero height.
+          // offset already in y: solid, double, dotted and dashed lines cover y..y+t, while a
+          // wavy one swings its own thickness either side of that, reaching t above y and 2t
+          // below it, with a round cap half a thickness past each end of the span.
           h = c->line_width;
+          if ((int)c->radius == 4) {
+            y -= h;
+            h *= 3;
+            pad += c->line_width / 2;
+          }
         }
         double mx, my, mw, mh;
         ink_map(&m, x - pad, y - pad, w + 2 * pad, h + 2 * pad, &mx, &my, &mw, &mh);
@@ -10654,8 +10661,15 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
         if (out->empty) return 1;
       } else if (c->kind == CMD_LINE) {
         // A decoration line's thickness sits below the y it records, which already holds the
-        // offset: its box is the span and that thickness, not a zero height at the span's start.
+        // offset: its box is the span and that thickness. A wavy line swings its own thickness
+        // either side of that band, so its box runs t above y to 2t below, with a round cap half
+        // a thickness past each end of the span.
         h = c->line_width;
+        if ((int)c->radius == 4) {
+          y -= h;
+          h *= 3;
+          pad += c->line_width / 2;
+        }
         out->empty = !(c->w > 0 && h > 0);
       } else {
         out->empty = c->w <= 0 && c->h <= 0;
