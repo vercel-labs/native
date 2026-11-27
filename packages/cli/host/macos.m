@@ -1207,7 +1207,19 @@ static NSFont *font_for(double size, double weight) {
     // font's palette 0. A font with no run keeps its descriptor untouched.
     NSArray *features = merged_feature_list(matched ? matched.features : @"", info ? info.features : @[]);
     BOOL hasLang = info != nil && info.lang.length > 0;
-    if ((info && (info.variations.count > 0 || info.palette >= 0)) || features.count > 0 || hasLang) {
+    // A face that covers a weight range is a variable one: font-weight sets its wght axis,
+    // font-size its opsz axis and a font-stretch its wdth axis, as a browser does. The run's own
+    // font-variation-settings override each of them, and a static face has no axis to set.
+    NSMutableDictionary *axes = info != nil && info.variations.count > 0 ? [info.variations mutableCopy] : nil;
+    if (matched != nil && matched.hi > matched.lo) {
+      if (axes == nil) axes = [NSMutableDictionary dictionary];
+      if (axes[@(axis_code(@"wght"))] == nil && w >= matched.lo && w <= matched.hi)
+        axes[@(axis_code(@"wght"))] = @(w);
+      if (axes[@(axis_code(@"opsz"))] == nil) axes[@(axis_code(@"opsz"))] = @((double)size);
+      if (axes[@(axis_code(@"wdth"))] == nil && g_stretch_request != 100)
+        axes[@(axis_code(@"wdth"))] = @(g_stretch_request);
+    }
+    if ((axes != nil && axes.count > 0) || (info && info.palette >= 0) || features.count > 0 || hasLang) {
       NSMutableDictionary *attrs = [f.fontDescriptor.fontAttributes mutableCopy];
       if (features.count > 0) attrs[(__bridge id)kCTFontFeatureSettingsAttribute] = features;
       // The language the run is in, which CoreText's cascade follows when the family list has no
@@ -1217,7 +1229,7 @@ static NSFont *font_for(double size, double weight) {
         NSArray *cascadeList = language_cascade(f, info.lang);
         if (cascadeList != nil) attrs[(__bridge id)kCTFontCascadeListAttribute] = cascadeList;
       }
-      if (info.variations.count > 0) attrs[(__bridge id)kCTFontVariationAttribute] = info.variations;
+      if (axes != nil && axes.count > 0) attrs[(__bridge id)kCTFontVariationAttribute] = axes;
       if (info.palette >= 0) {
         attrs[(__bridge id)kCTFontPaletteAttribute] = @(info.palette);
         if (info.paletteColors.count > 0) attrs[(__bridge id)kCTFontPaletteColorsAttribute] = info.paletteColors;
