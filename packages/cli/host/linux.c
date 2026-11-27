@@ -35,6 +35,7 @@
 #include FT_BBOX_H
 #include FT_OUTLINE_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_MULTIPLE_MASTERS_H
 #include <hb.h>
 #include <hb-ft.h>
 #include <hb-ot.h>
@@ -825,6 +826,46 @@ static void shape_variations(hb_font_t *font, double size, double weight, Featur
   hb_font_set_variations(font, vars, n);
 }
 
+/**
+ * Sets on the FreeType face the same axes shape_variations sets on the font it shapes with, so
+ * the outlines painting loads are the instance the layout measured. A run without axes still
+ * follows font-weight, font-size and font-stretch, as Chrome's font-optical-sizing: auto does.
+ */
+static void apply_face_variations(FT_Face ft, double size, double weight, FeatureRun *run) {
+  if (!ft || !FT_HAS_MULTIPLE_MASTERS(ft)) return;
+  FT_MM_Var *mm = NULL;
+  if (FT_Get_MM_Var(ft, &mm) != 0 || !mm) return;
+  FT_Fixed *coords = (FT_Fixed *)malloc((size_t)mm->num_axis * sizeof(FT_Fixed));
+  if (coords) {
+    for (FT_UInt i = 0; i < mm->num_axis; i++) coords[i] = mm->axis[i].def;
+    int family = 0, italic = 0;
+    double w = 400;
+    split_weight(weight, &family, &w, &italic);
+    for (FT_UInt i = 0; i < mm->num_axis; i++) {
+      FT_ULong tag = mm->axis[i].tag;
+      int named = 0;
+      if (run) {
+        for (unsigned j = 0; j < run->variation_count; j++) {
+          if (run->variations[j].tag == tag) {
+            coords[i] = (FT_Fixed)(run->variations[j].value * 65536.0);
+            named = 1;
+            break;
+          }
+        }
+      }
+      if (named) continue;
+      if (tag == HB_TAG('w', 'g', 'h', 't')) coords[i] = (FT_Fixed)(w * 65536.0);
+      else if (tag == HB_TAG('o', 'p', 's', 'z')) coords[i] = (FT_Fixed)(size * 65536.0);
+      else if (tag == HB_TAG('w', 'd', 't', 'h') && run && run->stretch != 100) {
+        coords[i] = (FT_Fixed)(run->stretch * 65536.0);
+      }
+    }
+    FT_Set_Var_Design_Coordinates(ft, mm->num_axis, coords);
+    free(coords);
+  }
+  FT_Done_MM_Var(ft->glyph->library, mm);
+}
+
 typedef void (*shape_cb)(void *ctx, Face *face, FT_Face ft, unsigned glyph,
                          double x, double baseline_offset, double advance);
 
@@ -1118,6 +1159,7 @@ void host_text_metrics(const uint8_t *s, size_t n, double size, double weight, d
     ink.shear = italic && !face_is_italic(ft, weight) ? 0.25 : 0;
     ink.x_min = ink.x_max = ink.above = ink.below = 0;
     ink.ink = 0;
+    apply_face_variations(ft, size, weight, run_for_weight(weight));
     shape_text(s, n, size, weight, letter, word, 0, ink_glyph, &ink);
     if (ink.ink) {
       m[1] = -ink.x_min;
@@ -2141,6 +2183,8 @@ typedef struct {
   unsigned glyph;
   double size;
   double shear;
+  /** The packed weight, whose feature run and wght change the outline of a variable font. */
+  double weight;
   cairo_path_t *path;
   int used;
 } GlyphPath;
@@ -2158,12 +2202,14 @@ static void clear_glyph_paths(void) {
   }
 }
 
-static unsigned glyph_path_hash(FT_Face ft, unsigned glyph, double size, double shear) {
+static unsigned glyph_path_hash(FT_Face ft, unsigned glyph, double size, double shear, double weight) {
   uint64_t h = (uint64_t)(uintptr_t)ft * 31u + glyph;
   uint64_t bits = 0;
   memcpy(&bits, &size, sizeof(bits));
   h = h * 1099511628211ull ^ bits;
   memcpy(&bits, &shear, sizeof(bits));
+  h = h * 1099511628211ull ^ bits;
+  memcpy(&bits, &weight, sizeof(bits));
   h = h * 1099511628211ull ^ bits;
   return (unsigned)(h & (GLYPH_PATH_SLOTS - 1));
 }
@@ -2189,12 +2235,14 @@ static cairo_t *glyph_scratch(void) {
 
 /** The path for one glyph at this size and slant, built once. NULL when the glyph has no outline
  *  or the table is full, in which case the caller builds it directly. */
-static cairo_path_t *cached_glyph_path(FT_Face ft, unsigned glyph, double size, double shear) {
-  unsigned at = glyph_path_hash(ft, glyph, size, shear);
+static cairo_path_t *cached_glyph_path(FT_Face ft, unsigned glyph, double size, double shear,
+                                       double weight) {
+  unsigned at = glyph_path_hash(ft, glyph, size, shear, weight);
   for (int probe = 0; probe < 32; probe++, at = (at + 1) & (GLYPH_PATH_SLOTS - 1)) {
     GlyphPath *entry = &g_glyph_paths[at];
     if (entry->used) {
-      if (entry->ft == ft && entry->glyph == glyph && entry->size == size && entry->shear == shear) {
+      if (entry->ft == ft && entry->glyph == glyph && entry->size == size && entry->shear == shear &&
+          entry->weight == weight) {
         return entry->path;
       }
       continue;
@@ -2224,16 +2272,17 @@ static cairo_path_t *cached_glyph_path(FT_Face ft, unsigned glyph, double size, 
     entry->glyph = glyph;
     entry->size = size;
     entry->shear = shear;
+    entry->weight = weight;
     entry->used = 1;
     return entry->path;
   }
   return NULL;
 }
 
-static int glyph_path(cairo_t *cr, FT_Face ft, unsigned glyph, double size, double x, double baseline,
-                      double shear, double y_offset) {
+static int glyph_path(cairo_t *cr, FT_Face ft, unsigned glyph, double size, double weight, double x,
+                      double baseline, double shear, double y_offset) {
   if (glyph == 0) return 0;
-  cairo_path_t *path = cached_glyph_path(ft, glyph, size, shear);
+  cairo_path_t *path = cached_glyph_path(ft, glyph, size, shear, weight);
   if (path) {
     cairo_save(cr);
     cairo_translate(cr, x, baseline - y_offset);
@@ -2308,7 +2357,8 @@ static void paint_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, doub
                         double y_offset, double advance) {
   (void)face;
   PaintRun *p = data;
-  glyph_path(p->cr, ft, glyph, p->size, x, p->baseline, ft == p->primary ? p->shear : 0, y_offset);
+  glyph_path(p->cr, ft, glyph, p->size, p->weight, x, p->baseline,
+    ft == p->primary ? p->shear : 0, y_offset);
   if (p->emphasis > 0 && advance > 0 && p->marks && p->count < p->cap) {
     int below = (p->emphasis >> 8) & 1;
     p->marks[p->count].cy = below
@@ -2330,6 +2380,9 @@ static int paint_run(cairo_t *cr, const uint8_t *s, size_t n, double size, doubl
                      int cap) {
   FT_Face ft = paint_face(weight);
   if (!ft) return 0;
+  // The face draws the same instance shaping measured, with the run's axes and the weight the
+  // font key names (see apply_face_variations).
+  apply_face_variations(ft, size, weight, run_for_weight(weight));
   // A run that asks for an italic the face doesn't have is slanted by the host, as a browser
   // slants it.
   int family = 0;
