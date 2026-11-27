@@ -1,7 +1,7 @@
 // The inspector console's expression evaluator (compiler/console-eval.ts), which stands in for
 // node:vm so the native executable's console answers what the Node-run CLI's did.
 
-import { evaluateExpression } from "../compiler/console-eval.ts";
+import { evaluateExpression, registerConsoleFunction } from "../compiler/console-eval.ts";
 
 const el: Record<string, unknown> = { id: "x", children: [1, 2, 3], querySelector: (s: string) => ({ textContent: "hi " + s }) };
 const scope = {
@@ -13,6 +13,14 @@ const scope = {
     return true;
   },
 };
+
+// Everything this scope exposes as a function is registered: the console calls only the functions
+// the inspector exposes, never a function it merely finds on a value.
+for (const value of Object.values(scope)) {
+  if (typeof value === "function") registerConsoleFunction(value);
+  else if (value !== null && typeof value === "object") for (const inner of Object.values(value)) registerConsoleFunction(inner);
+}
+registerConsoleFunction(el.querySelector);
 
 const cases: [string, unknown][] = [
   ["1 + 2 * 3", 7],

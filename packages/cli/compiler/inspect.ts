@@ -9,7 +9,9 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { join } from "node:path";
 import { INSPECT_HTML } from "./inspect-ui.ts";
-import { evaluateExpression } from "./console-eval.ts";
+import { evaluateExpression, registerConsoleFunction } from "./console-eval.ts";
+import { evaluateConsole } from "./console-isolated.ts";
+import { NATIVE_BINARY } from "./root.ts";
 
 /** One console line the app printed, or an exception the runtime reported. */
 interface ConsoleLine {
@@ -336,6 +338,7 @@ function consoleDom(snapshot: Snapshot): { document: unknown; getComputedStyle: 
     Object.defineProperty(el, "parentNode", { get: () => byId.get(node.parent) === undefined ? null : view(byId.get(node.parent)!) });
     Object.defineProperty(el, "parentElement", { get: () => { const p = byId.get(node.parent); return p !== undefined && p.type === 1 ? view(p) : null; } });
     Object.defineProperty(el, "children", { get: () => node.children.map((id) => byId.get(id)).filter((n): n is SnapshotNode => n !== undefined && n.type === 1).map(view) });
+    for (const name of ["getAttribute", "getBoundingClientRect", "querySelector", "querySelectorAll", "matches"]) registerConsoleFunction(el[name]);
     mirror.set(node.id, el);
     return el;
   };
@@ -357,12 +360,15 @@ function consoleDom(snapshot: Snapshot): { document: unknown; getComputedStyle: 
     },
     querySelectorAll: (selector: string): unknown[] => snapshot.nodes.filter((n) => n.type === 1 && matches(n, selector)).map(view),
   });
+  for (const name of ["getElementById", "querySelector", "querySelectorAll"]) registerConsoleFunction((documentView as { [name: string]: unknown })[name]);
   return {
     document: documentView,
     getComputedStyle: (el: unknown): { getPropertyValue: (name: string) => string } => {
       const id = typeof el === "object" && el !== null && "nodeId" in el ? Number((el as { nodeId: number }).nodeId) : -1;
       const node = byId.get(id);
-      return { getPropertyValue: (name: string): string => node === undefined ? "" : node.styles[name] ?? "" };
+      const style = { getPropertyValue: (name: string): string => node === undefined ? "" : node.styles[name] ?? "" };
+      registerConsoleFunction(style.getPropertyValue);
+      return style;
     },
     addLog: (level: string, text: string): void => {
       logs.push({ level, text });
@@ -471,21 +477,41 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
         min: (...xs: unknown[]) => Math.min(...xs.map(Number)), max: (...xs: unknown[]) => Math.max(...xs.map(Number)),
       },
     };
+    for (const value of Object.values(sandbox)) {
+      if (typeof value === "function") registerConsoleFunction(value);
+      else if (value !== null && typeof value === "object") for (const inner of Object.values(value)) registerConsoleFunction(inner);
+    }
+    // A Node run keeps an isolated execution boundary: the expression runs in a fresh vm realm in a
+    // Node child, with only the snapshot's JSON and the expression crossing in and JSON coming back.
+    // The compiled CLI has no Node of its own, so it runs the hardened evaluator above the exposed
+    // values instead (console-eval.ts refuses reflection keys, reads own properties only and calls
+    // only registered functions).
+    if (!NATIVE_BINARY) {
+      try {
+        const raw = evaluateConsole(JSON.stringify(snap), expression);
+        const parsed = JSON.parse(raw) as {
+          answer?: { result?: unknown; exception?: unknown };
+          logs?: { level?: unknown; text?: unknown }[];
+        };
+        for (const entry of parsed.logs ?? []) {
+          if (entry !== null && typeof entry === "object" && typeof entry.text === "string") {
+            addLog(typeof entry.level === "string" ? entry.level : "log", entry.text);
+          }
+        }
+        const exception = parsed.answer?.exception;
+        if (typeof exception === "string") return { exceptionDetails: exceptionDetailsFor(exception) };
+        return { result: parsed.answer?.result ?? { type: "undefined" } };
+      } catch (err) {
+        return { exceptionDetails: exceptionDetailsFor(err instanceof Error ? err.message : String(err)) };
+      }
+    }
     try {
       const value = evaluateExpression(expression, sandbox);
       const described = describe(value);
       return { result: described };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      return { exceptionDetails: {
-        exceptionId: 1,
-        text: message,
-        lineNumber: 0,
-        columnNumber: 0,
-        scriptId: "0",
-        url: "",
-        stackTrace: { callFrames: [] },
-      } };
+      return { exceptionDetails: exceptionDetailsFor(message) };
     }
   };
 
@@ -792,6 +818,19 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
   };
 }
 
+
+/** The protocol's exception details for a message. */
+function exceptionDetailsFor(message: string): { [key: string]: unknown } {
+  return {
+    exceptionId: 1,
+    text: message,
+    lineNumber: 0,
+    columnNumber: 0,
+    scriptId: "0",
+    url: "",
+    stackTrace: { callFrames: [] },
+  };
+}
 
 /** A console value as the protocol reports it. */
 function describe(value: unknown): { [key: string]: unknown } {

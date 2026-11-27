@@ -9,6 +9,30 @@
 
 type Scope = { [name: string]: unknown };
 
+/**
+ * The keys an expression may never name. Reading them walks the host's reflection surface
+ * (`constructor` of anything leads to the host Function constructor), and writing `__proto__` into
+ * an object literal used to make that object inherit from whatever the expression named. The
+ * console exposes data and its own functions; reflection is not part of what it exposes.
+ */
+const REFLECTION_KEYS = new Set([
+  "__proto__", "prototype", "constructor",
+  "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+  "caller", "callee",
+]);
+
+/**
+ * The functions a console expression may call: the ones the inspector explicitly exposes (registered
+ * by `registerConsoleFunction`) and the helpers the evaluator makes for strings and arrays. Anything
+ * else a value leads to is data, never a call target.
+ */
+const callableFunctions = new WeakSet<object>();
+
+/** Registers a function the console is allowed to call; the inspector registers what it exposes. */
+export function registerConsoleFunction(value: unknown): void {
+  if (typeof value === "function") callableFunctions.add(value as object);
+}
+
 interface Token {
   kind: "num" | "str" | "name" | "punct" | "end";
   text: string;
@@ -272,20 +296,31 @@ class Evaluator {
       if (optional) return { value: undefined, receiver: undefined };
       throw new TypeError(`Cannot read properties of ${object === null ? "null" : "undefined"} (reading '${String(key)}')`);
     }
+    const name = String(key);
+    if (REFLECTION_KEYS.has(name)) throw new TypeError(`the console does not expose '${name}'`);
     if (typeof object === "string") {
-      if (key === "length") return { value: object.length, receiver: object };
+      if (name === "length") return { value: object.length, receiver: object };
       const index = typeof key === "number" ? key : Number(key);
       if (Number.isInteger(index)) return { value: object[index], receiver: object };
-      return { value: stringMethod(object, String(key)), receiver: object };
+      const fn = stringMethod(object, name);
+      registerConsoleFunction(fn);
+      return { value: fn, receiver: object };
     }
     if (Array.isArray(object)) {
-      if (key === "length") return { value: object.length, receiver: object };
+      if (name === "length") return { value: object.length, receiver: object };
       const index = typeof key === "number" ? key : Number(key);
       if (Number.isInteger(index)) return { value: object[index], receiver: object };
-      return { value: arrayMethod(object, String(key)), receiver: object };
+      const fn = arrayMethod(object, name);
+      registerConsoleFunction(fn);
+      return { value: fn, receiver: object };
     }
     if (typeof object === "object") {
-      return { value: (object as Scope)[String(key)], receiver: object };
+      // Only what the object itself carries: an inherited key is not the console's to read, and a
+      // getter the inspector defined runs with its own object as `this`.
+      const descriptor = Object.getOwnPropertyDescriptor(object as object, name);
+      if (descriptor === undefined) return { value: undefined, receiver: object };
+      if (descriptor.get !== undefined) return { value: descriptor.get.call(object), receiver: object };
+      return { value: descriptor.value, receiver: object };
     }
     return { value: undefined, receiver: object };
   }
@@ -303,6 +338,7 @@ class Evaluator {
     const fn = callee.value;
     if (optional && (fn === null || fn === undefined)) return { value: undefined, receiver: undefined };
     if (typeof fn !== "function") throw new TypeError(`${describeCallee(fn)} is not a function`);
+    if (!callableFunctions.has(fn as object)) throw new TypeError("the console only calls the functions it exposes");
     return { value: (fn as (...a: unknown[]) => unknown)(...args), receiver: undefined };
   }
 
@@ -342,19 +378,27 @@ class Evaluator {
       return items;
     }
     if (t.kind === "punct" && t.text === "{") {
-      const object: Scope = {};
+      // A literal has no prototype and its keys are ordinary data properties, so a key like
+      // `__proto__` can never point the object at a host value (and reflection keys are refused).
+      const object: Scope = Object.create(null) as Scope;
       while (!this.is("}")) {
         const key = this.next();
         if (key.kind !== "name" && key.kind !== "str" && key.kind !== "num") throw new SyntaxError(`unexpected '${key.text}' in an object literal`);
         const name = key.kind === "name" ? key.text : String(key.value);
+        if (REFLECTION_KEYS.has(name)) throw new TypeError(`the console does not expose '${name}'`);
+        let value: unknown;
         if (this.is(":")) {
           this.pos++;
-          object[name] = this.assignment();
+          value = this.assignment();
         } else if (key.kind === "name") {
-          object[name] = this.skipping ? undefined : this.scope[name];
+          if (this.skipping) value = undefined;
+          else if (!Object.prototype.hasOwnProperty.call(this.scope, name)) throw new ReferenceError(`${name} is not defined`);
+          else value = this.scope[name];
         } else {
           this.expect(":");
+          value = undefined;
         }
+        Object.defineProperty(object, name, { value, writable: true, enumerable: true, configurable: true });
         if (!this.is("}")) this.expect(",");
       }
       this.expect("}");
