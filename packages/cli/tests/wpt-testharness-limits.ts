@@ -34,6 +34,8 @@ writeFileSync(join(root, "pages", "pending.html"), `<!doctype html>
 <title>a test that never finishes</title>
 ${HARNESS}
 <script>
+test(function () { assert_true(true, "a finished synchronous test"); }, "a synchronous test that finished");
+promise_test(async function () { return; }, "a promise test that finished");
 async_test(function () { /* never done */ }, "the test that never finishes");
 </script>`);
 
@@ -64,6 +66,9 @@ const pendingReason = pending?.reason ?? "";
 check("a page that never finishes names its test", pending !== undefined && pending.status === "fail" &&
   pendingReason.includes("tests still waiting") && pendingReason.includes("the test that never finishes"),
   pending === undefined ? "missing" : `${pending.status}: ${pendingReason}`);
+check("finished tests are not named as waiting",
+  !pendingReason.includes("a synchronous test that finished") && !pendingReason.includes("a promise test that finished"),
+  pendingReason);
 check("neither page is a silent no-result", !/produced no result/.test(assertionReason + pendingReason),
   assertionReason + " | " + pendingReason);
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);

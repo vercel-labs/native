@@ -400,6 +400,9 @@ function test(fn, name) {
   // after test() must see its effect. Only the report waits for the page's load.
   var t = __hTest(name === undefined ? (fn.name || "test") : name, false);
   __hRun(t, fn);
+  // The test is over when its body returns; the pending-test report a page timeout prints names
+  // the tests that are still waiting, so a finished one is marked as such.
+  t._finished = true;
   return t;
 }
 
@@ -425,10 +428,12 @@ function promise_test(fn, name, properties) {
       var prev = __hCurrent;
       __hCurrent = t;
       var p;
-      try { p = fn(t); } catch (e) { t._fail(e); __hCurrent = prev; __hPending--; __hMaybeSettle(); settle(); return; }
+      try { p = fn(t); } catch (e) { t._fail(e); t._finished = true; __hCurrent = prev; __hPending--; __hMaybeSettle(); settle(); return; }
       __hCurrent = prev;
-      Promise.resolve(p).then(function () { __hPending--; __hMaybeSettle(); settle(); },
-        function (e) { t._fail(e); __hPending--; __hMaybeSettle(); settle(); });
+      // A promise test is finished when its promise settles, either way: mark it so the pending
+      // report does not list it if the page times out waiting for another test.
+      Promise.resolve(p).then(function () { t._finished = true; __hPending--; __hMaybeSettle(); settle(); },
+        function (e) { t._fail(e); t._finished = true; __hPending--; __hMaybeSettle(); settle(); });
     });
   });
   return t;
