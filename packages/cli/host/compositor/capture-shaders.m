@@ -99,8 +99,25 @@ int main(int argc, char **argv) {
     id<MTLBinaryArchive> archive = [device newBinaryArchiveWithDescriptor:bd error:&error];
     NSString *scratch = [NSTemporaryDirectory() stringByAppendingPathComponent:
         [NSString stringWithFormat:@"native-shaders-%d.archive", getpid()]];
-    if (archive == nil ||
-        ![archive addRenderPipelineFunctionsWithDescriptor:pd error:&error] ||
+    // Every fragment function the source has must reach the archive: the compiler writes the AIR
+    // for the functions a pipeline names, and an archive that named only the quad would drop the
+    // blur and backdrop fragments the compositor also builds pipelines from.
+    NSMutableArray<MTLRenderPipelineDescriptor *> *pipelines = [NSMutableArray array];
+    [pipelines addObject:pd];
+    for (NSString *name in @[@"blur_fragment", @"backdrop_fragment"]) {
+      id<MTLFunction> fragment = [library newFunctionWithName:name];
+      if (fragment == nil) continue;
+      MTLRenderPipelineDescriptor *extra = [[MTLRenderPipelineDescriptor alloc] init];
+      extra.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
+      extra.fragmentFunction = fragment;
+      extra.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+      [pipelines addObject:extra];
+    }
+    BOOL archived = archive != nil;
+    for (MTLRenderPipelineDescriptor *p in pipelines) {
+      if (archived && ![archive addRenderPipelineFunctionsWithDescriptor:p error:&error]) archived = NO;
+    }
+    if (!archived ||
         ![archive serializeToURL:[NSURL fileURLWithPath:scratch] error:&error]) {
       fprintf(stderr, "capture-shaders: the Metal compiler did not write an archive: %s\n",
               error == nil ? "unknown error" : [[error description] UTF8String]);
