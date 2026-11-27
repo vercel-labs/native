@@ -29,11 +29,14 @@ body { margin: 0; }
 
 const APP = `const log = document.getElementById("log")!;
 const bar = document.getElementById("bar")!;
+const wco = navigator.windowControlsOverlay;
 requestAnimationFrame(() => {
 const s = getComputedStyle(bar);
+const r = wco.getTitlebarAreaRect();
 log.textContent = [bar.getBoundingClientRect().height, s.paddingLeft, s.getPropertyValue("app-region"),
   getComputedStyle(document.getElementById("btn")!).getPropertyValue("app-region"),
-  document.getElementById("plain")!.getBoundingClientRect().height].join(" ");
+  document.getElementById("plain")!.getBoundingClientRect().height,
+  wco.visible, r.x, r.y, r.width, r.height, r.left, r.right, r.bottom].join(" ");
 });
 bar.addEventListener("click", (e) => { if (e.target === bar) log.textContent = "bar clicked"; });
 document.getElementById("btn")!.addEventListener("click", () => { log.textContent = "button clicked"; });
@@ -49,7 +52,8 @@ const run = (steps: string) => spawnSync(exe, [], { encoding: "utf8", env: { ...
 
 const first = run("frame 16 | print #log")[0];
 ok("env(titlebar-area-height) and env(titlebar-area-x) fill the bar, and app-region reads back",
-  first === "52 86px drag no-drag 7", first);
+  first === "52 86px drag no-drag 7 true 86 0 314 52 86 400 52", first);
+ok("navigator.windowControlsOverlay reports the same area as a DOMRect", first.endsWith(" true 86 0 314 52 86 400 52"), first);
 ok("a press in the drag area doesn't reach the page", run("frame 16 | click #bar | print #log")[0] === first);
 ok("a no-drag child inside it is clickable", run("frame 16 | click #btn | print #log")[0] === "button clicked");
 
