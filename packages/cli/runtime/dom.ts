@@ -1401,6 +1401,42 @@ export class DOMTokenList {
   }
 }
 
+/**
+ * An element's `focusgroup` tokens, as Chrome's `focusGroup` reports them: a DOMTokenList bound to
+ * the attribute, so a change to a token writes the attribute and a change to the attribute is read
+ * again.
+ */
+export class FocusGroupTokenList extends DOMTokenList {
+  el: Element | null = null;
+  /** Set while this list writes the attribute itself, so the write is not read back as a change. */
+  writing: boolean = false;
+
+  refresh(): void {
+    const text = this.el === null ? "" : (this.el.getAttribute("focusgroup") ?? "");
+    if (text !== this.value) super.setValue(text);
+  }
+  private write(): void {
+    const el = this.el;
+    if (el === null) return;
+    this.writing = true;
+    el.setAttribute("focusgroup", this.value);
+    this.writing = false;
+  }
+  setValue(value: string): void { super.setValue(value); this.write(); }
+  add(...tokens: string[]): void { super.add(...tokens); this.write(); }
+  remove(...tokens: string[]): void { super.remove(...tokens); this.write(); }
+  toggle(token: string, force?: boolean): boolean {
+    const on = super.toggle(token, force);
+    this.write();
+    return on;
+  }
+  replace(token: string, newToken: string): boolean {
+    const replaced = super.replace(token, newToken);
+    this.write();
+    return replaced;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Attributes
 
@@ -4563,6 +4599,14 @@ function makeClassList(el: Element): DOMTokenList {
   return list;
 }
 
+/** The focusgroup token list, bound to the element and its focusgroup attribute. */
+function makeFocusGroupList(el: Element): FocusGroupTokenList {
+  const list = new FocusGroupTokenList();
+  list.el = el;
+  list.owner = el;
+  return list;
+}
+
 export class Element extends Node {
   get [Symbol.toStringTag](): string { return "Element"; }
   namespaceURI: string | null = "http://www.w3.org/1999/xhtml";
@@ -4570,6 +4614,10 @@ export class Element extends Node {
   prefix: string | null = null;
   protected idValue: string;
   readonly classList: DOMTokenList = makeClassList(this);
+  /** The element's focusgroup tokens, as the `focusgroup` attribute spells them. */
+  readonly focusGroup: DOMTokenList = makeFocusGroupList(this);
+  /** The item this focusgroup segment last held, so Tab comes back to it (see app/focusgroup.ts). */
+  fgMemory: Element | null = null;
 
   /** The length of an SVG <path>'s outline in user units, as `getTotalLength()` reports it.
    *  Any other element has no path and answers 0. */
@@ -5211,6 +5259,12 @@ export class Element extends Node {
     this.removeAttribute(attr.name);
     return attr;
   }
+  /** Reads the focusgroup attribute into the token list after a script changed the attribute. */
+  syncFocusGroup(): void {
+    const list = this.focusGroup as FocusGroupTokenList;
+    if (!list.writing) list.refresh();
+  }
+
   setAttribute(name: string, value: any): void {
     const key = this.attrKey(name);
     if (key === "") {
@@ -5242,6 +5296,7 @@ export class Element extends Node {
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, text);
         if (key === "for") refreshAllLabels();
+        if (key === "focusgroup") this.syncFocusGroup();
       }
     }
   }
@@ -5267,6 +5322,7 @@ export class Element extends Node {
         noteOtherIdentityChange(this);
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, null);
+        if (key === "focusgroup") this.syncFocusGroup();
       }
       const namespaced = this.nsAttributeNamed(key);
       if (namespaced !== null && this.nsAttrs !== null) {
