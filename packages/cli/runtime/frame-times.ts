@@ -109,7 +109,7 @@ export function endFrame(started: number): void {
       ` layout=${ms(frameTimes.layout)} shape=${ms(frameTimes.shape)} paint=${ms(frameTimes.paint)}` +
       ` layers=${frameTimes.layers} total=${ms(frameTimes.total)}` +
       ` styled=${frameTimes.styled} laidOut=${frameTimes.laidOut} painted=${frameTimes.painted}` +
-      (incremental.on ? ` cached=${layoutCounts.cached} lpath=${layoutCounts.local}/${layoutCounts.full}` +
+      (incremental.on ? ` cached=${layoutCounts.cached}` +
         (incremental.verify ? ` mismatches=${layoutCounts.mismatches}` : "") : ""));
   }
   if (process.env.NATIVE_DAMAGE_STATS !== undefined && process.env.NATIVE_DAMAGE_STATS !== "0") {
@@ -118,8 +118,6 @@ export function endFrame(started: number): void {
   frameTimes.style = 0;
   layoutCounts.laidOut = 0;
   layoutCounts.cached = 0;
-  layoutCounts.local = 0;
-  layoutCounts.full = 0;
   layoutCounts.mismatches = 0;
   frameTimes.anim = 0;
   frameTimes.layout = 0;

@@ -6878,8 +6878,11 @@ static size_t skip_layer(size_t i) {
   return g_list->count;
 }
 
+/** The box a recorded polygon's points make (defined with the compositor's command view). */
+static int poly_box(const char *s, double *x, double *y, double *w, double *h);
+
 /** A box a run of commands paints, in the user space the run starts in. */
-typedef struct { double x0, y0, x1, y1; int any; } InkBox;
+typedef struct { double x0, y0, x1, y1; int any; int full; } InkBox;
 
 static void ink_add(InkBox *b, double x, double y, double w, double h) {
   if (!(w > 0 && h > 0)) return;
@@ -6927,8 +6930,12 @@ static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGA
         if (states >= 64) return;
         stack[states++] = m;
         break;
-      case CMD_UNCLIP: case CMD_EFFECT_POP: case CMD_MASK_POP: case CMD_PERSPECTIVE_POP: case CMD_MASK_SPLIT:
+      case CMD_UNCLIP: case CMD_EFFECT_POP: case CMD_MASK_POP: case CMD_PERSPECTIVE_POP:
         if (states > 0) m = stack[--states];
+        break;
+      case CMD_MASK_SPLIT:
+        // A mask's split closes the mask image and opens its content inside the same state: it is
+        // no pop of its own, or the transform the mask sat in would be dropped twice.
         break;
       case CMD_EFFECT_PUSH: {
         // The filter region: the border box grown by 10% on every side.
@@ -6949,12 +6956,24 @@ static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGA
         stack[states++] = m;
         break;
       }
-      case CMD_PERSPECTIVE_PUSH:
-        if (states >= 64) return;
+      case CMD_PERSPECTIVE_PUSH: {
+        // The box is warped onto the projected quad: whatever the box holds lands there.
+        double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        for (int k = 0; k < 4; k++) {
+          CGPoint p = CGPointApplyAffineTransform(CGPointMake(c->q[k * 2], c->q[k * 2 + 1]), m);
+          if (k == 0 || p.x < x0) x0 = p.x;
+          if (k == 0 || p.y < y0) y0 = p.y;
+          if (k == 0 || p.x > x1) x1 = p.x;
+          if (k == 0 || p.y > y1) y1 = p.y;
+        }
+        ink_add(box, x0, y0, x1 - x0, y1 - y0);
+        if (states >= 64) { box->full = 1; return; }
         stack[states++] = m;
         break;
+      }
       case CMD_LAYER_REF:
-        if (depth < 6 && c->layer >= 0 && c->layer < g_layer_count) {
+        if (c->layer >= 0 && c->layer < g_layer_count) {
+          if (depth >= 6) { box->full = 1; break; }
           CmdList *inner = &g_layers[c->layer].list;
           ink_range(box, inner, 0, inner->count, m, depth + 1);
         }
@@ -6965,7 +6984,10 @@ static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGA
           pad += fabs(c->dx) + fabs(c->dy) + 2 * fabs(c->blur) + fabs(c->line_width);
         if (c->emphasis != 0) pad += 12;
         double x = c->x, y = c->y, w = c->w, h = c->h;
-        if (c->kind == CMD_TEXT || c->kind == CMD_TEXT_SHADOW) {
+        if (c->kind == CMD_POLY) {
+          // A polygon carries its points in its text; the box fields are not its geometry.
+          if (!poly_box(c->text, &x, &y, &w, &h)) break;
+        } else if (c->kind == CMD_TEXT || c->kind == CMD_TEXT_SHADOW) {
           w = (double)c->len * (c->size + fabs(c->letter) + fabs(c->word));
           h = (c->line_height > c->size * 1.4 ? c->line_height : c->size * 1.4) + c->size * 0.5;
           pad += c->size * 0.25;
@@ -7003,6 +7025,7 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
     size_t group_pop = skip_layer(i);
     InkBox ink;
     ink.any = 0;
+    ink.full = 0;
     ink_range(&ink, g_list, i + 1, group_pop, CGAffineTransformIdentity, 0);
     double gx = c->w * 0.1 + 12, gy = c->h * 0.1 + 12;
     double bx = c->x - gx, by = c->y - gy, bw = c->w + 2 * gx, bh = c->h + 2 * gy;
@@ -7012,7 +7035,8 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
       if (ink.x1 > bx + bw) bw = ink.x1 - bx;
       if (ink.y1 > by + bh) bh = ink.y1 - by;
     }
-    CGContextBeginTransparencyLayerWithRect(ctx, CGRectMake(bx, by, bw, bh), NULL);
+    if (ink.full) CGContextBeginTransparencyLayer(ctx, NULL);
+    else CGContextBeginTransparencyLayerWithRect(ctx, CGRectMake(bx, by, bw, bh), NULL);
     ReplayState plain;
     plain.depth = 0;
     plain.transforms = 0;

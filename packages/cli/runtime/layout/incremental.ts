@@ -29,7 +29,7 @@ import { isTableDisplay, isTableInternal } from "./table.ts";
 import { isMulticol } from "./multicol.ts";
 
 /** Counters for the current frame: boxes laid out, and boxes whose last layout was reused. */
-export const layoutCounts = { laidOut: 0, cached: 0, roots: 0, mismatches: 0, passes: 0, local: 0, full: 0 };
+export const layoutCounts = { laidOut: 0, cached: 0, roots: 0, mismatches: 0, passes: 0 };
 
 /** Bumped by every layout pass; a dirty box laid out in this pass can be reused within it. */
 let pass = 0;
