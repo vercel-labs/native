@@ -14,6 +14,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityNodeProvider
 import android.view.inputmethod.BaseInputConnection
@@ -140,6 +141,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
     }
 
     private inner class WidgetAccessibilityProvider(private val host: View) : AccessibilityNodeProvider() {
+        private val accessibilityManager = host.context.getSystemService(AccessibilityManager::class.java)
         private var accessibilityFocusedId: Long = 0
 
         override fun createAccessibilityNodeInfo(virtualViewId: Int): AccessibilityNodeInfo? {
@@ -205,6 +207,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
 
         fun notifyWidgetSemanticsChanged() {
+            if (accessibilityManager?.isEnabled != true) return
             val event = AccessibilityEvent.obtain(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
             event.setSource(host)
             event.packageName = packageName
@@ -336,6 +339,7 @@ class MainActivity : Activity(), SurfaceHolder.Callback {
         }
 
         private fun sendVirtualEvent(id: Long, type: Int) {
+            if (accessibilityManager?.isEnabled != true) return
             val event = AccessibilityEvent.obtain(type)
             event.setSource(host, id.toInt())
             event.packageName = packageName
