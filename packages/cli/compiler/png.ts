@@ -107,35 +107,45 @@ export function readPng(file: string): Raster | null {
       pixels[row + x] = v & 255;
     }
   }
+  // A tRNS chunk names one transparent colour for the grey and RGB types; the value is a 16-bit
+  // sample per channel (an 8-bit image's value is its low byte). Palette alpha is handled above.
+  const transparentGray = color === 0 && alpha !== null && alpha.length >= 2
+    ? (depth === 16 ? alpha[0] : alpha[1]) : -1;
+  const transparentRgb = color === 2 && alpha !== null && alpha.length >= 6
+    ? depth === 16 ? [alpha[0], alpha[2], alpha[4]] : [alpha[1], alpha[3], alpha[5]]
+    : null;
   const out = new Uint8Array(width * height * 4);
+  const pixelBytes = channels * bytes;
   for (let y = 0; y < height; y++) {
     const row = y * stride;
     for (let x = 0; x < width; x++) {
       const o = (y * width + x) * 4;
+      const p = row + x * pixelBytes;
       if (color === 3) {
-        const index = pixels[row + x];
+        const index = pixels[p];
         out[o] = palette![index * 3];
         out[o + 1] = palette![index * 3 + 1];
         out[o + 2] = palette![index * 3 + 2];
         out[o + 3] = alpha !== null && index < alpha.length ? alpha[index] : 255;
       } else if (color === 0) {
-        const g = pixels[row + x * bytes];
+        const g = pixels[p];
         out[o] = out[o + 1] = out[o + 2] = g;
-        out[o + 3] = 255;
+        out[o + 3] = g === transparentGray ? 0 : 255;
       } else if (color === 4) {
-        const g = pixels[row + x * bytes];
+        const g = pixels[p];
         out[o] = out[o + 1] = out[o + 2] = g;
-        out[o + 3] = pixels[row + x * bytes + bytes];
+        out[o + 3] = pixels[p + bytes];
       } else if (color === 2) {
-        out[o] = pixels[row + x * bytes];
-        out[o + 1] = pixels[row + x * bytes + bytes];
-        out[o + 2] = pixels[row + x * bytes + 2 * bytes];
-        out[o + 3] = 255;
+        out[o] = pixels[p];
+        out[o + 1] = pixels[p + bytes];
+        out[o + 2] = pixels[p + 2 * bytes];
+        out[o + 3] = transparentRgb !== null && out[o] === transparentRgb[0] &&
+          out[o + 1] === transparentRgb[1] && out[o + 2] === transparentRgb[2] ? 0 : 255;
       } else {
-        out[o] = pixels[row + x * bytes];
-        out[o + 1] = pixels[row + x * bytes + bytes];
-        out[o + 2] = pixels[row + x * bytes + 2 * bytes];
-        out[o + 3] = pixels[row + x * bytes + 3 * bytes];
+        out[o] = pixels[p];
+        out[o + 1] = pixels[p + bytes];
+        out[o + 2] = pixels[p + 2 * bytes];
+        out[o + 3] = pixels[p + 3 * bytes];
       }
     }
   }
