@@ -658,6 +658,13 @@ export function hoistableDecl(s: string, declared: Set<string>): boolean {
  * The names a script declares at the top level of its own text. A page's scripts run in one module
  * here, so a name one of them leaves on the window must not be rebound if another declares it.
  */
+/** A declaration's keyword and name where the scan stands. The match is sticky and reads the name
+ *  whole: a fixed-width window of the text cut a name off after sixty characters, and the cut
+ *  name went into the generated code. */
+const DECL_AT_SITE = /(const|let|var|function|class)(?:\s*\*)?\s+([A-Za-z_$][\w$]*)/y;
+/** The same for the names a classic script leaves on the window: `var` and `function` only. */
+const VAR_FUNCTION_AT_SITE = /(var|function)(?:\s*\*)?\s+([A-Za-z_$][\w$]*)/y;
+
 export function topLevelDeclarations(text: string): Set<string> {
   const names = new Set<string>();
   let depth = 0;
@@ -688,7 +695,8 @@ export function topLevelDeclarations(text: string): Set<string> {
       continue;
     }
     if (depth !== 0 || !/[A-Za-z_$]/.test(c) || (i > 0 && /[\w$]/.test(text[i - 1]))) continue;
-    const m = /^(const|let|var|function|class)(?:\s*\*)?\s+([A-Za-z_$][\w$]*)/.exec(text.slice(i, i + 60));
+    DECL_AT_SITE.lastIndex = i;
+    const m = DECL_AT_SITE.exec(text);
     if (m !== null && (i === 0 || !/[\w$.]/.test(text[i - 1]))) {
       names.add(m[2]);
       i += m[0].length - 1;
@@ -746,7 +754,8 @@ export function windowVarNames(text: string): string[] {
       continue;
     }
     if (depth !== 0 || !/[A-Za-z_$]/.test(c) || (i > 0 && /[\w$]/.test(text[i - 1]))) continue;
-    const m = /^(var|function)(?:\s*\*)?\s+([A-Za-z_$][\w$]*)/.exec(text.slice(i, i + 60));
+    VAR_FUNCTION_AT_SITE.lastIndex = i;
+    const m = VAR_FUNCTION_AT_SITE.exec(text);
     if (m === null || (i > 0 && /[\w$.]/.test(text[i - 1]))) continue;
     add(m[2]);
     let j = i + m[0].length;

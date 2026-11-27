@@ -24,12 +24,15 @@ var __hStarted = false;
 // Promise tests run one at a time, in registration order, as WPT's harness starts them.
 var __hPromiseChain = Promise.resolve();
 
-function __hTest(name, optional) {
+function __hTest(name, optional, sync) {
   var t = {
     name: name,
     status: 0,
     message: "",
     optional: optional === true,
+    // A sync test is over when its function returns: it never held the page open, so its done()
+    // runs the cleanups without settling anything.
+    _sync: sync === true,
     _cleanups: [],
     _finished: false,
     _fail: function (e) {
@@ -65,7 +68,7 @@ function __hTest(name, optional) {
       for (var i = 0; i < t._cleanups.length; i++) {
         try { t._cleanups[i](); } catch (e) { t._fail(e); }
       }
-      __hPending--;
+      if (!t._sync) __hPending--;
       __hMaybeSettle();
     },
   };
@@ -132,6 +135,188 @@ function add_start_callback(fn) { void fn; }
 // The driver WPT tests call for browser-side answers. The accessibility queries come from the
 // runtime's engine, so a role and name test reads what the bridge will read; the input ones go
 // through the DOM's own methods.
+// The actions a page builds with test_driver.Actions (WebDriver's action sequences, serialized by
+// resources/testdriver-actions.js) run through the same pointer, key and wheel path the host's
+// own input takes, so every event they send is trusted.
+var __hPointerX = 0;
+var __hPointerY = 0;
+var __hPointerMods = 0;
+var __hClickCount = 0;
+var __hLastClickAt = 0;
+
+function __hCenter(el) {
+  var r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function __hActionPoint(a) {
+  var origin = a.origin;
+  if (origin === undefined || origin === null || origin === "viewport") return { x: a.x, y: a.y };
+  if (origin === "pointer") return { x: __hPointerX + a.x, y: __hPointerY + a.y };
+  var c = __hCenter(origin);
+  return { x: c.x + a.x, y: c.y + a.y };
+}
+
+function __hRunAction(a) {
+  if (a === null || a === undefined) return;
+  var type = a.type;
+  if (type === "keyDown") { __hPointerMods = actionKey(String(a.value), __hPointerMods, true); return; }
+  if (type === "keyUp") { __hPointerMods = actionKey(String(a.value), __hPointerMods, false); return; }
+  if (type === "pointerMove") {
+    var p = __hActionPoint(a);
+    __hPointerX = p.x;
+    __hPointerY = p.y;
+    pointerMove(__hPointerX, __hPointerY, __hPointerMods);
+    return;
+  }
+  if (type === "pointerDown") {
+    __hClickCount++;
+    if (__hClickCount > 1 && performance.now() - __hLastClickAt > 500) __hClickCount = 1;
+    pointerDown(__hPointerX, __hPointerY, __hClickCount, __hPointerMods);
+    return;
+  }
+  if (type === "pointerUp") {
+    __hLastClickAt = performance.now();
+    pointerUp(__hPointerX, __hPointerY, __hClickCount, __hPointerMods);
+    return;
+  }
+  if (type === "scroll" || type === "wheel") {
+    var q = __hActionPoint(a);
+    __hPointerX = q.x;
+    __hPointerY = q.y;
+    // WebDriver's deltas are the DOM's: a positive deltaY scrolls down, a positive deltaX right.
+    // The runtime's wheel takes the host's sign, where a positive delta moves the content back, so
+    // the two are negated on the way in, as the headless `wheel` step does.
+    wheel(__hPointerX, __hPointerY, a.deltaY === undefined ? 0 : -a.deltaY, a.deltaX === undefined ? 0 : -a.deltaX);
+    return;
+  }
+}
+
+function __hRunActions(actions) {
+  frame();
+  return new Promise(function (resolve, reject) {
+    try {
+      var ticks = 0;
+      var seqs = [];
+      var i;
+      for (i = 0; i < actions.length; i++) {
+        var seq = actions[i].actions === undefined ? [] : actions[i].actions;
+        seqs.push(seq);
+        if (seq.length > ticks) ticks = seq.length;
+      }
+      // Each tick runs in its own task: a pause holds the next tick for its duration, and the
+      // rest for one frame, as WebDriver's actions do.
+      var t = 0;
+      function step() {
+        var wait = 0;
+        try {
+          for (var j = 0; j < seqs.length; j++) {
+            if (t >= seqs[j].length) continue;
+            var a = seqs[j][t];
+            if (a.type === "pause" && a.duration !== undefined && a.duration > 0) wait = Math.max(wait, a.duration);
+            __hRunAction(a);
+          }
+        } catch (e) {
+          reject(e);
+          return;
+        }
+        t++;
+        if (t < ticks) setTimeout(step, wait > 0 ? wait : 16);
+        // The last tick's pause holds the sequence too: WebDriver's perform waits for it, so
+        // send() settles once the requested delay has gone by.
+        else if (wait > 0) setTimeout(resolve, wait);
+        else resolve();
+      }
+      step();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+// test_driver.Actions: the builder WPT tests use for pointer, key and wheel sequences. The page's
+// own copy of resources/testdriver-actions.js is not compiled here; this builds the same shape of
+// sequence and hands it to action_sequence, which drives the runtime's input path.
+function __hActions(defaultTickDuration) {
+  this.duration = defaultTickDuration === undefined ? 16 : defaultTickDuration;
+  this.ticks = [{}];
+  this.tick = 0;
+}
+__hActions.prototype.ButtonType = { LEFT: 0, MIDDLE: 1, RIGHT: 2, BACK: 3, FORWARD: 4 };
+__hActions.prototype.__tickFor = function (slot) {
+  var cur = this.ticks[this.tick];
+  if (cur[slot] !== undefined) {
+    this.tick++;
+    if (this.ticks[this.tick] === undefined) this.ticks[this.tick] = {};
+    cur = this.ticks[this.tick];
+  }
+  return cur;
+};
+__hActions.prototype.addTick = function () {
+  this.tick++;
+  if (this.ticks[this.tick] === undefined) this.ticks[this.tick] = {};
+  return this;
+};
+__hActions.prototype.pointerMove = function (x, y, opts) {
+  opts = opts === undefined || opts === null ? {} : opts;
+  this.__tickFor("pointer").pointer = { type: "pointerMove", x: x, y: y,
+    origin: opts.origin === undefined ? "viewport" : opts.origin };
+  return this;
+};
+__hActions.prototype.pointerDown = function (opts) {
+  opts = opts === undefined || opts === null ? {} : opts;
+  this.__tickFor("pointer").pointer = { type: "pointerDown",
+    button: opts.button === undefined ? 0 : opts.button };
+  return this;
+};
+__hActions.prototype.pointerUp = function (opts) {
+  opts = opts === undefined || opts === null ? {} : opts;
+  this.__tickFor("pointer").pointer = { type: "pointerUp",
+    button: opts.button === undefined ? 0 : opts.button };
+  return this;
+};
+__hActions.prototype.pointerCancel = function (opts) {
+  this.__tickFor("pointer").pointer = { type: "pointerCancel" };
+  return this;
+};
+__hActions.prototype.keyDown = function (value) {
+  this.__tickFor("key").key = { type: "keyDown", value: value };
+  return this;
+};
+__hActions.prototype.keyUp = function (value) {
+  this.__tickFor("key").key = { type: "keyUp", value: value };
+  return this;
+};
+__hActions.prototype.pause = function (opts) {
+  var ms = this.duration;
+  if (typeof opts === "number") ms = opts;
+  else if (opts !== undefined && opts !== null && opts.duration !== undefined) ms = opts.duration;
+  this.__tickFor("none").none = { type: "pause", duration: ms };
+  return this;
+};
+__hActions.prototype.scroll = function (x, y, deltaX, deltaY, opts) {
+  opts = opts === undefined || opts === null ? {} : opts;
+  this.__tickFor("wheel").wheel = { type: "scroll", x: x, y: y, deltaX: deltaX, deltaY: deltaY,
+    origin: opts.origin === undefined ? "viewport" : opts.origin };
+  return this;
+};
+__hActions.prototype.serialize = function () {
+  var slots = ["pointer", "key", "wheel", "none"];
+  var out = [];
+  for (var s = 0; s < slots.length; s++) {
+    var acts = [];
+    for (var t = 0; t < this.ticks.length; t++) {
+      var a = this.ticks[t][slots[s]];
+      acts.push(a === undefined ? { type: "pause" } : a);
+    }
+    out.push({ type: slots[s], actions: acts });
+  }
+  return out;
+};
+__hActions.prototype.send = function () {
+  return test_driver.action_sequence(this.serialize());
+};
+
 var test_driver = {
   get_computed_role: function (element) {
     return Promise.resolve(accessibleNode(element).role);
@@ -140,10 +325,29 @@ var test_driver = {
     return Promise.resolve(accessibleNode(element).name);
   },
   click: function (element) {
-    if (element !== null && element !== undefined && typeof element.click === "function") element.click();
+    // A real click is input at the element's centre: the page's own pointer path move there,
+    // presses and releases, which also focuses what the press hits and leaves the pointer where
+    // later Actions expect it.
+    if (element === null || element === undefined) return Promise.resolve();
+    frame();
+    var c = __hCenter(element);
+    __hPointerX = c.x;
+    __hPointerY = c.y;
+    pointerMove(c.x, c.y, 0);
+    pointerDown(c.x, c.y, 1, 0);
+    pointerUp(c.x, c.y, 1, 0);
     return Promise.resolve();
   },
-  hover: function (_element) { return Promise.resolve(); },
+  hover: function (element) {
+    if (element !== null && element !== undefined) {
+      frame();
+      var c = __hCenter(element);
+      __hPointerX = c.x;
+      __hPointerY = c.y;
+      pointerMove(c.x, c.y, 0);
+    }
+    return Promise.resolve();
+  },
   focus: function (element) {
     if (element !== null && element !== undefined && typeof element.focus === "function") element.focus();
     return Promise.resolve();
@@ -152,7 +356,7 @@ var test_driver = {
     __nativeSendKeys(element, keys);
     return Promise.resolve();
   },
-  action_sequence: function (_seq) { return Promise.resolve(); },
+  action_sequence: function (actions) { return __hRunActions(actions === undefined ? [] : actions); },
   get_computed_accessibility_tree: function (element) {
     var a = accessibleNode(element);
     return Promise.resolve({ role: a.role, name: a.name });
@@ -164,6 +368,7 @@ var test_driver = {
     return Promise.resolve(accessibilityPropertiesForNode(id));
   },
 };
+test_driver.Actions = __hActions;
 function test_timeout() { return 10000; }
 function test_set_timeout(ms) { void ms; }
 function step_timeout(fn, ms) { setTimeout(fn, ms === undefined ? 0 : ms); return 0; }
@@ -185,9 +390,11 @@ function step_func_done(fn) {
 
 function test(fn, name) {
   // Synchronous, in script order, as WPT registers and starts a test while the page runs: code
-  // after test() must see its effect. Only the report waits for the page's load.
-  var t = __hTest(name === undefined ? (fn.name || "test") : name, false);
+  // after test() must see its effect. Only the report waits for the page's load. Its cleanups run
+  // as soon as it returns, before the next test reads the page, as WPT's harness has them.
+  var t = __hTest(name === undefined ? (fn.name || "test") : name, false, true);
   __hRun(t, fn);
+  t.done();
   return t;
 }
 

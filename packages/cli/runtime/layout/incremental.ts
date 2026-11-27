@@ -107,6 +107,8 @@ function restore(el: Node, s: number[], at: number): void {
   el.h = s[o + 1];
   el.naturalW = s[o + 2];
   el.naturalH = s[o + 3];
+  el.tW = 0;
+  el.tH = 0;
   el.contentX = s[o + 4];
   el.contentY = s[o + 5];
   el.contentW = s[o + 6];
@@ -163,6 +165,8 @@ const pending: Node[] = [];
  */
 export function reuseLayout(el: Node, cbW: number, cbH: number, fixedW: number, fixedH: number, shrink: boolean,
   autoHeight: boolean | undefined, inFlow: boolean, mgP: number, mgN: number): boolean {
+  // A box under a clamp is laid out against a budget its cached inputs don't record.
+  if (el.clampBudget >= 0 || el.clampEllipsis) return false;
   if (forceFull || el === forceNode || el.lN === 0) return false;
   // The frame a box sits in comes from its parent (or, out of flow, from the positioned pass,
   // which sets it before the call), and either may have turned since.
@@ -384,6 +388,8 @@ export function resetNaturalSize(el: Node): void {
     el.naturalW = 0;
     el.naturalH = 0;
   }
+  el.tW = 0;
+  el.tH = 0;
 }
 
 // ---------------------------------------------------------------------------

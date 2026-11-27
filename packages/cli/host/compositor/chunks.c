@@ -406,7 +406,7 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
     }
     int boundary = c.kind != COMP_CMD_DRAW;
     if (boundary) open = -1;
-    if (grouped && opens_state(&c)) {
+    if ((grouped || c.kind == COMP_CMD_MASK || c.kind == COMP_CMD_PERSPECTIVE) && opens_state(&c)) {
       // A state the chunks can't carry across their quads: it and all it holds is one chunk,
       // rastered with the state in it, under the state the walk has around it.
       int unsplittable =

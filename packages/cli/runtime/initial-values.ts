@@ -18,7 +18,9 @@ function initTables(): void {
     INITIAL_V[p] = v;
     INITIAL_U[p] = u;
   };
-  set(P.P_DISPLAY, P.D_BLOCK, P.U_NONE);
+  // CSS's initial display is inline, which is what `display: initial` and `all: initial` give;
+  // the UA sheet gives each HTML element the display it has in a browser.
+  set(P.P_DISPLAY, P.D_INLINE, P.U_NONE);
   set(P.P_VISIBILITY, P.VIS_VISIBLE, P.U_NONE);
   set(P.P_SCROLL_MARKER_GROUP, P.SG_NONE, P.U_NONE);
   set(P.P_GRID_LANES_DIRECTION, 0, P.U_AUTO);

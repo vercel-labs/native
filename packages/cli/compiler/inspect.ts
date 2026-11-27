@@ -2,7 +2,7 @@
 // port, over data the running app answers for. `native dev --inspect` starts it; the app and the
 // server share the build's `.native/inspect` directory (see runtime/app/inspect.ts).
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -265,6 +265,15 @@ function boxModel(node: SnapshotNode): { [key: string]: unknown } | null {
   };
 }
 
+/**
+ * The console's globals, built inside the evaluated context from the snapshot's JSON.
+ *
+ * Nothing from the host's realm is handed to the context: the snapshot arrives as a JSON string
+ * that is parsed inside the context, and every function the expression can reach (the DOM views,
+ * `getComputedStyle`, `console`, the result formatter) is created inside the context. Expressions
+ * therefore run with the context's own intrinsics, so `this.constructor.constructor('return
+ * process')()` builds a function in that empty realm and reaches nothing of the host's.
+ */
 /** Builds the read-only DOM a console expression runs against, from the snapshot's data. */
 function consoleDom(snapshot: Snapshot): { document: unknown; getComputedStyle: (el: unknown) => unknown; addLog: (level: string, text: string) => void } {
   const byId = new Map<number, SnapshotNode>();
@@ -361,6 +370,50 @@ function consoleDom(snapshot: Snapshot): { document: unknown; getComputedStyle: 
   };
 }
 
+
+/** Whether a Host header names the loopback interface the inspector listens on. */
+function isInspectorHost(host: string, port: number): boolean {
+  return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;
+}
+
+/** Whether an Origin header is the inspector's own; a page it serves has one of these. */
+function isInspectorOrigin(origin: string, port: number): boolean {
+  return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}` ||
+    origin === `http://[::1]:${port}`;
+}
+
+/** Compares the token a request carries with the session's, without an early exit on a mismatch. */
+function isSameToken(given: string | undefined, token: string): boolean {
+  if (given === undefined || given.length === 0) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** A rejection reason as text; a dynamic import is named for what it is. */
+function rejectionMessage(reason: unknown): string {
+  if (typeof reason === "object" && reason !== null) {
+    try {
+      const code = (reason as { code?: unknown }).code;
+      if (code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING" || code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG") {
+        return "import() is not available in the inspector console";
+      }
+      const message = (reason as { message?: unknown }).message;
+      if (typeof message === "string") return message;
+    } catch {
+      // A reason whose getters throw falls back to String().
+    }
+  }
+  return String(reason);
+}
+
+/** The token segment of a request target and the path after it. */
+function splitRequestPath(target: string | undefined): { token: string; path: string } {
+  const pathname = new URL(target ?? "/", "http://127.0.0.1").pathname;
+  const parts = pathname.split("/");
+  return { token: parts[1] ?? "", path: "/" + parts.slice(2).join("/") };
+}
+
 /** Starts the inspector's server and the channel to the app. */
 export async function startInspector(options: InspectorOptions): Promise<Inspector> {
   const channel = new RuntimeChannel(join(options.buildDir, ".inspect"));
@@ -368,6 +421,9 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
   const logs: ConsoleLine[] = [];
   let cache: { at: number; data: Snapshot } | null = null;
   let listenPort = options.port;
+  // A random per-session path segment, as Node's own inspector does: a page that was not handed
+  // the full URL cannot talk to the inspector, even though it can reach loopback.
+  const token = randomBytes(32).toString("base64url");
 
   const snapshot = async (force: boolean): Promise<Snapshot> => {
     if (!force && cache !== null && Date.now() - cache.at < 400) return cache.data;
@@ -392,7 +448,7 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     } });
   };
 
-  const evaluate = async (expression: string, returnByValue: boolean): Promise<{ [key: string]: unknown }> => {
+  const evaluateOnce = async (expression: string): Promise<{ [key: string]: unknown }> => {
     const snap = await snapshot(false);
     const dom = consoleDom(snap);
     const sandbox: { [key: string]: unknown } = {
@@ -418,7 +474,6 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     try {
       const value = evaluateExpression(expression, sandbox);
       const described = describe(value);
-      if (returnByValue) return { result: described };
       return { result: described };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -432,6 +487,13 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
         stackTrace: { callFrames: [] },
       } };
     }
+  };
+
+  let evaluateQueue: Promise<void> = Promise.resolve();
+  const evaluate = (expression: string): Promise<{ [key: string]: unknown }> => {
+    const run = evaluateQueue.then(() => evaluateOnce(expression));
+    evaluateQueue = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const handle = async (client: Client, message: { id?: number; method?: string; params?: { [key: string]: unknown } }): Promise<void> => {
@@ -506,7 +568,7 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
       } else if (method === "Page.reload") {
         reply({});
       } else if (method === "Runtime.evaluate") {
-        reply(await evaluate(String(params.expression ?? ""), params.returnByValue === true));
+        reply(await evaluate(String(params.expression ?? "")));
       } else if (method === "Native.getSnapshot") {
         reply(await snapshot(true));
       } else if (method === "Native.getLayers") {
@@ -526,15 +588,49 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     }
   };
 
+  const debuggerUrl = (): string => `ws://127.0.0.1:${listenPort}/${token}/devtools/page/native`;
+
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : "";
+    const origin = req.headers.origin;
+    const deny = (status: number, text: string): void => {
+      res.writeHead(status, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+      res.end(text);
+    };
+    // DNS rebinding points a hostile name at 127.0.0.1; the Host header still carries that name.
+    if (!isInspectorHost(host, listenPort)) {
+      deny(403, "forbidden");
+      return;
+    }
+    // A page another origin serves may not drive the inspector, even if it reaches the address.
+    if (origin !== undefined && (typeof origin !== "string" || !isInspectorOrigin(origin, listenPort))) {
+      deny(403, "forbidden");
+      return;
+    }
+    let request: { token: string; path: string };
+    try {
+      request = splitRequestPath(req.url);
+    } catch {
+      deny(400, "bad request");
+      return;
+    }
+    if (!isSameToken(request.token, token)) {
+      deny(404, "not found");
+      return;
+    }
+    const path = request.path;
+    if (path === "/" || path === "/index.html") {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "frame-ancestors 'none'",
+      });
       res.end(INSPECT_HTML);
       return;
     }
-    if (url.pathname === "/json" || url.pathname === "/json/list") {
-      res.writeHead(200, { "Content-Type": "application/json" });
+    if (path === "/json" || path === "/json/list") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify([{
         description: "Native SDK app",
         devtoolsFrontendUrl: "",
@@ -542,28 +638,28 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
         title: "Native SDK inspector",
         type: "page",
         url: "native://app/",
-        webSocketDebuggerUrl: `ws://127.0.0.1:${listenPort}/devtools/page/native`,
+        webSocketDebuggerUrl: debuggerUrl(),
       }]));
       return;
     }
-    if (url.pathname === "/json/version") {
-      res.writeHead(200, { "Content-Type": "application/json" });
+    if (path === "/json/version") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify({
         Browser: "Native SDK inspector",
         "Protocol-Version": "1.3",
         "User-Agent": "native",
         "V8-Version": "",
         "WebKit-Version": "",
-        webSocketDebuggerUrl: `ws://127.0.0.1:${listenPort}/devtools/page/native`,
+        webSocketDebuggerUrl: debuggerUrl(),
       }));
       return;
     }
-    if (url.pathname === "/json/protocol") {
-      res.writeHead(200, { "Content-Type": "application/json" });
+    if (path === "/json/protocol") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ version: { major: "1", minor: "3" }, domains: [] }));
       return;
     }
-    if (url.pathname === "/snapshot.json") {
+    if (path === "/snapshot.json") {
       snapshot(true).then((data) => {
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify(data));
@@ -578,18 +674,64 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
   });
 
   server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
+    // A client can reset the connection while a handshake reply is still being written. Without a
+    // listener Node raises that write error on the process, which would end `native dev`.
+    socket.on("error", () => {
+      try {
+        socket.destroy();
+      } catch {
+        // A socket that already closed needs nothing.
+      }
+    });
+    const refuse = (status: string): void => {
+      try {
+        socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+      } catch {
+        socket.destroy();
+      }
+    };
+    const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : "";
+    const origin = req.headers.origin;
+    if (!isInspectorHost(host, listenPort)) {
+      refuse("403 Forbidden");
+      return;
+    }
+    if (origin !== undefined && (typeof origin !== "string" || !isInspectorOrigin(origin, listenPort))) {
+      refuse("403 Forbidden");
+      return;
+    }
+    let request: { token: string; path: string };
+    try {
+      request = splitRequestPath(req.url);
+    } catch {
+      refuse("400 Bad Request");
+      return;
+    }
+    if (!isSameToken(request.token, token)) {
+      refuse("403 Forbidden");
+      return;
+    }
+    if (request.path !== "/devtools/page/native") {
+      refuse("404 Not Found");
+      return;
+    }
     const key = req.headers["sec-websocket-key"];
     if (typeof key !== "string") {
-      socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+      refuse("400 Bad Request");
       return;
     }
     const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
-    socket.write(
-      "HTTP/1.1 101 Switching Protocols\r\n" +
-      "Upgrade: websocket\r\n" +
-      "Connection: Upgrade\r\n" +
-      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-    );
+    try {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+    } catch {
+      socket.destroy();
+      return;
+    }
     const client = new Client(socket);
     clients.add(client);
     client.onText = (text: string) => {
@@ -614,7 +756,9 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     });
   });
 
-  const url = `http://127.0.0.1:${listenPort}/`;
+  // Only the terminal the developer runs `native dev` in sees the token; anything that was not
+  // handed this URL (a page in the developer's browser, say) cannot use the inspector.
+  const url = `http://127.0.0.1:${listenPort}/${token}/`;
   // The port the server was asked for may be taken; the caller asked for a specific one, so a
   // failure to listen is the caller's to report.
   const close = (): void => {
@@ -647,6 +791,7 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     close,
   };
 }
+
 
 /** A console value as the protocol reports it. */
 function describe(value: unknown): { [key: string]: unknown } {

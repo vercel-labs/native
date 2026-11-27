@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=1100, height=820">
+    <title>Ember</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <div id="progress"></div>
+
+    <header class="hero" id="hero">
+      <div class="orb orb-a"></div>
+      <div class="orb orb-b"></div>
+      <div class="orb orb-c"></div>
+      <nav class="nav">
+        <span class="mark">E</span>
+        <span class="wordmark">Ember</span>
+        <button id="theme" class="theme" type="button">Light mode</button>
+      </nav>
+      <div class="hero-inner">
+        <p class="eyebrow">A quieter release</p>
+        <h1 class="display">Build something <span class="glow">warm</span>.</h1>
+        <p class="lede">Ember keeps the parts that matter and leaves the rest outside in the cold. Scroll on — the page does the rest.</p>
+        <a href="#features" class="cta">See what's inside<span class="cta-arrow">↓</span></a>
+      </div>
+      <div class="marquee" aria-hidden="true">
+        <div class="marquee-track">
+          <span>Slow is smooth · Smooth is fast · Ship the small thing · Care about the edges · </span>
+          <span>Slow is smooth · Smooth is fast · Ship the small thing · Care about the edges · </span>
+        </div>
+      </div>
+    </header>
+
+    <section class="stats reveal" id="stats">
+      <div class="stat"><p class="stat-value" id="count-a">0</p><p class="stat-label">plates in the index</p></div>
+      <div class="stat"><p class="stat-value" id="count-b">0</p><p class="stat-label">milliseconds to first paint</p></div>
+      <div class="stat"><p class="stat-value" id="count-c">0</p><p class="stat-label">grams of metadata</p></div>
+    </section>
+
+    <section class="features" id="features">
+      <div class="section-head reveal">
+        <p class="eyebrow">Three ideas</p>
+        <h2>Less, but warmer</h2>
+      </div>
+      <div class="cards">
+        <article class="card reveal" style="transition-delay: 0ms">
+          <span class="card-glyph">01</span>
+          <h3>Heat that stays</h3>
+          <p>A small cache with a long memory. Everything you opened is waiting where you left it.</p>
+        </article>
+        <article class="card reveal" style="transition-delay: 90ms">
+          <span class="card-glyph">02</span>
+          <h3>Edges that give</h3>
+          <p>Layouts that breathe at every size, and motion that follows the finger instead of the clock.</p>
+        </article>
+        <article class="card reveal" style="transition-delay: 180ms">
+          <span class="card-glyph">03</span>
+          <h3>Quiet defaults</h3>
+          <p>Nothing moves unless it helps. When it helps, it moves like it means it.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="parallax" id="parallax">
+      <div class="layer layer-back"></div>
+      <div class="layer layer-mid"></div>
+      <div class="layer layer-front"></div>
+      <div class="parallax-copy reveal">
+        <p class="eyebrow">Depth</p>
+        <h2>Three planes, one scroll</h2>
+        <p>Each layer travels at its own pace. The front one leans into the pointer.</p>
+      </div>
+    </section>
+
+    <section class="tilt-section" id="tilt">
+      <article class="tilt-card reveal" id="tilt-card">
+        <p class="eyebrow">Pointer</p>
+        <h3>Lean in</h3>
+        <p>Move the pointer over this card; the surface tilts toward it.</p>
+      </article>
+    </section>
+
+    <footer class="foot">
+      <p>Ember · a page of small motions</p>
+      <a href="#hero">Back to the top ↑</a>
+    </footer>
+
+    <script src="app.ts"></script>
+  </body>
+</html>

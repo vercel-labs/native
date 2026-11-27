@@ -225,6 +225,83 @@ const EXAMPLES: { [name: string]: Example } = {
     steps: "frame 0 | frame 16 | click #album-still-harbor | frame 500 | click #track-still-harbor-1 | frame 1000 | print #now-playing",
     want: ["Still Harbor · Marlow Vane"],
   },
+  animation: {
+    open: "frame 0 | frame 16",
+    // The counters run on the frame clock, so frames move them; the theme button switches without a
+    // colour transition (a transition on an inherited colour is a known runtime limitation).
+    steps: "frame 0 | wheel #hero 800 | frame 400 | frame 700 | frame 1200 | print #count-a | print #count-b | print #count-c | click #theme | frame 100 | print #theme",
+    want: ["2841", "12", "36", "Dark mode"],
+  },
+  checkout: {
+    open: "frame 0 | frame 16",
+    // An empty submit shows the first error, and Enter in the last field submits the filled form
+    // through its submit button and advances to shipping, whose total carries the default
+    // standard shipping. (The radio and card steps are left to the activation test.)
+    steps: "frame 0 | frame 16 | click #continue | frame 16 | print #error-name | click #name | type Robin Avery | click #email | type robin@example.com | click #password | type password1 | click #confirm | type password1 | key Enter | frame 16 | print #step-indicator | print #summary-total",
+    want: ["Enter your full name.", "✓Account2Shipping3Payment", "Total$65.00"],
+  },
+  gallery: {
+    open: "frame 0 | frame 16",
+    // Four thousand plates in a windowed four-column grid; search narrows to the Coast tag and a
+    // wheel scroll moves the window.
+    steps: "frame 0 | frame 16 | print #count | click #sort-popular | frame 16 | print #count | click #search | type coast | frame 16 | print #count | wheel #grid 600 | frame 16 | print #showing",
+    want: ["4000 of 4000 plates", "4000 of 4000 plates", "667 of 4000 plates", "Rows 2–9 of 167"],
+  },
+  notes: {
+    open: "frame 0 | frame 16",
+    // React renders on a microtask, so the steps that follow start with a frame.
+    steps: "frame 0 | frame 16 | click #search | type launch | frame 16 | print #note-count",
+    want: ["1 note"],
+  },
+  "data-table": {
+    open: "frame 0 | frame 16",
+    // Sorting by Due twice puts the latest date first (INV-1103), the filter narrows 3000
+    // invoices to the 750 overdue ones (the first is INV-1002), and a search that matches nothing
+    // leaves the arrow keys with nothing to move to instead of throwing.
+    steps: "frame 0 | frame 16 | click #sort-due | frame 16 | click #sort-due | frame 16 | print #row-INV-1103 | click #sort-invoice | frame 16 | click #filter-overdue | frame 16 | print #result-count | click #row-INV-1002 | frame 16 | print #selected | click #search | type zzzzzzzz | frame 16 | print #result-count | click #rows | frame 16 | key ArrowDown | frame 16 | print #selected",
+    want: ["INV-1103KLKestrel LabsDraft$3,476.57Dec 27, 2027Priya", "750 of 3000 rows", "Selected INV-1002", "0 of 3000 rows", "Selected INV-1002"],
+  },
+  kanban: {
+    open: "frame 0 | frame 16",
+    // A drag of the card in "In progress" onto the "Next up" column.
+    steps: "frame 0 | frame 16 | drag #card-k6 -280 0 | frame 16 | print #board-status | print #count-next",
+    want: ["Moved “Drag a card between columns” to Next up", "3"],
+  },
+  chat: {
+    open: "frame 0 | frame 16",
+    // Enter sends; the reply streams from a timer, so the count is read once the two messages are
+    // in the thread (the text keeps arriving after that). New conversation adds an empty thread
+    // instead of reopening Release notes.
+    steps: "frame 0 | frame 16 | click #composer | type How did the deploy go? | key Enter | wait 500 | print #message-count | click #new-thread | frame 16 | print #message-count",
+    want: ["5 messages", "0 messages"],
+  },
+  places: {
+    open: "frame 0 | wait 200",
+    // The first run fills the store from public/seed.json; the editor adds one more.
+    steps: "frame 0 | wait 200 | print #count | click #add | type A small site | click #field-url | type https://example.com | click #save | wait 200 | print #count",
+    want: ["8 places", "9 places"],
+  },
+  pulse: {
+    open: "frame 0 | frame 16",
+    // The metrics tick on a timer; `wait` lets the timer and the state update land.
+    steps: "frame 0 | frame 16 | print #tick | wait 2200 | print #tick | click #pause | frame 16 | print #live-state | wait 1500 | print #tick",
+    want: ["tick 0", "tick 2", "Paused", "tick 2"],
+  },
+  quarry: {
+    open: "frame 0 | frame 16",
+    // A save with valid defaults, the appearance tab's range at its default size, then the reset
+    // dialog.
+    steps: "frame 0 | frame 16 | click #save | frame 16 | print #saved | click #tab-appearance | frame 16 | print #text-size | click #tab-advanced | frame 16 | click #reset-open | frame 100 | print #reset-dialog | click #reset-confirm | frame 100 | print #saved",
+    want: ["Saved just now", "16", "Restore every default?This puts the profile, appearance, notifications and privacy settings back to their defaults. Forwarding addresses are cleared too.CancelRestore defaults", "Defaults restored"],
+  },
+  editor: {
+    open: "frame 0 | frame 16",
+    // The sample draft's counts, then the link dialog: a URL with nothing selected says what it
+    // needs. (A selection's toolbar state depends on the selectionchange change that lands in
+    // another branch.)
+    steps: "frame 0 | frame 16 | print #word-count | click #link-open | frame 16 | click #link-url | type https://example.com | click #link-apply | frame 16 | print #saved",
+    want: ["54 words", "Select a word first"],
+  },
 };
 
 const APP = "../../examples";

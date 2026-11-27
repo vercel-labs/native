@@ -4,10 +4,12 @@ import { HTMLInputElement, Event, dirty, invalidatePaint, markFullPaint, markPai
 import { layoutEpoch } from "../invalidation.ts";
 import { viewport } from "../layout.ts";
 import { caret } from "../paint.ts";
-import { hostEventPhase, hostRefreshInterval, hostPoll, hostEventX, hostEventY, hostViewWidth, hostViewHeight, hostEventDY, hostEventDX, hostEventClicks, EV_NONE, EV_QUIT, EV_DOWN, EV_UP, EV_MOVE, EV_RESIZE, EV_LEAVE, EV_KEY, EV_WHEEL, EV_SETTINGS, EV_AXFOCUS, EV_AXSELRANGE, EV_DROP, EV_CONTEXT, EV_WINDOWMOVE, EV_FULLSCREEN, EV_FOCUS, EV_BLUR, EV_VISIBILITY, EV_MESSAGE, EV_APPQUIT, EV_WINDOWCLOSED, EV_COMPOSE, EV_AXACTION, EV_KEYUP, EV_IMAGE, hostEventMods, hostAxFocus, hostAxSelection, hostWindowClosed, hostWindowHidden, hostMessageSource, hostMessageData, hostMenuItem, EV_MENU } from "../host.ts";
+import { hostEventPhase, hostGlWindow, hostRefreshInterval, hostPoll, hostUntilRefresh, hostEventX, hostEventY, hostViewWidth, hostViewHeight, hostEventDY, hostEventDX, hostEventClicks, EV_NONE, EV_QUIT, EV_DOWN, EV_UP, EV_MOVE, EV_RESIZE, EV_LEAVE, EV_KEY, EV_WHEEL, EV_SETTINGS, EV_AXFOCUS, EV_AXSELRANGE, EV_DROP, EV_CONTEXT, EV_WINDOWMOVE, EV_FULLSCREEN, EV_FOCUS, EV_BLUR, EV_VISIBILITY, EV_MESSAGE, EV_APPQUIT, EV_WINDOWCLOSED, EV_COMPOSE, EV_AXACTION, EV_KEYUP, EV_IMAGE, hostEventMods, hostAxFocus, hostAxSelection, hostWindowClosed, hostWindowHidden, hostMessageSource, hostMessageData, hostMenuItem, EV_MENU } from "../host.ts";
 import { pumpImages } from "../images.ts";
 import { messageDelivered, openedWindowClosed, pollSystemSettings, reportUncaughtError, requestQuit, runFrameCallbacks, windowBlurred, windowFocused, windowMoved, windowResized } from "../window.ts";
 import { setClock } from "../animation.ts";
+import { rasterScale } from "../device.ts";
+import { usesDisplaySchedule } from "./refresh.ts";
 import { hostComposition, hostKey, hostKeyUp } from "./keyboard.ts";
 import { config, frame } from "./mount.ts";
 import { publishTitlebarArea } from "./titlebar.ts";
@@ -82,8 +84,13 @@ function deliverMessage(): void {
 
 const blink = { last: 0 };
 
-/** A rate asked for by hand, for a test or a display the host has not reported yet. */
-const forcedHz = Number(process.env.NATIVE_REFRESH_HZ);
+/** A rate asked for by hand, for a test or a display the host has not reported yet. Unset or
+ *  unreadable reads as none. */
+const forcedHz = Number(process.env.NATIVE_REFRESH_HZ) || 0;
+
+/** NATIVE_FRAME_TIMER keeps every window on the free-running timer, for a comparison or fallback. */
+const frameTimerOnly = process.env.NATIVE_FRAME_TIMER !== undefined &&
+  process.env.NATIVE_FRAME_TIMER !== "" && process.env.NATIVE_FRAME_TIMER !== "0";
 
 /** The frame's period in milliseconds: the display's own, from its display link, so a panel that
  *  refreshes at 120 Hz gets 120 frames a second. Sixty is the answer when the host has no display
@@ -108,7 +115,18 @@ export function tick(): void {
   setTimeout(tick, 0);
 }
 
+/** The scale the last frame drew at, so a scale that changes is reported to the page. */
+let lastScale = -1;
+
 function tickOnce(): void {
+  // A window's backing scale can become known only after its page's first script has run, since a
+  // script sizes a canvas from devicePixelRatio before the window is on a screen. The page hears a
+  // resize when the ratio it would read changes, as it does when a browser's zoom does.
+  const scale = rasterScale();
+  if (scale !== lastScale) {
+    lastScale = scale;
+    windowResized();
+  }
   // Block until this frame is due, then drain the events that arrived meanwhile; yielding back to
   // the scriptc event loop between ticks keeps timers and promises in user code running. Waiting
   // a fixed 16 ms before every frame put the period at the frame's work plus that wait, rather
@@ -150,8 +168,16 @@ function tickOnce(): void {
   setClock(time);
   runFrameCallbacks(time);
   frame();
-  // The next frame is due one period from this one, and a frame that took longer than its period
-  // doesn't make the loop run the next two back to back.
-  nextFrameAt += period;
-  if (nextFrameAt < time) nextFrameAt = time;
+  // A window that doesn't present through GL starts its next frame at the display's next refresh
+  // rather than one free-running period from this one: a timer that drifts slightly behind the
+  // display every frame eventually presents just after a refresh and misses it, which shows up as
+  // an occasional double-length interval. A GL window keeps the old schedule: its present already
+  // waits for the display, and adding a wait after that block costs a whole period.
+  const untilNext = usesDisplaySchedule(forcedHz, frameTimerOnly, hostGlWindow()) ? hostUntilRefresh() : 0;
+  if (untilNext > 0) {
+    nextFrameAt = performance.now() + untilNext;
+  } else {
+    nextFrameAt += period;
+    if (nextFrameAt < time) nextFrameAt = time;
+  }
 }

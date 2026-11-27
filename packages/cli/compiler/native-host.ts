@@ -37,8 +37,9 @@ export function hostSource(hostDir: string, platform: NodeJS.Platform = process.
   return join(hostDir, platform === "darwin" ? "macos.m" : "linux.c");
 }
 
-/** The portable parts of the host: the Web Audio engine and its decoders. */
-export const HOST_COMMON_SOURCES = ["audio.c", "audio-decode.c", "stb_vorbis_impl.c"];
+/** The portable parts of the host: the Web Audio engine, its decoders, and the SVG filter
+ *  pixel engine. */
+export const HOST_COMMON_SOURCES = ["audio.c", "audio-decode.c", "stb_vorbis_impl.c", "svg-filter.c"];
 
 /**
  * The compositor's shared core and the D3D11 backend, for a Windows target. macOS and Linux
