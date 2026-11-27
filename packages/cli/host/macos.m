@@ -5772,10 +5772,15 @@ static size_t replay_range(CGContextRef ctx, size_t i, ReplayState *st) {
         continue;
       }
       CmdList *saved = g_list;
+      size_t saved_limit = g_replay_limit;
       if (c->layer >= 0 && c->layer < g_layer_count) {
         g_list = &g_layers[c->layer].list;
+        // The limit is an index into the list being replayed, so a layer reached from a chunk
+        // paints its own commands to their end rather than to the end of the chunk's range.
+        g_replay_limit = (size_t)-1;
         replay_range(ctx, 0, st);
       }
+      g_replay_limit = saved_limit;
       g_list = saved;
       continue;
     }
