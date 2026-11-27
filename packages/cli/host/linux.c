@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include "svg-filter.h"
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -6315,6 +6316,56 @@ void host_canvas_set_filter(int32_t id, const uint8_t *def, size_t n) {
     c->filter[at].a = a;
     c->filter[at].b = c->filter[at].c = c->filter[at].d = 0;
   }
+}
+
+// An inline SVG filter: the region's pixels are read out of the Cairo image surface, the chain
+// runs over them (the portable engine in svg-filter.c), and the result replaces them. The region
+// is in bitmap pixels, already clamped to the bitmap by the runtime.
+void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t linear,
+                            double x, double y, double w, double h) {
+  Canvas *c = canvas_at(id);
+  if (!c || !c->ctx || !c->surface || !(w > 0) || !(h > 0)) return;
+  if (cairo_image_surface_get_format(c->surface) != CAIRO_FORMAT_ARGB32) return;
+  ensure_channels();
+  const int R = g_ch_r, G = g_ch_g, B = g_ch_b, A = g_ch_a;
+  int x0 = (int)floor(x), y0 = (int)floor(y);
+  int x1 = (int)ceil(x + w), y1 = (int)ceil(y + h);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)c->w) x1 = (int)c->w;
+  if (y1 > (int)c->h) y1 = (int)c->h;
+  int iw = x1 - x0, ih = y1 - y0;
+  if (iw <= 0 || ih <= 0) return;
+  cairo_surface_flush(c->surface);
+  uint8_t *data = cairo_image_surface_get_data(c->surface);
+  if (!data) return;
+  size_t stride = (size_t)cairo_image_surface_get_stride(c->surface);
+  uint8_t *buf = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+  if (!buf) return;
+  // ARGB32 holds premultiplied pixels in the machine's channel order; the engine takes RGBA.
+  for (int row = 0; row < ih; row++) {
+    const uint8_t *src = data + (size_t)(y0 + row) * stride + (size_t)x0 * 4;
+    uint8_t *dst = buf + (size_t)row * (size_t)iw * 4;
+    for (int col = 0; col < iw; col++) {
+      dst[col * 4 + 0] = src[col * 4 + R];
+      dst[col * 4 + 1] = src[col * 4 + G];
+      dst[col * 4 + 2] = src[col * 4 + B];
+      dst[col * 4 + 3] = src[col * 4 + A];
+    }
+  }
+  svg_filter_apply(buf, iw, ih, (const char *)def, n, linear != 0);
+  for (int row = 0; row < ih; row++) {
+    uint8_t *dst = data + (size_t)(y0 + row) * stride + (size_t)x0 * 4;
+    const uint8_t *src = buf + (size_t)row * (size_t)iw * 4;
+    for (int col = 0; col < iw; col++) {
+      dst[col * 4 + R] = src[col * 4 + 0];
+      dst[col * 4 + G] = src[col * 4 + 1];
+      dst[col * 4 + B] = src[col * 4 + 2];
+      dst[col * 4 + A] = src[col * 4 + 3];
+    }
+  }
+  free(buf);
+  cairo_surface_mark_dirty_rectangle(c->surface, x0, y0, iw, ih);
 }
 
 // --- Paths ------------------------------------------------------------------

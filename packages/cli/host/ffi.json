@@ -243,6 +243,7 @@
     { "name": "hostCanvasSetLineDash", "symbol": "host_canvas_set_line_dash", "params": ["i32", "string"], "returns": "void" },
     { "name": "hostCanvasSetFont", "symbol": "host_canvas_set_font", "params": ["i32", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasSetFilter", "symbol": "host_canvas_set_filter", "params": ["i32", "string"], "returns": "void" },
+    { "name": "hostCanvasSvgFilter", "symbol": "host_canvas_svg_filter", "params": ["i32", "string", "i32", "f64", "f64", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasBeginPath", "symbol": "host_canvas_begin_path", "params": ["i32"], "returns": "void" },
     { "name": "hostCanvasMoveTo", "symbol": "host_canvas_move_to", "params": ["i32", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasLineTo", "symbol": "host_canvas_line_to", "params": ["i32", "f64", "f64"], "returns": "void" },

@@ -32,6 +32,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sqlite3.h>
+#include "svg-filter.h"
 #include <mach-o/dyld.h>
 #include <pthread.h>
 
@@ -2861,6 +2862,40 @@ void host_canvas_set_filter(int32_t id, const uint8_t *def, size_t n) {
     c->filter[at].a = a;
     c->filter[at].b = c->filter[at].c = c->filter[at].d = 0;
   }
+}
+
+// An inline SVG filter: the region's pixels are read out of the bitmap, the chain runs over them
+// (the portable engine in svg-filter.c), and the result replaces them. The region is in bitmap
+// pixels, already clamped to the bitmap by the runtime.
+void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t linear,
+                            double x, double y, double w, double h) {
+  Canvas *c = canvas_at(id);
+  if (!c || !c->ctx || !(w > 0) || !(h > 0)) return;
+  uint8_t *data = CGBitmapContextGetData(c->ctx);
+  if (!data) return;
+  size_t rowBytes = CGBitmapContextGetBytesPerRow(c->ctx);
+  int x0 = (int)floor(x), y0 = (int)floor(y);
+  int x1 = (int)ceil(x + w), y1 = (int)ceil(y + h);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)c->w) x1 = (int)c->w;
+  if (y1 > (int)c->h) y1 = (int)c->h;
+  int iw = x1 - x0, ih = y1 - y0;
+  if (iw <= 0 || ih <= 0) return;
+  uint8_t *buf = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+  if (!buf) return;
+  // kCGImageAlphaPremultipliedLast is premultiplied RGBA, which is the engine's layout.
+  for (int row = 0; row < ih; row++) {
+    memcpy(buf + (size_t)row * (size_t)iw * 4,
+           data + (size_t)(y0 + row) * rowBytes + (size_t)x0 * 4, (size_t)iw * 4);
+  }
+  svg_filter_apply(buf, iw, ih, (const char *)def, n, linear != 0);
+  for (int row = 0; row < ih; row++) {
+    memcpy(data + (size_t)(y0 + row) * rowBytes + (size_t)x0 * 4,
+           buf + (size_t)row * (size_t)iw * 4, (size_t)iw * 4);
+  }
+  free(buf);
+  canvas_changed(c);
 }
 
 // --- Gradients --------------------------------------------------------------
