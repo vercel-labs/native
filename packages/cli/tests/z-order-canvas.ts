@@ -5,7 +5,7 @@
 //   npm test
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { decodePng } from "./png.ts";
@@ -41,14 +41,23 @@ const exe = join(dir, "app");
 const b = spawnSync("node", ["compiler/cli.ts", "build", dir, "-o", exe], { encoding: "utf8" });
 if (b.status !== 0) throw new Error(`build failed\n${b.stderr}`);
 
-/** Runs the app and returns its snapshot's pixels at CSS coordinates. */
+/** Runs the app once and returns the snapshot the pass asked for: the flat page, or the frame the
+ *  presenter composites from its layers. A composited pass asks for no flat snapshot at all, so
+ *  the only image it can read is the one the compositor drew. */
 function render(composited: boolean): { at: (x: number, y: number) => number[] } {
-  const png = join(dir, composited ? "out-composited.png" : "out.png");
-  const env: Record<string, string> = { ...process.env, NATIVE_SNAPSHOT: png };
-  if (composited) env.NATIVE_SNAPSHOT_COMPOSITED = "1";
+  const flat = join(dir, "out.png");
+  const merged = join(dir, "out-composited.png");
+  // A stale file from the previous pass must not stand in for this pass's snapshot.
+  rmSync(flat, { force: true });
+  rmSync(merged, { force: true });
+  const env: Record<string, string> = { ...process.env };
+  delete env.NATIVE_SNAPSHOT;
+  delete env.NATIVE_SNAPSHOT_COMPOSITED;
+  if (composited) env.NATIVE_SNAPSHOT_COMPOSITED = merged;
+  else env.NATIVE_SNAPSHOT = flat;
   const r = spawnSync(exe, [], { encoding: "utf8", env });
   if (r.status !== 0) throw new Error(`render failed\n${r.stderr}`);
-  const img = decodePng(png);
+  const img = decodePng(composited ? merged : flat);
   return {
     at: (cx: number, cy: number): number[] => {
       const o = (Math.floor(cy * 2) * img.w + Math.floor(cx * 2)) * 4;
