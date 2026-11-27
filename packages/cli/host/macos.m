@@ -8198,6 +8198,18 @@ static id g_settings_observer = nil;
 }
 @end
 
+/** The window a page draws in. It keeps the frame it is given: a page wider or taller than the
+ *  display is laid out at its own size, as it is in a browser, instead of being shrunk to fit the
+ *  screen the way AppKit shrinks an ordinary window. */
+@interface NativeWindow : NSWindow
+@end
+@implementation NativeWindow
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen {
+  (void)screen;
+  return frameRect;
+}
+@end
+
 void host_open(double width, double height, const uint8_t *title, size_t title_len, const uint8_t *options, size_t options_len) {
   @autoreleasepool {
     signal(SIGPIPE, SIG_IGN);
@@ -8241,7 +8253,7 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
     // Every style but the default draws the page under the titlebar, with the traffic lights over it.
     g_tb_overlay = ![tbStyle isEqualToString:@"default"];
     if (g_tb_overlay) mask |= NSWindowStyleMaskFullSizeContentView;
-    g_window = [[NSWindow alloc]
+    g_window = [[NativeWindow alloc]
         initWithContentRect:NSMakeRect(0, 0, width, height)
                   styleMask:mask
                     backing:NSBackingStoreBuffered
