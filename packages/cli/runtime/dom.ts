@@ -5433,7 +5433,14 @@ export class Element extends Node {
   }
 
   insertAdjacentHTML(where: string, html: string): void {
-    this.insertAdjacent(where, parseFragment(html, this), true);
+    // The fragment is parsed against the element the new nodes become children of: this element,
+    // or its parent when they go beside it, as HTML's insertAdjacentHTML resolves its context.
+    const position = where.toLowerCase();
+    let context: Element | null = this;
+    if (position === "beforebegin" || position === "afterend") {
+      context = this.parentNode instanceof Element ? (this.parentNode as Element) : null;
+    }
+    this.insertAdjacent(where, parseFragment(html, context), true);
   }
   insertAdjacentElement(where: string, element: Element): Element | null {
     return this.insertAdjacent(where, [element], false) === null ? null : element;
@@ -16810,18 +16817,23 @@ function parseFragment(html: string, context: Element | null = null): Node[] {
       else if (tag === "optgroup") closeInScope(["option", "optgroup"], null);
       const el = document.createElement(tag);
       const parent = stack.length === 0 ? context : stack[stack.length - 1];
-      // An <svg> enters the SVG namespace, and so does its subtree — except inside foreignObject,
-      // whose children are HTML again. Everything else keeps its parent's namespace.
+      // An <svg> enters the SVG namespace, and so does its subtree — except an SVG
+      // <foreignObject>, whose children are HTML again. Everything else keeps its parent's
+      // namespace. The parent's local name is read lower-cased: a parsed tag is already, and an
+      // element a script made with createElementNS keeps its camel case.
       const SVG_NS = "http://www.w3.org/2000/svg";
       const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+      const XHTML_NS = "http://www.w3.org/1999/xhtml";
+      const parentLocal = parent === null ? "" : parent.localName.toLowerCase();
       if (tag === "svg") el.namespaceURI = SVG_NS;
       else if (tag === "math") el.namespaceURI = MATHML_NS;
-      else if (parent !== null && parent.namespaceURI === SVG_NS && parent.localName !== "foreignObject") {
-        el.namespaceURI = SVG_NS;
-      } else if (parent !== null && parent.namespaceURI === MATHML_NS && parent.localName !== "annotation-xml") {
+      else if (parent !== null && parent.namespaceURI === SVG_NS) {
+        el.namespaceURI = parentLocal === "foreignobject" ? XHTML_NS : SVG_NS;
+      } else if (parent !== null && parent.namespaceURI === MATHML_NS && parentLocal !== "annotation-xml") {
         el.namespaceURI = MATHML_NS;
       } else if (parent !== null) el.namespaceURI = parent.namespaceURI;
-      if (tag === "foreignObject" && parent !== null) el.namespaceURI = parent.namespaceURI;
+      // A <foreignObject> element itself takes its parent's namespace (SVG inside an <svg>).
+      if (tag === "foreignobject" && parent !== null) el.namespaceURI = parent.namespaceURI;
       for (let a = 0; a < attrs.length; a++) setParsedAttribute(el, attrs[a], values[a]);
       place(el);
       i = j;
