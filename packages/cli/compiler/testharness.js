@@ -101,6 +101,16 @@ function __hResult() {
 }
 
 function __hMaybeSettle() { __hResult(); }
+// The tests still unfinished, for the runner to name when a page never reports its outcome: a page
+// waiting on something that never happens is otherwise a silent "no result".
+window.__nativePendingTests = function () {
+  var pending = [];
+  for (var i = 0; i < __hTests.length; i++) {
+    if (!__hTests[i]._finished) pending.push(__hTests[i].name);
+  }
+  return pending.join(", ");
+};
+
 
 // A page may declare one implicit test for the whole document (`setup({single_test: true})`, or
 // simply assert at the top level and call done()), as WPT's harness has it.
@@ -479,12 +489,21 @@ function format_value(v) {
 }
 
 function __hFail(kind, a, b, message) {
-  var t = __hCurrent === null ? __hImplicit() : __hCurrent;
   var m = (message === undefined ? "" : message + ": ") + "expected " + format_value(b) + ", got " + format_value(a);
-  if (t === null) {
-    throw new Error(kind + ": " + m);
+  if (__hCurrent !== null) {
+    __hCurrent._fail(new Error(kind + ": " + m));
+    return;
   }
-  t._fail(new Error(kind + ": " + m));
+  // A page's own implicit test (setup({single_test: true})) hears an assertion made outside any
+  // step.
+  if (__hImplicitTest !== null) {
+    __hImplicitTest._fail(new Error(kind + ": " + m));
+    return;
+  }
+  // Otherwise the assertion throws, as WPT's do: in a promise test's continuation that rejects the
+  // test's promise, which fails the test that made it. Making an implicit test instead would leave
+  // a test nothing ever finishes, and the page would wait for ever.
+  throw new Error(kind + ": " + m);
 }
 
 function __hSame(a, b) {

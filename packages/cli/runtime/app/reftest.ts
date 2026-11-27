@@ -70,5 +70,10 @@ export async function settleTests(): Promise<string> {
     frame();
     await nextTask();
   }
+  // A page that never reports is named by the tests it is still waiting on, when the harness can
+  // say: a silent "no result" hides which promise never settled.
+  const stuck = (window as unknown as { __nativePendingTests?: () => string }).__nativePendingTests;
+  const waiting = typeof stuck === "function" ? stuck() : "";
+  if (waiting !== "") return JSON.stringify({ status: 1, message: "tests still waiting: " + waiting, tests: [] });
   return "";
 }
