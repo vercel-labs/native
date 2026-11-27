@@ -10415,6 +10415,8 @@ static int metal_cmd_count(void *ctx, int list_id) {
   return (int)g_layers[list_id].list.count;
 }
 
+static int mask_split_debug_on(void);
+
 static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
   (void)ctx;
   CmdList *l = list_id < 0 ? &g_root : &g_layers[list_id].list;
@@ -10459,6 +10461,20 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
       out->simple = spec.count == 0 && spec.bcount == 0 && spec.blend == 0;
       // A backdrop filter shows the pixels behind it, so a mask that holds one stays whole.
       out->backdrop = spec.bcount != 0;
+      // A chain that is one blur: the host blurs the chunk's pixels by it on the GPU.
+      out->blur_sigma = (spec.count == 1 && spec.bcount == 0 && spec.blend == 0 &&
+                         spec.ops[0].kind == FK_BLUR) ? spec.ops[0].a : 0.0;
+      // NATIVE_BLUR_ON_GPU=0 keeps the filter in the replay for a comparison against the GPU one.
+      const char *gpu = getenv("NATIVE_BLUR_ON_GPU");
+      if (gpu != NULL && gpu[0] == '0' && gpu[1] == 0) out->blur_sigma = 0.0;
+      if (mask_split_debug_on() && !out->simple) {
+        fprintf(stderr, "native: effect count=%d bcount=%d blend=%d ops=%d/%d/%d vals=%g/%g/%g alpha=%g\n",
+                spec.count, spec.bcount, spec.blend, spec.count > 0 ? (int)spec.ops[0].kind : -1,
+                spec.count > 1 ? (int)spec.ops[1].kind : -1,
+                spec.count > 2 ? (int)spec.ops[2].kind : -1, spec.count > 0 ? spec.ops[0].a : 0,
+                spec.count > 1 ? spec.ops[1].a : 0, spec.count > 2 ? spec.ops[2].a : 0,
+                spec.alpha);
+      }
       return 1;
     }
     case CMD_UNCLIP:
@@ -10756,6 +10772,7 @@ static int window_compositing(void) {
 }
 
 static void mask_surfaces_drop(void);
+static void mask_blur_drop(void);
 
 /** Drops the tiles a chunk holds, returning them to the budget. */
 static void win_drop_tiles(WinChunk *e) {
@@ -11448,6 +11465,7 @@ static void mask_surfaces_init(void) {
  *  going away. */
 static void mask_surfaces_drop(void) {
   if (!g_mask_surfaces_ready) return;
+  mask_blur_drop();
   for (int i = 0; i < MAX_MASK_GROUPS; i++) {
     MaskSurface *s = &g_mask_surfaces[i];
     if (s->alpha_tex >= 0 && g_window_backend != NULL) {
@@ -11519,6 +11537,145 @@ static void mask_groups_collect(const CompWalk *walk) {
   }
 }
 
+/** A blurred chunk's picture: the surface it was blurred into and where it sits in the frame. */
+typedef struct {
+  int tex, x, y, w, h;
+  uint64_t key; // what the picture is of, with the alpha it was made at
+  float alpha;
+} BlurCache;
+
+static BlurCache g_blur_cache[COMP_MAX_LAYERS];
+static int g_blur_cache_ready = 0;
+static int g_blur_scratch[3]; // the padded surfaces a blur runs through: source, tap, result
+static int g_blur_scratch_w = 0, g_blur_scratch_h = 0;
+
+static void mask_blur_init(void) {
+  if (g_blur_cache_ready) return;
+  g_blur_cache_ready = 1;
+  for (int i = 0; i < COMP_MAX_LAYERS; i++) g_blur_cache[i].tex = -1;
+  for (int i = 0; i < 3; i++) g_blur_scratch[i] = -1;
+}
+
+/** Drops every blurred picture and scratch surface. */
+static void mask_blur_drop(void) {
+  if (!g_blur_cache_ready) return;
+  for (int i = 0; i < COMP_MAX_LAYERS; i++) {
+    if (g_blur_cache[i].tex >= 0 && g_window_backend != NULL) {
+      g_window_backend->vt->tex_destroy(g_window_backend, g_blur_cache[i].tex);
+    }
+    g_blur_cache[i].tex = -1;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (g_blur_scratch[i] >= 0 && g_window_backend != NULL) {
+      g_window_backend->vt->tex_destroy(g_window_backend, g_blur_scratch[i]);
+    }
+    g_blur_scratch[i] = -1;
+  }
+  g_blur_scratch_w = g_blur_scratch_h = 0;
+}
+
+/** The scratch surfaces, `w` by `h`, made when they aren't that size already. */
+static int mask_blur_scratch_for(CompBackend *b, int w, int h) {
+  if (w <= 0 || h <= 0) return 0;
+  if (g_blur_scratch_w == w && g_blur_scratch_h == h && g_blur_scratch[0] >= 0 &&
+      g_blur_scratch[1] >= 0 && g_blur_scratch[2] >= 0) {
+    return 1;
+  }
+  // Only the scratch surfaces go: the chunks' blurred pictures are kept across sizes, since the
+  // lines of one column can each be a different size.
+  for (int i = 0; i < 3; i++) {
+    if (g_blur_scratch[i] >= 0) b->vt->tex_destroy(b, g_blur_scratch[i]);
+    g_blur_scratch[i] = -1;
+  }
+  g_blur_scratch_w = g_blur_scratch_h = 0;
+  for (int i = 0; i < 3; i++) g_blur_scratch[i] = b->vt->tex_create(b, w, h);
+  if (g_blur_scratch[0] < 0 || g_blur_scratch[1] < 0 || g_blur_scratch[2] < 0) {
+    for (int i = 0; i < 3; i++) {
+      if (g_blur_scratch[i] >= 0) b->vt->tex_destroy(b, g_blur_scratch[i]);
+      g_blur_scratch[i] = -1;
+    }
+    return 0;
+  }
+  g_blur_scratch_w = w;
+  g_blur_scratch_h = h;
+  return 1;
+}
+
+/**
+ * A blur chunk's pixels: its tiles drawn crisp onto a scratch surface padded for the blur's reach,
+ * the two separable passes on the GPU, and the result kept for the content pass to draw.
+ */
+static int mask_blur_chunk(CompBackend *b, const MaskGroup *g, const CompWalk *walk, double scale,
+                           int index) {
+  mask_blur_init();
+  const CompWalkChunk *c = &walk->chunks[index];
+  const WinChunk *e = &g_win_chunks[index];
+  if (e->ext || e->pending || e->tex_count <= 0 || c->blur_sigma <= 0) return 0;
+  // A picture of the same commands at the same alpha is kept, as an unchanged chunk is.
+  {
+    BlurCache *keep = &g_blur_cache[index];
+    if (keep->tex >= 0 && keep->key != 0 && keep->key == g_win_keys[index] &&
+        keep->alpha == c->alpha) {
+      return 1;
+    }
+  }
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  for (int t = 0; t < e->tex_count; t++) {
+    CompRect r = e->tiles[t].rect;
+    if (t == 0) {
+      x0 = r.x; y0 = r.y; x1 = r.x + r.w; y1 = r.y + r.h;
+    } else {
+      if (r.x < x0) x0 = r.x;
+      if (r.y < y0) y0 = r.y;
+      if (r.x + r.w > x1) x1 = r.x + r.w;
+      if (r.y + r.h > y1) y1 = r.y + r.h;
+    }
+  }
+  if (x1 <= x0 || y1 <= y0) return 0;
+  double sigma = c->blur_sigma * scale;
+  int pad = (int)ceil(sigma * 3.0);
+  if (pad < 1) pad = 1;
+  int w = (x1 - x0) + 2 * pad, h = (y1 - y0) + 2 * pad;
+  if (!mask_blur_scratch_for(b, w, h)) return 0;
+  // The crisp content, moved into the scratch surface's padded corner.
+  mt_surface_begin(b, g_blur_scratch[0], w, h);
+  CompMatrix into = comp_matrix_translate((float)-(x0 - pad), (float)-(y0 - pad));
+  for (int t = 0; t < e->tex_count; t++) {
+    CompRect r = e->tiles[t].rect;
+    CompMatrix M = comp_matrix_mul(into, comp_matrix_translate((float)r.x, (float)r.y));
+    mt_surface_draw(b, e->tiles[t].tex, (CompRect){0, 0, r.w, r.h}, &M, c->alpha, NULL);
+  }
+  mt_surface_end(b);
+  int taps = (int)ceil(sigma * 2.5);
+  if (taps < 1) taps = 1;
+  if (taps > 24) taps = 24;
+  if (!mt_tex_blur_slots(b, g_blur_scratch[0], g_blur_scratch[1], g_blur_scratch[2], sigma, taps)) {
+    return 0;
+  }
+  if (mask_split_debug_on()) {
+    fprintf(stderr, "native: blur chunk %d sigma=%.2f pad=%d %dx%d tiles=%d alpha=%.3f\n", index,
+            sigma, pad, w, h, e->tex_count, c->alpha);
+  }
+  BlurCache *cache = &g_blur_cache[index];
+  if (cache->tex < 0 || cache->w != w || cache->h != h) {
+    if (cache->tex >= 0) b->vt->tex_destroy(b, cache->tex);
+    cache->tex = b->vt->tex_create(b, w, h);
+    if (cache->tex < 0) return 0;
+  }
+  // The blurred picture, copied into the chunk's own surface so the scratch can be reused.
+  mt_surface_begin(b, cache->tex, w, h);
+  CompMatrix copy = comp_matrix_identity();
+  mt_surface_draw(b, g_blur_scratch[2], (CompRect){0, 0, w, h}, &copy, 1.0f, NULL);
+  mt_surface_end(b);
+  cache->x = x0 - pad;
+  cache->y = y0 - pad;
+  cache->w = w;
+  cache->h = h;
+  cache->key = g_win_keys[index];
+  cache->alpha = c->alpha;
+  return 1;
+}
+
 /** Draws the group's chunks of `role` onto surface `tex`, moved by the box's corner so the box's
  *  pixels start at its top left. The image paints at full alpha: any alpha around the mask fades
  *  the content into the frame, not the coverage that cuts it. */
@@ -11546,6 +11703,20 @@ static int mask_surface_draw(CompBackend *b, const MaskGroup *g, const CompWalk 
               e->tex_count > 0 ? e->tiles[0].rect.x : -1, e->tex_count > 0 ? e->tiles[0].rect.y : -1,
               e->tex_count > 0 ? e->tiles[0].rect.w : -1, e->tex_count > 0 ? e->tiles[0].rect.h : -1,
               e->tex_count > 0 ? e->tiles[0].tex : -1);
+    }
+    if (c->blur_sigma > 0 && role == COMP_MASK_CONTENT) {
+      // The blurred picture the content pass draws in place of the tiles.
+      BlurCache *cache = &g_blur_cache[i];
+      if (mask_split_debug_on()) {
+        fprintf(stderr, "native: blur draw %d tex=%d at %d,%d %dx%d\n", i, cache->tex, cache->x,
+                cache->y, cache->w, cache->h);
+      }
+      if (cache->tex >= 0) {
+        CompMatrix B = comp_matrix_translate((float)(cache->x - g->box.x), (float)(cache->y - g->box.y));
+        mt_surface_draw(b, cache->tex, (CompRect){0, 0, cache->w, cache->h}, &B, 1.0f, NULL);
+        drawn++;
+      }
+      continue;
     }
     int resampled = e->own &&
                     (fabs(c->m.m[0] / scale - 1.0) > 1e-4 || fabs(c->m.m[5] / scale - 1.0) > 1e-4 ||
@@ -11613,6 +11784,12 @@ static int mask_groups_render(CompBackend *b, const CompWalk *walk, double scale
       mask_surface_draw(b, g, walk, scale, COMP_MASK_ALPHA, s->alpha_tex);
       mt_surface_end(b);
       s->alpha_key = key;
+    }
+    // A blur chunk's pixels are made first, on its own: the content pass reads the result.
+    for (int i = g->first; i < g->first + g->count; i++) {
+      if (walk->chunks[i].mask_role == COMP_MASK_CONTENT && walk->chunks[i].blur_sigma > 0) {
+        mask_blur_chunk(b, g, walk, scale, i);
+      }
     }
     mt_surface_begin(b, s->content_tex, g->box.w, g->box.h);
     mask_surface_draw(b, g, walk, scale, COMP_MASK_CONTENT, s->content_tex);

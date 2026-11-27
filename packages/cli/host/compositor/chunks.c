@@ -56,6 +56,9 @@ typedef struct {
   int mask_role;
   int mask_id;
   CompRect mask_box;
+  // The radius a blur the walk opened asks the host to apply to the chunks inside it, in page
+  // pixels: a pure blur's content is rastered crisp and the pixels are blurred afterwards.
+  double blur_sigma;
 } WalkCtx;
 
 /** Grows a chunk's box with one command's. */
@@ -99,12 +102,15 @@ static void add_chunk(CompWalk *w, int list_id, int first, int count, int32_t se
   c->mask_role = COMP_MASK_NONE;
   c->mask_id = 0;
   memset(&c->mask_box, 0, sizeof(c->mask_box));
+  c->blur_sigma = 0;
 }
 
-/** Stamps a chunk just added with the mask role of the state it was walked in. */
+/** Stamps a chunk just added with the mask role and the blur of the state it was walked in. */
 static void stamp_mask(CompWalk *w, int at, const WalkCtx *s) {
-  if (at < 0 || at >= w->count || s->mask_role == COMP_MASK_NONE) return;
+  if (at < 0 || at >= w->count) return;
   CompWalkChunk *c = &w->chunks[at];
+  if (s->blur_sigma > 0) c->blur_sigma = s->blur_sigma;
+  if (s->mask_role == COMP_MASK_NONE) return;
   c->mask_role = s->mask_role;
   c->mask_id = s->mask_id;
   c->mask_box = s->mask_box;
@@ -268,13 +274,16 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
 
 /** Whether a layer's commands move things its boxes don't say or paint a layer of their own:
  *  what makes its chunk rastered over the whole frame, and keyless with a ref inside. */
-static int layer_is_full(const CompCmdSource *src, void *ctx, int list_id) {
+static int layer_is_full(const CompCmdSource *src, void *ctx, int list_id, int blur) {
   int n = src->count(ctx, list_id);
   for (int i = 0; i < n; i++) {
     CompCmdView v;
     memset(&v, 0, sizeof(v));
     if (!src->view(ctx, list_id, i, &v)) continue;
     if (v.kind == COMP_CMD_TRANSFORM || v.kind == COMP_CMD_LAYER_REF) return 1;
+    // Inside a mask's content, a pure blur is a chunk of its own that the host blurs, so the
+    // layer is walked for it rather than kept whole.
+    if (blur && v.kind == COMP_CMD_EFFECT && v.blur_sigma > 0) return 1;
   }
   return 0;
 }
@@ -289,7 +298,8 @@ static void walk_layer_ref(const CompCmdSource *src, void *ctx, const CompCmdVie
                            CompWalk *w, WalkCtx *s, int nested, int grouped) {
   int n = src->count(ctx, c->layer);
   if (n < 0) return;
-  if (nested && s->effects == 0 && layer_is_full(src, ctx, c->layer)) {
+  if (nested && s->effects == 0 &&
+      layer_is_full(src, ctx, c->layer, s->mask_role == COMP_MASK_CONTENT)) {
     int at = w->count;
     int fail = g_walk_fail, fail_at = g_walk_fail_at, fail_kind = g_walk_fail_kind;
     int span = g_walk_group_span;
@@ -297,7 +307,17 @@ static void walk_layer_ref(const CompCmdSource *src, void *ctx, const CompCmdVie
     inner.first = 0;
     inner.last = -1; // the layer's own list, not the range the ref sits in
     if (c->serial != 0) inner.element = c->serial;
-    if (walk_list(src, ctx, c->layer, scale, w, &inner, nested, grouped)) return;
+    int before = w->count;
+    if (walk_list(src, ctx, c->layer, scale, w, &inner, nested, grouped)) {
+      if (mask_split_debug()) {
+        fprintf(stderr, "native: layer %d nested ok chunks=%d\n", c->layer, w->count - before);
+      }
+      return;
+    }
+    if (mask_split_debug()) {
+      fprintf(stderr, "native: layer %d nested failed fail=%d kind=%d\n", c->layer, g_walk_fail,
+              g_walk_fail_kind);
+    }
     // Back to the one chunk the layer was before the walk tried it.
     w->count = at;
     g_walk_fail = fail;
@@ -522,6 +542,49 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         continue;
       }
     }
+    if (!grouped && c.kind == COMP_CMD_EFFECT && c.blur_sigma > 0 &&
+        s->mask_role == COMP_MASK_CONTENT) {
+      // A pure blur inside a mask's content: the interior is walked as chunks of its own, drawn
+      // crisp, and the chunk carries the radius for the host to blur the pixels by.
+      int end = group_end(src, ctx, list_id, i, total);
+      if (end > i) {
+        int at = w->count;
+        int fail = g_walk_fail, fail_at = g_walk_fail_at, fail_kind = g_walk_fail_kind;
+        int span = g_walk_group_span;
+        WalkCtx inner = *s;
+        inner.first = i + 1;
+        inner.last = end;
+        inner.alpha *= (float)c.alpha;
+        inner.blur_sigma = c.blur_sigma;
+        int ok = walk_list(src, ctx, list_id, scale, w, &inner, nested, grouped);
+        if (mask_split_debug()) {
+          fprintf(stderr, "native: blur %d inner ok=%d chunks=%d fail=%d kind=%d\n", i, ok,
+                  w->count - at, g_walk_fail, g_walk_fail_kind);
+        }
+        // Several chunks inside the filter are one unblurred chunk of its content carrying the
+        // radius, since the host blurs the chunk's pixels as a whole.
+        if (ok && w->count - at != 1) {
+          w->count = at;
+          add_chunk(w, list_id, i + 1, end - (i + 1), s->element, &inner.m, inner.clips,
+                    inner.clip_count, inner.alpha, inner.transforms);
+          if (w->count > at) {
+            group_box(src, ctx, list_id, i + 1, end, &w->chunks[at]);
+            stamp_mask(w, at, &inner);
+          }
+          ok = w->count - at == 1;
+        }
+        if (ok) {
+          open = -1;
+          i = end;
+          continue;
+        }
+        w->count = at;
+        g_walk_fail = fail;
+        g_walk_fail_at = fail_at;
+        g_walk_fail_kind = fail_kind;
+        g_walk_group_span = span;
+      }
+    }
     if (!grouped && c.kind == COMP_CMD_MASK && c.op == 0 && comp_walk_mask_split()) {
       int plain = plain_clips_only(s);
       int axis = fabs(s->m.m[1]) < 1e-6 && fabs(s->m.m[4]) < 1e-6;
@@ -570,7 +633,8 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
             if (w->chunks[k].mask_role == COMP_MASK_NONE) ok = 0;
           }
           if (mask_split_debug()) {
-            fprintf(stderr, "native: mask push %d walked ok=%d chunks=%d\n", i, ok, w->count - at);
+            fprintf(stderr, "native: mask push %d walked ok=%d chunks=%d fail=%d@%d kind=%d\n", i, ok,
+                    w->count - at, g_walk_fail, g_walk_fail_at, g_walk_fail_kind);
           }
           if (ok) {
             open = -1;
@@ -653,7 +717,13 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
       s->m = comp_matrix_mul(s->m, c.matrix);
       s->transforms++;
     } else if (c.kind == COMP_CMD_EFFECT) {
-      if (!c.simple) WALK_FAIL(5, i, (int)c.kind);
+      if (!c.simple) {
+        if (mask_split_debug()) {
+          fprintf(stderr, "native: fail5 at %d blur=%g role=%d nested=%d grouped=%d\n", i,
+                  c.blur_sigma, s->mask_role, nested, grouped);
+        }
+        WALK_FAIL(5, i, (int)c.kind);
+      }
       if (!walk_open(st, &depth, 3, s, w->count, i)) WALK_FAIL(3, i, (int)c.kind);
       if (c.serial != 0) s->element = c.serial;
       s->alpha *= c.alpha;

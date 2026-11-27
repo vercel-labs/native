@@ -20,6 +20,9 @@ CompBackend *comp_metal_backend_for_layer(void *layer);
  */
 int mt_mask_composite_available(CompBackend *backend);
 
+/** mt_tex_blur over texture ids, for a host that keeps its surfaces by slot. */
+int mt_tex_blur_slots(CompBackend *backend, int src, int tmp, int dst, double sigma, int taps);
+
 /** Starts a pass into surface `target`, cleared to transparent black, that the host draws a
  *  mask's image and content into with mt_surface_draw and commits with mt_surface_end. */
 void mt_surface_begin(CompBackend *backend, int target, int w, int h);
@@ -43,6 +46,13 @@ int mt_draw_quad_masked(CompBackend *backend, int content, int mask, CompRect sr
 
 #ifdef __OBJC__
 @class MTLTexture;
+/**
+ * Blurs `src` into `dst` with a separable Gaussian: the horizontal pass writes `tmp`, the vertical
+ * one `dst`. `sigma` is in texels, `taps` how far each side of a texel the kernel reaches.
+ * Answers 0 when the backend has no blur pipeline or a texture is missing.
+ */
+int mt_tex_blur(CompBackend *backend, id<MTLTexture> src, id<MTLTexture> tmp, id<MTLTexture> dst,
+                double sigma, int taps);
 #endif
 
 #endif
