@@ -50,6 +50,7 @@ typedef struct {
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> maskPipeline;
 @property(nonatomic, strong) id<MTLTexture> white;
 // Untyped: a destroyed texture's slot holds NSNull, which a generic array would reject.
 @property(nonatomic, strong) NSMutableArray *textures;
@@ -57,6 +58,12 @@ typedef struct {
 // the table until it fills.
 @property(nonatomic, strong) NSMutableIndexSet *freeSlots;
 @property(nonatomic, strong) id<MTLTexture> target;
+// A pass into an offscreen surface the host draws a mask's image and content with, on a command
+// buffer of its own so it never shares the frame's pass.
+@property(nonatomic, strong) id<MTLCommandBuffer> surfaceBuffer;
+@property(nonatomic, strong) id<MTLRenderCommandEncoder> surfaceEncoder;
+@property(nonatomic) int surfaceWidth;
+@property(nonatomic) int surfaceHeight;
 @property(nonatomic, strong) CAMetalLayer *layer;
 @property(nonatomic, strong) id<CAMetalDrawable> drawable;
 @property(nonatomic, strong) id<MTLCommandBuffer> commandBuffer;
@@ -249,6 +256,169 @@ static MtStage *mt_stage_take(MtBackend *m, int w, int h) {
 
 /** Draws a finished stage into the layer's drawable and presents it: the one place a frame waits
  *  for the display, and it is not the thread that runs the page. */
+
+/** Starts a pass into surface `target`, cleared to transparent black, on a command buffer of the
+ *  host's own: a mask's image and content are drawn with mt_surface_draw and committed with
+ *  mt_surface_end, apart from the frame's pass. */
+void mt_surface_begin(CompBackend *backend, int target, int w, int h) {
+  if (backend == NULL) return;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil || w <= 0 || h <= 0) return;
+  id<MTLTexture> tex = mt_texture(m, target);
+  if (tex == nil) return;
+  mt_end_frame(m);
+  MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+  rp.colorAttachments[0].texture = tex;
+  rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+  rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+  rp.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+  m.surfaceBuffer = [m.queue commandBuffer];
+  m.surfaceEncoder = [m.surfaceBuffer renderCommandEncoderWithDescriptor:rp];
+  m.surfaceWidth = w;
+  m.surfaceHeight = h;
+  const char *dbg = getenv("NATIVE_MASK_SPLIT_DEBUG");
+  if (dbg != NULL && dbg[0] == '1') {
+    fprintf(stderr, "native: surface begin target=%d tex=%p %ux%u usage=%lu enc=%d pipe=%p\n",
+            target, (__bridge void *)tex, (unsigned)tex.width, (unsigned)tex.height,
+            (unsigned long)tex.usage, m.surfaceEncoder != nil, (__bridge void *)m.quadPipeline);
+  }
+}
+
+/** Draws `tex`'s `src` rectangle into the open surface, as draw_quad would into a frame. */
+void mt_surface_draw(CompBackend *backend, int tex, CompRect src, const CompMatrix *matrix,
+                     float opacity, const CompRect *clip) {
+  if (backend == NULL) return;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil || m.surfaceEncoder == nil) return;
+  id<MTLTexture> t = mt_texture(m, tex);
+  if (t == nil || opacity <= 0.0f || src.w <= 0 || src.h <= 0) return;
+  MTUniforms u;
+  memset(&u, 0, sizeof(u));
+  if (matrix != NULL) memcpy(u.m, matrix->m, sizeof(u.m));
+  else for (int i = 0; i < 4; i++) u.m[i * 5] = 1.0f;
+  u.params[0] = opacity;
+  u.params[1] = (float)src.w;
+  u.params[2] = (float)src.h;
+  u.view[0] = (float)m.surfaceWidth;
+  u.view[1] = (float)m.surfaceHeight;
+  u.tint[0] = u.tint[1] = u.tint[2] = u.tint[3] = 1.0f;
+  [m.surfaceEncoder setRenderPipelineState:m.quadPipeline];
+  [m.surfaceEncoder setVertexBytes:&u length:sizeof(u) atIndex:0];
+  [m.surfaceEncoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
+  [m.surfaceEncoder setFragmentTexture:t atIndex:0];
+  MTLScissorRect scissor = {0, 0, (NSUInteger)m.surfaceWidth, (NSUInteger)m.surfaceHeight};
+  if (clip != NULL && clip->w > 0 && clip->h > 0) {
+    int x0 = clip->x > 0 ? clip->x : 0;
+    int y0 = clip->y > 0 ? clip->y : 0;
+    int x1 = clip->x + clip->w < m.surfaceWidth ? clip->x + clip->w : m.surfaceWidth;
+    int y1 = clip->y + clip->h < m.surfaceHeight ? clip->y + clip->h : m.surfaceHeight;
+    if (x1 <= x0 || y1 <= y0) return;
+    scissor = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0),
+                               (NSUInteger)(y1 - y0)};
+  }
+  [m.surfaceEncoder setScissorRect:scissor];
+  [m.surfaceEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+}
+
+/** Draws the content through the mask's alpha into the open surface, so the product is rounded
+ *  to the surface's eight bits before the frame blends it, as the flat replay's image is. */
+int mt_surface_draw_masked(CompBackend *backend, int content, int mask, CompRect src,
+                           const CompMatrix *matrix, float opacity) {
+  if (backend == NULL) return 0;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil || m.surfaceEncoder == nil || m.maskPipeline == nil) return 0;
+  id<MTLTexture> ct = mt_texture(m, content);
+  id<MTLTexture> mt = mt_texture(m, mask);
+  if (ct == nil || mt == nil || src.w <= 0 || src.h <= 0) return 0;
+  MTUniforms u;
+  memset(&u, 0, sizeof(u));
+  if (matrix != NULL) memcpy(u.m, matrix->m, sizeof(u.m));
+  else for (int i = 0; i < 4; i++) u.m[i * 5] = 1.0f;
+  u.params[0] = opacity;
+  u.params[1] = (float)src.w;
+  u.params[2] = (float)src.h;
+  u.view[0] = (float)m.surfaceWidth;
+  u.view[1] = (float)m.surfaceHeight;
+  u.tint[0] = u.tint[1] = u.tint[2] = u.tint[3] = 1.0f;
+  [m.surfaceEncoder setRenderPipelineState:m.maskPipeline];
+  [m.surfaceEncoder setVertexBytes:&u length:sizeof(u) atIndex:0];
+  [m.surfaceEncoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
+  [m.surfaceEncoder setFragmentTexture:ct atIndex:0];
+  [m.surfaceEncoder setFragmentTexture:mt atIndex:1];
+  [m.surfaceEncoder setScissorRect:(MTLScissorRect){0, 0, (NSUInteger)m.surfaceWidth,
+                                                   (NSUInteger)m.surfaceHeight}];
+  [m.surfaceEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+  return 1;
+}
+
+/** Ends the surface pass and commits it. */
+void mt_surface_end(CompBackend *backend) {
+  if (backend == NULL) return;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil) return;
+  if (m.surfaceEncoder != nil) {
+    [m.surfaceEncoder endEncoding];
+    m.surfaceEncoder = nil;
+  }
+  if (m.surfaceBuffer != nil) {
+    [m.surfaceBuffer commit];
+    m.lastCommandBuffer = m.surfaceBuffer;
+    m.surfaceBuffer = nil;
+  }
+}
+
+int mt_mask_composite_available(CompBackend *backend) {
+  if (backend == NULL) return 0;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  return m != nil && m.maskPipeline != nil;
+}
+
+/**
+ * Draws a content texture through a mask image's alpha: one quad sampling both textures over the
+ * same rect and multiplying the premultiplied content by the coverage. It is the pass a mask the
+ * walk split runs instead of the CPU multiply over the whole masked box.
+ */
+int mt_draw_quad_masked(CompBackend *backend, int content, int mask, CompRect src,
+                        const CompMatrix *matrix, float opacity, const CompRect *clip) {
+  if (backend == NULL) return 0;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil) return 0;
+  id<MTLTexture> ct = mt_texture(m, content);
+  id<MTLTexture> mt = mt_texture(m, mask);
+  if (m.encoder == nil || m.maskPipeline == nil || ct == nil || mt == nil || opacity <= 0.0f ||
+      src.w <= 0 || src.h <= 0) {
+    return 0;
+  }
+  MTUniforms u;
+  memset(&u, 0, sizeof(u));
+  if (matrix != NULL) memcpy(u.m, matrix->m, sizeof(u.m));
+  else for (int i = 0; i < 4; i++) u.m[i * 5] = 1.0f;
+  u.params[0] = opacity;
+  u.params[1] = (float)src.w;
+  u.params[2] = (float)src.h;
+  u.view[0] = (float)m.width;
+  u.view[1] = (float)m.height;
+  u.tint[0] = u.tint[1] = u.tint[2] = u.tint[3] = 1.0f;
+  [m.encoder setVertexBytes:&u length:sizeof(u) atIndex:0];
+  [m.encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
+  [m.encoder setRenderPipelineState:m.maskPipeline];
+  [m.encoder setFragmentTexture:ct atIndex:0];
+  [m.encoder setFragmentTexture:mt atIndex:1];
+  MTLScissorRect scissor = {0, 0, (NSUInteger)m.width, (NSUInteger)m.height};
+  if (clip != NULL && clip->w > 0 && clip->h > 0) {
+    int x0 = clip->x > 0 ? clip->x : 0;
+    int y0 = clip->y > 0 ? clip->y : 0;
+    int x1 = clip->x + clip->w < m.width ? clip->x + clip->w : m.width;
+    int y1 = clip->y + clip->h < m.height ? clip->y + clip->h : m.height;
+    if (x1 <= x0 || y1 <= y0) return 0;
+    scissor = (MTLScissorRect){(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0),
+                               (NSUInteger)(y1 - y0)};
+  }
+  [m.encoder setScissorRect:scissor];
+  [m.encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+  return 1;
+}
+
 static int mt_present_stage(MtBackend *m, MtStage *s) {
   double started = CACurrentMediaTime() * 1000.0;
   id<CAMetalDrawable> d = [m.layer nextDrawable];
@@ -725,6 +895,21 @@ static CompBackend *mt_backend_with_layer(void *layer) {
       return NULL;
     }
   }
+  // A library the build captured holds only the functions the pipeline it captured used: the
+  // mask pass is compiled from the source when the library has no such function, so the app never
+  // runs a pipeline that draws nothing.
+  if (library != nil && [library newFunctionWithName:@"quad_mask_fragment"] == nil) {
+    NSError *sourceError = nil;
+    id<MTLLibrary> full = [device newLibraryWithSource:[NSString stringWithUTF8String:native_quad_shader_source]
+                                               options:nil
+                                                 error:&sourceError];
+    if (full != nil) {
+      library = full;
+    } else {
+      fprintf(stderr, "native: the compositor's Metal shaders did not compile: %s\n",
+              sourceError == nil ? "unknown error" : [[sourceError description] UTF8String]);
+    }
+  }
   MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
   pd.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
   pd.fragmentFunction = [library newFunctionWithName:@"quad_fragment"];
@@ -743,6 +928,28 @@ static CompBackend *mt_backend_with_layer(void *layer) {
     fprintf(stderr, "native: the compositor's Metal pipeline did not build: %s\n",
             error == nil ? "unknown error" : [[error description] UTF8String]);
     return NULL;
+  }
+  MTLRenderPipelineDescriptor *md = [[MTLRenderPipelineDescriptor alloc] init];
+  md.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
+  md.fragmentFunction = [library newFunctionWithName:@"quad_mask_fragment"];
+  if (md.fragmentFunction == nil) {
+    fprintf(stderr, "native: the Metal shaders have no quad_mask_fragment\n");
+  }
+  MTLRenderPipelineColorAttachmentDescriptor *matt = md.colorAttachments[0];
+  matt.pixelFormat = MTLPixelFormatBGRA8Unorm;
+  // The content is premultiplied and the mask has cut it already, so it blends as a quad does.
+  matt.blendingEnabled = YES;
+  matt.rgbBlendOperation = MTLBlendOperationAdd;
+  matt.alphaBlendOperation = MTLBlendOperationAdd;
+  matt.sourceRGBBlendFactor = MTLBlendFactorOne;
+  matt.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+  matt.sourceAlphaBlendFactor = MTLBlendFactorOne;
+  matt.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+  m.maskPipeline = [device newRenderPipelineStateWithDescriptor:md error:&error];
+  if (m.maskPipeline == nil) {
+    // A mask the walk split falls back to the whole-mask path; the frame is still drawn.
+    fprintf(stderr, "native: the compositor's Metal mask pipeline did not build: %s\n",
+            error == nil ? "unknown error" : [[error description] UTF8String]);
   }
   m.textures = [NSMutableArray array];
   m.freeSlots = [NSMutableIndexSet indexSet];

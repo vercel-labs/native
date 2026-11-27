@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <stdlib.h>
+#include <stdio.h>
 
 #include "chunks.h"
 #include "layers.h"
@@ -38,6 +39,24 @@ typedef struct {
   int merged;
   CompWalkClip replaced;
 } WalkState;
+
+/** The state a list's commands are read in: what the commands before it in the paint opened. */
+typedef struct {
+  CompMatrix m;
+  CompWalkClip clips[COMP_WALK_CLIPS];
+  int clip_count;
+  float alpha;
+  int transforms;
+  int32_t element; // the element whose state the commands being read sit under
+  int effects;     // the opacity groups open around the list, which one chunk has to fill
+  // The range of the list this call walks, so a mask's image and content are walked without
+  // stepping outside the push, the split and the pop.
+  int first, last;
+  // The mask the commands being read sit in, when the walk split one, and its device box.
+  int mask_role;
+  int mask_id;
+  CompRect mask_box;
+} WalkCtx;
 
 /** Grows a chunk's box with one command's. */
 static void grow_box(CompWalkChunk *c, const CompCmdView *v) {
@@ -77,6 +96,18 @@ static void add_chunk(CompWalk *w, int list_id, int first, int count, int32_t se
   c->bx = c->by = c->bw = c->bh = 0;
   c->full = 0;
   c->external = 0;
+  c->mask_role = COMP_MASK_NONE;
+  c->mask_id = 0;
+  memset(&c->mask_box, 0, sizeof(c->mask_box));
+}
+
+/** Stamps a chunk just added with the mask role of the state it was walked in. */
+static void stamp_mask(CompWalk *w, int at, const WalkCtx *s) {
+  if (at < 0 || at >= w->count || s->mask_role == COMP_MASK_NONE) return;
+  CompWalkChunk *c = &w->chunks[at];
+  c->mask_role = s->mask_role;
+  c->mask_id = s->mask_id;
+  c->mask_box = s->mask_box;
 }
 
 /** The box of a run's commands, following the layer refs the run replays (see box_range). */
@@ -102,6 +133,30 @@ static int g_walk_fail_kind = -1;
 int comp_walk_failure(void) { return g_walk_fail; }
 int comp_walk_failure_at(void) { return g_walk_fail_at; }
 int comp_walk_failure_kind(void) { return g_walk_fail_kind; }
+
+/** Whether a nested walk splits masks; see comp_walk_set_mask_split. -1 until it is known. */
+static int g_mask_split = -1;
+static int g_mask_seq = 0; // the mask ids handed out by the walk in progress
+
+void comp_walk_set_mask_split(int on) { g_mask_split = on ? 1 : 0; }
+
+int comp_walk_mask_split(void) {
+  if (g_mask_split < 0) {
+    const char *env = getenv("NATIVE_MASK_SPLIT");
+    g_mask_split = env != NULL && env[0] == '1' && env[1] == 0;
+  }
+  return g_mask_split;
+}
+
+/** Whether the walk prints why it did or didn't split a mask: NATIVE_MASK_SPLIT_DEBUG=1. */
+static int mask_split_debug(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *env = getenv("NATIVE_MASK_SPLIT_DEBUG");
+    on = env != NULL && env[0] == '1' && env[1] == 0;
+  }
+  return on;
+}
 
 /** The chunks the failing opacity group had gathered, for a host that reports them. */
 static int g_walk_group_span = 0;
@@ -146,16 +201,67 @@ static int group_end(const CompCmdSource *src, void *ctx, int list_id, int at, i
   return -1;
 }
 
-/** The state a list's commands are read in: what the commands before it in the paint opened. */
-typedef struct {
-  CompMatrix m;
-  CompWalkClip clips[COMP_WALK_CLIPS];
-  int clip_count;
-  float alpha;
-  int transforms;
-  int32_t element; // the element whose state the commands being read sit under
-  int effects;     // the opacity groups open around the list, which one chunk has to fill
-} WalkCtx;
+/** The command that splits the mask whose push is at `at`, or -1 when the list never splits it. */
+static int mask_split_at(const CompCmdSource *src, void *ctx, int list_id, int at, int total) {
+  int depth = 0;
+  for (int i = at + 1; i < total; i++) {
+    CompCmdView v;
+    memset(&v, 0, sizeof(v));
+    if (!src->view(ctx, list_id, i, &v)) continue;
+    if (v.kind == COMP_CMD_MASK && v.op == 1 && depth == 0) return i;
+    if (opens_state(&v)) depth++;
+    else if (closes_state(&v)) {
+      depth--;
+      if (depth < 0) return -1;
+    }
+  }
+  return -1;
+}
+
+/** Whether everything a split mask paints can be drawn as chunks: a backdrop filter shows the
+ *  frame behind it, a canvas changes its pixels without a new command, and a mask or projection
+ *  inside the span orders its own pixels against the content's. */
+static int mask_span_ok(const CompCmdSource *src, void *ctx, int list_id, int first, int last) {
+  for (int i = first; i < last; i++) {
+    CompCmdView v;
+    memset(&v, 0, sizeof(v));
+    if (!src->view(ctx, list_id, i, &v)) continue;
+    if (v.kind == COMP_CMD_EFFECT && v.backdrop) return 0;
+    if (v.kind == COMP_CMD_DRAW && v.external) return 0;
+    if ((v.kind == COMP_CMD_MASK || v.kind == COMP_CMD_PERSPECTIVE) && v.op == 0) return 0;
+  }
+  return 1;
+}
+
+/** Whether every clip open around a mask is a plain device rect, which a host can scissor by. */
+static int plain_clips_only(const WalkCtx *s) {
+  for (int k = 0; k < s->clip_count; k++) {
+    const CompWalkClip *c = &s->clips[k];
+    if (c->r > 0) return 0;
+    if (c->x != (double)(int)c->x || c->y != (double)(int)c->y ||
+        c->w != (double)(int)c->w || c->h != (double)(int)c->h) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/** The device box a mask's push covers, out to whole pixels as the flat replay takes it. */
+static CompRect mask_device_box(const CompCmdView *c, const CompMatrix *m) {
+  double minx = 0, miny = 0, maxx = 0, maxy = 0;
+  for (int k = 0; k < 4; k++) {
+    double x = k == 0 || k == 3 ? c->x : c->x + c->w;
+    double y = k < 2 ? c->y : c->y + c->h;
+    tf(m, &x, &y);
+    if (k == 0 || x < minx) minx = x;
+    if (k == 0 || y < miny) miny = y;
+    if (k == 0 || x > maxx) maxx = x;
+    if (k == 0 || y > maxy) maxy = y;
+  }
+  double dx = floor(minx), dy = floor(miny);
+  CompRect r = {(int)dx, (int)dy, (int)(ceil(maxx) - dx), (int)(ceil(maxy) - dy)};
+  return r;
+}
 
 static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double scale, CompWalk *w,
                      WalkCtx *s, int nested, int grouped);
@@ -188,6 +294,8 @@ static void walk_layer_ref(const CompCmdSource *src, void *ctx, const CompCmdVie
     int fail = g_walk_fail, fail_at = g_walk_fail_at, fail_kind = g_walk_fail_kind;
     int span = g_walk_group_span;
     WalkCtx inner = *s;
+    inner.first = 0;
+    inner.last = -1; // the layer's own list, not the range the ref sits in
     if (c->serial != 0) inner.element = c->serial;
     if (walk_list(src, ctx, c->layer, scale, w, &inner, nested, grouped)) return;
     // Back to the one chunk the layer was before the walk tried it.
@@ -199,7 +307,10 @@ static void walk_layer_ref(const CompCmdSource *src, void *ctx, const CompCmdVie
   }
   int at = w->count;
   add_chunk(w, c->layer, 0, n, c->serial, &s->m, s->clips, s->clip_count, s->alpha, s->transforms);
-  if (w->count > at) layer_box(src, ctx, c->layer, &w->chunks[at]);
+  if (w->count > at) {
+    layer_box(src, ctx, c->layer, &w->chunks[at]);
+    stamp_mask(w, at, s);
+  }
 }
 
 /** Opens a state on the walk's stack, saving what the pop puts back. */
@@ -369,7 +480,11 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
   int depth = 0;
   int open = -1;
   int total = src->count(ctx, list_id);
-  for (int i = 0; i < total; i++) {
+  // A mask's image and content are walked as the ranges around its split, so the list's ends are
+  // the range's unless the caller asked for the whole list.
+  int first = s->first > 0 ? s->first : 0;
+  int last = s->last >= 0 ? s->last : total;
+  for (int i = first; i < last; i++) {
     CompCmdView c;
     memset(&c, 0, sizeof(c));
     if (!src->view(ctx, list_id, i, &c)) continue;
@@ -390,6 +505,9 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         for (int k = 0; k < s->clip_count; k++) run.clips[k] = s->clips[k];
         run.alpha = s->alpha;
         run.transforms = s->transforms;
+        run.mask_role = s->mask_role;
+        run.mask_id = s->mask_id;
+        run.mask_box = s->mask_box;
       }
       int end = absorb_state(src, ctx, list_id, i, total, &run);
       if (end >= 0 && (open >= 0 || w->count < COMP_MAX_LAYERS)) {
@@ -402,6 +520,69 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         }
         i = end;
         continue;
+      }
+    }
+    if (!grouped && c.kind == COMP_CMD_MASK && c.op == 0 && comp_walk_mask_split()) {
+      int plain = plain_clips_only(s);
+      int axis = fabs(s->m.m[1]) < 1e-6 && fabs(s->m.m[4]) < 1e-6;
+      // An opacity group above the mask fades the composed picture, which the chunks' own alphas
+      // would fade before the mask instead: that mask stays whole.
+      int opaque = s->alpha == 1.0f;
+      if (mask_split_debug()) {
+        fprintf(stderr, "native: mask push %d list=%d depth=%d clips=%d plain=%d axis=%d\n", i,
+                list_id, depth, s->clip_count, plain, axis);
+      }
+      if (plain && axis && opaque) {
+        // A mask whose image and content are walked apart: the host composites the content through
+        // the image on surfaces of its own, so the image is rastered once and the content's chunks
+        // are kept and rastered on their own. A span the chunks can't carry, or a range the walk
+        // refuses, leaves the mask whole as before.
+        int end = group_end(src, ctx, list_id, i, total);
+        int split = end > i ? mask_split_at(src, ctx, list_id, i, end) : -1;
+        int span_ok = split > i && mask_span_ok(src, ctx, list_id, i + 1, end);
+        if (mask_split_debug()) {
+          fprintf(stderr, "native: mask push %d end=%d split=%d span=%d\n", i, end, split, span_ok);
+        }
+        if (span_ok) {
+          int at = w->count;
+          int fail = g_walk_fail, fail_at = g_walk_fail_at, fail_kind = g_walk_fail_kind;
+          int span = g_walk_group_span;
+          int id = ++g_mask_seq;
+          WalkCtx alpha = *s;
+          alpha.first = i + 1;
+          alpha.last = split;
+          alpha.mask_role = COMP_MASK_ALPHA;
+          alpha.mask_id = id;
+          alpha.mask_box = mask_device_box(&c, &s->m);
+          int ok = walk_list(src, ctx, list_id, scale, w, &alpha, nested, grouped);
+          if (ok) {
+            WalkCtx content = *s;
+            content.first = split + 1;
+            content.last = end;
+            content.mask_role = COMP_MASK_CONTENT;
+            content.mask_id = id;
+            content.mask_box = alpha.mask_box;
+            ok = walk_list(src, ctx, list_id, scale, w, &content, nested, grouped);
+          }
+          // Every chunk of the group has to know it is one: a chunk the ranged walk kept whole
+          // without being stamped would draw outside the mask, so it falls back with the rest.
+          for (int k = at; ok && k < w->count; k++) {
+            if (w->chunks[k].mask_role == COMP_MASK_NONE) ok = 0;
+          }
+          if (mask_split_debug()) {
+            fprintf(stderr, "native: mask push %d walked ok=%d chunks=%d\n", i, ok, w->count - at);
+          }
+          if (ok) {
+            open = -1;
+            i = end;
+            continue;
+          }
+          w->count = at;
+          g_walk_fail = fail;
+          g_walk_fail_at = fail_at;
+          g_walk_fail_kind = fail_kind;
+          g_walk_group_span = span;
+        }
       }
     }
     int boundary = c.kind != COMP_CMD_DRAW;
@@ -424,7 +605,10 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         int at = w->count;
         add_chunk(w, list_id, i, end + 1 - i, c.serial != 0 ? c.serial : s->element, &s->m, s->clips,
                   s->clip_count, s->alpha, s->transforms);
-        if (w->count > at) group_box(src, ctx, list_id, i, end + 1, &w->chunks[at]);
+        if (w->count > at) {
+          group_box(src, ctx, list_id, i, end + 1, &w->chunks[at]);
+          stamp_mask(w, at, s);
+        }
         i = end;
         continue;
       }
@@ -525,14 +709,17 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         if (w->count > at) {
           w->chunks[at].external = 1;
           grow_box(&w->chunks[at], &c);
+          stamp_mask(w, at, s);
         }
         open = -1;
         continue;
       }
       if (open < 0) {
+        int at = w->count;
         add_chunk(w, list_id, i, 0, s->element, &s->m, s->clips, s->clip_count, s->alpha,
                   s->transforms);
         open = w->count - 1;
+        stamp_mask(w, at, s);
       }
       if (open >= 0) {
         w->chunks[open].count++;
@@ -540,13 +727,14 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
       }
     }
   }
-  if (depth != 0) WALK_FAIL(9, total, -1); // an unclosed state
+  if (depth != 0) WALK_FAIL(9, last, -1); // an unclosed state
   return 1;
 }
 
 static int walk_root(const CompCmdSource *src, void *ctx, double scale, CompWalk *w, int nested,
                      int grouped) {
   w->count = 0;
+  g_mask_seq = 0;
   g_walk_fail = 0;
   g_walk_fail_at = -1;
   g_walk_fail_kind = -1;
@@ -554,6 +742,7 @@ static int walk_root(const CompCmdSource *src, void *ctx, double scale, CompWalk
   memset(&s, 0, sizeof(s));
   s.m = comp_matrix_scale((float)scale, (float)scale);
   s.alpha = 1.0f;
+  s.last = -1; // the whole root list
   return walk_list(src, ctx, -1, scale, w, &s, nested, grouped);
 }
 

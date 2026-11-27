@@ -41,3 +41,15 @@ fragment float4 quad_fragment(VOut in [[stage_in]], texture2d<float> tex [[textu
   if ((f & 1u) != 0u) c.rgb *= c.a;
   return float4(c.rgb * u.tint.rgb, c.a * u.tint.a) * u.params.x;
 }
+
+// A mask the compositor split: the content's texels cut by the mask image's alpha, both sampled at
+// the same point of the same rect. The content is premultiplied, so scaling every channel by the
+// coverage is what the CPU path's per-channel multiply does.
+fragment float4 quad_mask_fragment(VOut in [[stage_in]], texture2d<float> content [[texture(0)]],
+                                   texture2d<float> mask [[texture(1)]],
+                                   constant Uniforms &u [[buffer(0)]]) {
+  constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
+  float4 c = content.sample(s, in.uv);
+  float a = mask.sample(s, in.uv).a;
+  return c * a * u.params.x;
+}

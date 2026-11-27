@@ -10457,6 +10457,8 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
       out->kind = COMP_CMD_EFFECT;
       out->alpha = (float)spec.alpha;
       out->simple = spec.count == 0 && spec.bcount == 0 && spec.blend == 0;
+      // A backdrop filter shows the pixels behind it, so a mask that holds one stays whole.
+      out->backdrop = spec.bcount != 0;
       return 1;
     }
     case CMD_UNCLIP:
@@ -10472,6 +10474,12 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
     case CMD_MASK_PUSH:
       out->kind = COMP_CMD_MASK;
       out->op = 0;
+      // The box the mask covers in the page, which a host that splits the mask measures its
+      // surfaces by (the flat replay takes the same box, through the state it sits in).
+      out->x = c->x;
+      out->y = c->y;
+      out->w = c->w;
+      out->h = c->h;
       return 1;
     case CMD_MASK_SPLIT:
       out->kind = COMP_CMD_MASK;
@@ -10747,6 +10755,8 @@ static int window_compositing(void) {
   return !(env != NULL && env[0] == '0' && env[1] == 0);
 }
 
+static void mask_surfaces_drop(void);
+
 /** Drops the tiles a chunk holds, returning them to the budget. */
 static void win_drop_tiles(WinChunk *e) {
   if (g_window_backend != NULL) {
@@ -10783,6 +10793,7 @@ static void win_pic_drop(CompBackend *b) {
 /** Drops every tile, for a new scale or a new frame the cache can't describe. */
 static void win_drop_all(void) {
   for (int i = 0; i < g_win_count; i++) win_drop_tiles(&g_win_chunks[i]);
+  mask_surfaces_drop();
   g_win_count = 0;
   g_win_tiles = 0;
   g_win_scale = 0;
@@ -11276,7 +11287,9 @@ static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *ras
   uint64_t h = 0x243f6a8885a308d3ull;
   h = key_mix(h, (uint64_t)g_raster_epoch);
   h = key_mix(h, (uint64_t)(c->list_id < 0) | ((uint64_t)(uint32_t)own << 1) |
-                     ((uint64_t)(uint32_t)c->full << 2) | ((uint64_t)(uint32_t)c->transforms << 8));
+                     ((uint64_t)(uint32_t)c->full << 2) | ((uint64_t)(uint32_t)c->transforms << 8) |
+                     ((uint64_t)(uint32_t)c->mask_role << 24) |
+                     ((uint64_t)(uint32_t)c->mask_id << 32));
   h = key_mix(h, (uint64_t)(uint32_t)pw | ((uint64_t)(uint32_t)ph << 32));
   for (int i = 0; i < 16; i++) h = key_double(h, raster_m->m[i]);
   h = key_double(h, c->bx);
@@ -11375,6 +11388,254 @@ static uint64_t g_win_keys[COMP_MAX_LAYERS];
 #define WIN_KEY_SLOTS 8192 // a power of two above COMP_MAX_LAYERS
 static int g_win_key_slot[WIN_KEY_SLOTS];
 
+// ---------------------------------------------------------------------------
+// Masks the walk split
+//
+// A mask the walk split (comp_walk_mask_split) arrives as chunks of two roles: the ones that paint
+// its image and the ones that paint the content it masks, every chunk carrying the mask's id and
+// its device box. The window draws the image onto a surface of the box once and keeps it, draws
+// the content's chunks onto another surface of it every frame (their tiles are kept while nothing
+// they show changes), and draws the content through the image's alpha as one quad.
+
+#define MAX_MASK_GROUPS 8
+
+typedef struct {
+  int id;           // the mask's identity in the walk
+  int w, h;         // the box the surfaces are sized for
+  int alpha_tex;    // the mask image, or -1
+  int content_tex;  // the content drawn on the box, or -1
+  int composed_tex; // the content through the image's alpha, rounded to eight bits, or -1
+  uint64_t alpha_key; // what the image texture is a picture of
+  int used;         // the frame that last used the surfaces
+} MaskSurface;
+
+typedef struct {
+  int id;
+  CompRect box;       // device pixels; the surfaces are the part of it the frame shows
+  int first, count;   // the group's chunks, its image's first
+  int alpha_chunks;
+  MaskSurface *surface;
+} MaskGroup;
+
+static MaskSurface g_mask_surfaces[MAX_MASK_GROUPS];
+static int g_mask_surfaces_ready = 0;
+static int g_mask_frame = 0;
+static MaskGroup g_mask_groups[MAX_MASK_GROUPS];
+static int g_mask_group_count = 0;
+
+/** Whether the mask path prints what it made of each group: NATIVE_MASK_SPLIT_DEBUG=1. */
+static int mask_split_debug_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *env = getenv("NATIVE_MASK_SPLIT_DEBUG");
+    on = env != NULL && env[0] == '1' && env[1] == 0;
+  }
+  return on;
+}
+
+
+static void mask_surfaces_init(void) {
+  if (g_mask_surfaces_ready) return;
+  for (int i = 0; i < MAX_MASK_GROUPS; i++) {
+    g_mask_surfaces[i].alpha_tex = -1;
+    g_mask_surfaces[i].content_tex = -1;
+    g_mask_surfaces[i].composed_tex = -1;
+  }
+  g_mask_surfaces_ready = 1;
+}
+
+/** Drops every surface's textures: the tiles were rastered for another scale, or the window is
+ *  going away. */
+static void mask_surfaces_drop(void) {
+  if (!g_mask_surfaces_ready) return;
+  for (int i = 0; i < MAX_MASK_GROUPS; i++) {
+    MaskSurface *s = &g_mask_surfaces[i];
+    if (s->alpha_tex >= 0 && g_window_backend != NULL) {
+      g_window_backend->vt->tex_destroy(g_window_backend, s->alpha_tex);
+    }
+    if (s->content_tex >= 0 && g_window_backend != NULL) {
+      g_window_backend->vt->tex_destroy(g_window_backend, s->content_tex);
+    }
+    s->alpha_tex = -1;
+    s->content_tex = -1;
+    s->composed_tex = -1;
+    s->alpha_key = 0;
+    s->w = s->h = 0;
+    s->id = -1;
+  }
+}
+
+/** The surfaces a mask's group draws on, sized for the box; a new pair when the size changed. */
+static MaskSurface *mask_surface_for(CompBackend *b, int id, int w, int h) {
+  mask_surfaces_init();
+  int slot = -1, spare = -1;
+  for (int i = 0; i < MAX_MASK_GROUPS; i++) {
+    MaskSurface *s = &g_mask_surfaces[i];
+    if (s->id == id && s->alpha_tex >= 0) {
+      slot = i;
+      break;
+    }
+    if (spare < 0 && (s->alpha_tex < 0 || s->used < g_mask_frame)) spare = i;
+  }
+  if (slot < 0) slot = spare >= 0 ? spare : 0;
+  MaskSurface *s = &g_mask_surfaces[slot];
+  if (s->w != w || s->h != h || s->alpha_tex < 0 || s->content_tex < 0 || s->composed_tex < 0) {
+    if (s->alpha_tex >= 0) b->vt->tex_destroy(b, s->alpha_tex);
+    if (s->content_tex >= 0) b->vt->tex_destroy(b, s->content_tex);
+    if (s->composed_tex >= 0) b->vt->tex_destroy(b, s->composed_tex);
+    s->alpha_tex = b->vt->tex_create(b, w, h);
+    s->content_tex = b->vt->tex_create(b, w, h);
+    s->composed_tex = b->vt->tex_create(b, w, h);
+    s->alpha_key = 0;
+    s->w = w;
+    s->h = h;
+  }
+  s->id = id;
+  s->used = g_mask_frame;
+  return s;
+}
+
+/** Collects the groups a walk's chunks make: each run of chunks of one mask id. */
+static void mask_groups_collect(const CompWalk *walk) {
+  g_mask_group_count = 0;
+  int n = walk->count;
+  for (int i = 0; i < n && g_mask_group_count < MAX_MASK_GROUPS; ) {
+    const CompWalkChunk *c = &walk->chunks[i];
+    if (c->mask_role == COMP_MASK_NONE) {
+      i++;
+      continue;
+    }
+    MaskGroup *g = &g_mask_groups[g_mask_group_count++];
+    memset(g, 0, sizeof(*g));
+    g->id = c->mask_id;
+    g->box = c->mask_box;
+    g->first = i;
+    while (i < n && walk->chunks[i].mask_role != COMP_MASK_NONE &&
+           walk->chunks[i].mask_id == g->id) {
+      if (walk->chunks[i].mask_role == COMP_MASK_ALPHA) g->alpha_chunks++;
+      g->count++;
+      i++;
+    }
+  }
+}
+
+/** Draws the group's chunks of `role` onto surface `tex`, moved by the box's corner so the box's
+ *  pixels start at its top left. The image paints at full alpha: any alpha around the mask fades
+ *  the content into the frame, not the coverage that cuts it. */
+static int mask_surface_draw(CompBackend *b, const MaskGroup *g, const CompWalk *walk, double scale,
+                             int role, int tex) {
+  (void)tex;
+  CompMatrix shift = comp_matrix_translate((float)-g->box.x, (float)-g->box.y);
+  CompMatrix inv = comp_matrix_scale((float)(1.0 / scale), (float)(1.0 / scale));
+  int drawn = 0;
+  for (int i = g->first; i < g->first + g->count; i++) {
+    const CompWalkChunk *c = &walk->chunks[i];
+    const WinChunk *e = &g_win_chunks[i];
+    if (c->mask_role != role || e->ext || e->pending || e->tex_count <= 0) continue;
+    CompWalkChunk baked;
+    CompRect clip;
+    int has_scissor = 0;
+    (void)own_space_clips(c, scale, &baked, &clip, &has_scissor);
+    if (e->own && has_scissor && (clip.w <= 0 || clip.h <= 0)) continue;
+    CompRect moved = {clip.x - g->box.x, clip.y - g->box.y, clip.w, clip.h};
+    const CompRect *draw_clip = e->own && has_scissor ? &moved : NULL;
+    float alpha = role == COMP_MASK_ALPHA ? 1.0f : c->alpha;
+    if (mask_split_debug_on()) {
+      fprintf(stderr, "native: mask surface role=%d chunk=%d own=%d tiles=%d m=%.1f,%.1f clip=%d,%d %dx%d tile0=%d,%d %dx%d tex0=%d\n",
+              role, i, e->own, e->tex_count, c->m.m[12], c->m.m[13], clip.x, clip.y, clip.w, clip.h,
+              e->tex_count > 0 ? e->tiles[0].rect.x : -1, e->tex_count > 0 ? e->tiles[0].rect.y : -1,
+              e->tex_count > 0 ? e->tiles[0].rect.w : -1, e->tex_count > 0 ? e->tiles[0].rect.h : -1,
+              e->tex_count > 0 ? e->tiles[0].tex : -1);
+    }
+    int resampled = e->own &&
+                    (fabs(c->m.m[0] / scale - 1.0) > 1e-4 || fabs(c->m.m[5] / scale - 1.0) > 1e-4 ||
+                     fabs(c->m.m[1]) > 1e-6 || fabs(c->m.m[4]) > 1e-6);
+    for (int t = 0; t < e->tex_count; t++) {
+      CompRect r = e->tiles[t].rect;
+      CompMatrix M;
+      if (e->own) {
+        M = comp_matrix_mul(comp_matrix_mul(c->m, inv),
+                            comp_matrix_translate((float)r.x, (float)r.y));
+      } else {
+        M = comp_matrix_translate((float)r.x, (float)r.y);
+      }
+      M = comp_matrix_mul(shift, M);
+      (void)resampled;
+      mt_surface_draw(b, e->tiles[t].tex, (CompRect){0, 0, r.w, r.h}, &M, alpha, draw_clip);
+      drawn++;
+    }
+  }
+  if (mask_split_debug_on()) {
+    fprintf(stderr, "native: mask surface role=%d drawn=%d\n", role, drawn);
+  }
+  return drawn;
+}
+
+/** What a group's image surface is a picture of: the keys of its image chunks, or 0 when one of
+ *  them has none, which asks for it to be drawn again. */
+static uint64_t mask_alpha_key(const MaskGroup *g, const CompWalk *walk) {
+  uint64_t h = 0x94d049bb133111ebull;
+  for (int i = g->first; i < g->first + g->count; i++) {
+    if (walk->chunks[i].mask_role != COMP_MASK_ALPHA) continue;
+    if (i >= g_win_count || g_win_chunks[i].pending || g_win_keys[i] == 0) return 0;
+    h = key_mix(h, g_win_keys[i]);
+  }
+  return h;
+}
+
+/** Prepares every group's surfaces: the image only when what it shows changed, the content every
+ *  frame. Answers how many groups draw. */
+static int mask_groups_render(CompBackend *b, const CompWalk *walk, double scale, int pw, int ph) {
+  g_mask_frame++;
+  int live = 0;
+  for (int k = 0; k < g_mask_group_count; k++) {
+    MaskGroup *g = &g_mask_groups[k];
+    g->surface = NULL;
+    // With no image nothing shows through the mask, whatever the content paints.
+    if (g->alpha_chunks <= 0) continue;
+    int x0 = g->box.x < 0 ? 0 : g->box.x;
+    int y0 = g->box.y < 0 ? 0 : g->box.y;
+    int x1 = g->box.x + g->box.w > pw ? pw : g->box.x + g->box.w;
+    int y1 = g->box.y + g->box.h > ph ? ph : g->box.y + g->box.h;
+    if (x1 <= x0 || y1 <= y0) continue;
+    g->box = (CompRect){x0, y0, x1 - x0, y1 - y0};
+    MaskSurface *s = mask_surface_for(b, g->id, g->box.w, g->box.h);
+    if (mask_split_debug_on()) {
+      fprintf(stderr, "native: mask group id=%d chunks=%d alpha=%d box=%d,%d %dx%d tex=%d,%d\n",
+              g->id, g->count, g->alpha_chunks, g->box.x, g->box.y, g->box.w, g->box.h,
+              s != NULL ? s->alpha_tex : -2, s != NULL ? s->content_tex : -2);
+    }
+    if (s == NULL || s->alpha_tex < 0 || s->content_tex < 0) continue;
+    g->surface = s;
+    uint64_t key = mask_alpha_key(g, walk);
+    if (key == 0 || key != s->alpha_key) {
+      mt_surface_begin(b, s->alpha_tex, g->box.w, g->box.h);
+      mask_surface_draw(b, g, walk, scale, COMP_MASK_ALPHA, s->alpha_tex);
+      mt_surface_end(b);
+      s->alpha_key = key;
+    }
+    mt_surface_begin(b, s->content_tex, g->box.w, g->box.h);
+    mask_surface_draw(b, g, walk, scale, COMP_MASK_CONTENT, s->content_tex);
+    mt_surface_end(b);
+    // The product lands in a surface of its own first: rounded to eight bits there, as the flat
+    // replay's image is, so the frame's blend sees the same values it always did.
+    mt_surface_begin(b, s->composed_tex, g->box.w, g->box.h);
+    mt_surface_draw_masked(b, s->content_tex, s->alpha_tex,
+                           (CompRect){0, 0, g->box.w, g->box.h}, NULL, 1.0f);
+    mt_surface_end(b);
+    live++;
+  }
+  return live;
+}
+
+/** Whether this frame's masks are split: the backend has the mask composite pass, and
+ *  NATIVE_MASK_SPLIT=0 doesn't hold it back for a comparison against the whole-mask path. */
+static int mask_split_wanted(CompBackend *b) {
+  const char *env = getenv("NATIVE_MASK_SPLIT");
+  if (env != NULL && env[0] == '0' && env[1] == 0) return 0;
+  return mt_mask_composite_available(b);
+}
+
 /** Composites the frame into `target` (-1 for the window's drawable), reusing the tiles the last
  *  frame left, and presents it. Every chunk is drawn from a picture of its own current commands:
  *  one the last frame had, or one rastered now. Answers 1 when the target was drawn. */
@@ -11399,7 +11660,23 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
   int pic = win_pic_ensure(b, pw, ph) ? (g_pic_cur == 0 ? 1 : 0) : -1;
   int into = pic >= 0 ? g_pic_tex[pic] : target;
   CompWalk *walk = (CompWalk *)malloc(sizeof(CompWalk));
+  // A mask is split into its image and its content only when this backend can composite them.
+  comp_walk_set_mask_split(mask_split_wanted(b));
   int chunked = walk != NULL && comp_walk_nested(&METAL_CHUNK_SOURCE, NULL, scale, walk);
+  if (chunked) mask_groups_collect(walk);
+  else g_mask_group_count = 0;
+  if (chunked && mask_split_debug_on()) {
+    fprintf(stderr, "native: composite walk chunks=%d groups=%d\n", walk->count,
+            g_mask_group_count);
+    for (int i = 0; i < walk->count; i++) {
+      if (walk->chunks[i].mask_role != COMP_MASK_NONE) {
+        fprintf(stderr, "native: chunk %d role=%d id=%d box=%d,%d %dx%d\n", i,
+                walk->chunks[i].mask_role, walk->chunks[i].mask_id, walk->chunks[i].mask_box.x,
+                walk->chunks[i].mask_box.y, walk->chunks[i].mask_box.w,
+                walk->chunks[i].mask_box.h);
+      }
+    }
+  }
   g_pic_chunked = chunked && pic >= 0;
   unsigned char *flat = NULL;
   double flat_ms = 0;
@@ -11412,9 +11689,9 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
       return 0;
     }
   }
-  b->vt->pass_begin(b, into, pw, ph, g_background);
   int kept = 0, full_chunks = 0, rastered = 0, external = 0;
   double raster_ms = 0;
+  int mask_groups = 0;
   if (chunked) {
     int n = walk->count;
     CompMatrix device = comp_matrix_scale((float)scale, (float)scale);
@@ -11549,9 +11826,31 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
     start_raster_jobs();
     int waiting = g_job_count > 0;
     raster_ms = 0;
+    int next_mask = 0;
+    if (g_mask_group_count > 0) {
+      // A split mask's surfaces are made before the frame's pass opens: a pass can't change target
+      // midway. The content's rasters are taken here, so the draws below never wait for them.
+      wait_raster_jobs();
+      install_raster_jobs();
+      waiting = 0;
+      mask_groups = mask_groups_render(b, walk, scale, pw, ph);
+      raster_ms = now_ms() - raster_started;
+    }
+    b->vt->pass_begin(b, into, pw, ph, g_background);
     for (int i = 0; i < n; i++) {
       const CompWalkChunk *c = &walk->chunks[i];
       WinChunk *e = &g_win_chunks[i];
+      if (next_mask < g_mask_group_count && i == g_mask_groups[next_mask].first) {
+        // A split mask is one quad: its content surface through its image's alpha.
+        MaskGroup *g = &g_mask_groups[next_mask++];
+        i = g->first + g->count - 1;
+        if (g->surface != NULL) {
+          CompMatrix M = comp_matrix_translate((float)g->box.x, (float)g->box.y);
+          b->vt->draw_quad(b, g->surface->composed_tex, (CompRect){0, 0, g->box.w, g->box.h}, &M,
+                           1.0f, NULL, 0.0f);
+        }
+        continue;
+      }
       if (waiting && e->pending) {
         wait_raster_jobs();
         install_raster_jobs();
@@ -11607,6 +11906,7 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
       waiting = 0;
     }
   } else {
+    b->vt->pass_begin(b, into, pw, ph, g_background);
     if (g_flat_tex < 0 || g_flat_w != pw || g_flat_h != ph) {
       if (g_flat_tex >= 0) b->vt->tex_destroy(b, g_flat_tex);
       g_flat_tex = b->vt->tex_create(b, pw, ph);
@@ -11648,6 +11948,9 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
             raster_ms, chunked ? 0 : 1, chunked ? 0 : comp_walk_failure(),
             chunked ? -1 : comp_walk_failure_at(), chunked ? -1 : comp_walk_failure_kind(),
             full_chunks, flat_ms, chunked ? 0.0 : g_flat_replay_ms, g_pool_threads);
+    if (mask_groups > 0) {
+      fprintf(stderr, "native: composite masks=%d groups=%d\n", mask_groups, g_mask_group_count);
+    }
   }
   free(walk);
   return 1;
