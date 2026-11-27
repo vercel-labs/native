@@ -440,6 +440,14 @@ export declare function hostCanvasSetFont(id: number, size: number, weight: numb
  * hue-rotate, invert, opacity.
  */
 export declare function hostCanvasSetFilter(id: number, def: string): void;
+/**
+ * Runs an inline SVG filter chain over a rect of the canvas bitmap, in device pixels: the filter
+ * region (x, y, w, h) the region's pixels are the source graphic, and the result replaces them.
+ * `def` is the definition runtime/svg-filters.ts compiles, with lengths already in device pixels;
+ * `linear` is 1 when color-interpolation-filters asks for linear RGB.
+ */
+export declare function hostCanvasSvgFilter(id: number, def: string, linear: number,
+  x: number, y: number, w: number, h: number): void;
 export declare function hostCanvasBeginPath(id: number): void;
 export declare function hostCanvasMoveTo(id: number, x: number, y: number): void;
 export declare function hostCanvasLineTo(id: number, x: number, y: number): void;

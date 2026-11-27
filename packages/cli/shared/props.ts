@@ -1811,6 +1811,8 @@ export const FK_INVERT = 6;
 export const FK_OPACITY = 7;
 export const FK_SATURATE = 8;
 export const FK_SEPIA = 9;
+/** A reference filter: `url(#id)`, naming a <filter> in the document (its paint URL index is in a). */
+export const FK_URL = 10;
 
 // mix-blend-mode keywords, in the order MIX_BLEND_NAMES lists them in runtime/cssom.ts. The
 // order is also the host's CGBlendMode order (see host/macos.m), so a value passes straight

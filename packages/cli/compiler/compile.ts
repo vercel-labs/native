@@ -399,8 +399,14 @@ function jsxElements(src: string): { tags: string[]; any: boolean; unknown: bool
 
 export function compileApp(htmlPath: string, diags: Diagnostics, options: CompileOptions = {}): CompiledApp {
   const appDir = dirname(htmlPath);
-  const resolveUrl = (href: string) =>
-    href.startsWith("/") && options.root ? join(options.root, href) : join(appDir, href.split(/[?#]/)[0]);
+  const resolveUrl = (href: string) => {
+    const path = href.split(/[?#]/)[0];
+    if (!path.startsWith("/") || !options.root) return join(appDir, path);
+    // The WPT server serves the checkout at "/" and again under "/external/wpt/", and a page may
+    // link a stylesheet or a script either way; the prefix names the same file.
+    const under = path.startsWith("/external/wpt/") ? path.slice("/external/wpt/".length) : path;
+    return join(options.root, under);
+  };
   const inlineScripts: string[] = [];
   /** Counts <script> elements as the document is scanned, for document.currentScript. */
   let scriptOrder = 0;
