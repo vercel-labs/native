@@ -20,6 +20,19 @@ log("supports " + CSS.supports("selector(:focus-visible)") + " " +
   CSS.supports("selector(.a, #b)") + " " + CSS.supports("selector(a > b)") + " " +
   CSS.supports("selector(:madeup-pseudo)") + " " + CSS.supports("not selector(:focus-visible)") + " " +
   CSS.supports("(selector(:has(a)))") + " " + CSS.supports("selector()"));
+// The answers Chrome 158 gives for these, checked with headless Chrome.
+const chrome: string[] = [
+  "selector(.a, .b)", "selector(.a, #b)", "selector(.a:is(.b, .c))", "selector(.a,)",
+  "selector(.a)", "selector(.a > .b)", "selector(.a::before)", "selector(*)",
+  "selector(:not(.a, .b))", "selector(.a, .b) or selector(.c)", "selector(.a) and selector(#b)",
+  "(--x: a and b)", "(font-family: Rock and Roll)", "((--x: a and b))", "(a: b and c)",
+  "(display: flex) and (color: red)", "(color: red",
+];
+log("chrome " + chrome.map((c) => String(CSS.supports(c))).join(" "));
+// A declaration's value is read whole once a colon at the top level names the property, so words
+// like "and" inside it are text; an unclosed parenthesis is closed at the end.
+log("declarations " + CSS.supports("(font-family: Rock and Roll)") + " " +
+  CSS.supports("(--x: a and b"));
 
 const style = document.createElement("style");
 document.head.append(style);
@@ -40,7 +53,9 @@ log("invalid " + threw + " " + sheet.cssRules.length);
 `;
 
 const EXPECTED_LOG = [
-  "supports true true true false false true false",
+  "supports true false true false false true false",
+  "chrome false false true false true true true true true true true true true true false true true",
+  "declarations true true",
   "inserted 1 :focus-visible",
   "after 2 div",
   "invalid true 2",

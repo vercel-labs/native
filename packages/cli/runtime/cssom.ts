@@ -3050,6 +3050,21 @@ function splitCondition(text: string, word: string): string[] {
   return out;
 }
 
+/** The index of the first colon outside parentheses and strings, or -1. */
+function colonOutsideParens(text: string): number {
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote !== "") { if (ch === quote) quote = ""; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    else if (ch === ":" && depth === 0) return i;
+  }
+  return -1;
+}
+
 /** Whether a condition text holds: a declaration in parentheses, with and/or/not around it. */
 function supportsCondition(text: string): boolean {
   const t = text.trim();
@@ -3065,18 +3080,27 @@ function supportsCondition(text: string): boolean {
     for (const p of all) if (!supportsCondition(p)) return false;
     return true;
   }
-  if (t.startsWith("(") && t.endsWith(")")) return supportsCondition(t.slice(1, t.length - 1).trim());
-  // `selector(<list>)` asks whether every selector in the list parses here: a page detects
-  // :focus-visible and friends with it. Its argument holds colons of its own, so this comes
-  // before the lone-declaration case below reads one as a property/value split.
+  // A declaration sits in parentheses, and a colon outside any inner parentheses makes the text
+  // one: the value after it is read as written, so a font family like "Rock and Roll" keeps its
+  // word "and" as text rather than a condition. Without such a colon the text is a condition.
+  if (t.startsWith("(")) {
+    const inner = (t.endsWith(")") ? t.slice(1, t.length - 1) : t.slice(1)).trim();
+    const at = colonOutsideParens(inner);
+    if (at > 0) return supportsDeclaration(inner.slice(0, at), inner.slice(at + 1));
+    return supportsCondition(inner);
+  }
+  // `selector(<complex-selector>)` asks whether a selector parses here: a page detects
+  // :focus-visible and friends with it. The argument holds colons of its own, so this comes
+  // before the lone-declaration case below reads one as a property/value split. A comma at the
+  // top level of the argument makes it a list, which this function does not take (Chrome
+  // answers false for "selector(.a, #b)"), while a comma inside a functional pseudo-class
+  // such as :is() or :not() is part of that one selector.
   const selFn = /^selector\s*\(/i.exec(t);
   if (selFn !== null && t.endsWith(")")) {
     const inner = t.slice(selFn[0].length, -1).trim();
     if (inner === "") return false;
-    for (const part of splitTopLevel(inner, ",")) {
-      if (part.trim() === "" || parseSelector(part.trim()) === null) return false;
-    }
-    return true;
+    if (splitTopLevel(inner, ",").length > 1) return false;
+    return parseSelector(inner) !== null;
   }
   // A lone declaration needs no parentheses: CSS.supports("display: flex") asks the same
   // question as the two-argument form, as browsers answer it.
