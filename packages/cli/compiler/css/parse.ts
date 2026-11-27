@@ -606,7 +606,8 @@ const MEDIA_FEATURES = new Set([
   "hover", "any-hover", "pointer", "any-pointer",
   "prefers-color-scheme", "prefers-contrast", "prefers-reduced-transparency", "prefers-reduced-motion",
   "prefers-reduced-data", "forced-colors", "color-gamut", "dynamic-range", "video-dynamic-range",
-  "scripting", "update", "display-mode", "scan", "overflow-block", "overflow-inline",
+  "scripting", "update", "display-mode", "display-state", "resizable", "inverted-colors",
+  "navigation-controls", "scan", "overflow-block", "overflow-inline",
 ]);
 
 /** Is `name` a feature this build evaluates, with or without a min-/max- prefix? */

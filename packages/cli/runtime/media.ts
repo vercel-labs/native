@@ -97,6 +97,10 @@ function keywordFeature(name: string): string | null {
     case "scripting": return "enabled";
     case "update": return "fast";
     case "display-mode": return "browser";
+    case "display-state": return "normal";
+    case "resizable": return "true";
+    case "inverted-colors": return "none";
+    case "navigation-controls": return "none";
     case "scan": return "progressive";
     case "overflow-block": case "overflow-inline": return "scroll";
     default: return null;
@@ -177,7 +181,12 @@ const KEYWORD_VALUES: Record<string, string[]> = {
   "video-dynamic-range": ["standard", "high"],
   scripting: ["none", "initial-only", "enabled"],
   update: ["none", "slow", "fast"],
-  "display-mode": ["browser", "fullscreen", "minimal-ui", "standalone", "picture-in-picture", "window-controls-overlay"],
+  "display-mode": ["browser", "fullscreen", "minimal-ui", "standalone", "picture-in-picture",
+    "window-controls-overlay", "unframed"],
+  "display-state": ["normal", "minimized", "maximized", "fullscreen"],
+  resizable: ["true", "false"],
+  "inverted-colors": ["none", "inverted"],
+  "navigation-controls": ["none", "back-button"],
   scan: ["interlace", "progressive"],
   "overflow-block": ["none", "scroll", "paged"],
   "overflow-inline": ["none", "scroll"],
@@ -315,7 +324,9 @@ function evalCondition(text: string): number {
     }
     return invalid ? INVALID : 1;
   }
-  if (t[0] !== "(" || t[t.length - 1] !== ")") return 0;
+  // A media condition is a parenthesised condition (or a run of them joined by and/or), so bare
+  // text after a type is invalid: "not all and overflow-inline" names no condition at all.
+  if (t[0] !== "(" || t[t.length - 1] !== ")") return INVALID;
   const inner = t.slice(1, t.length - 1).trim();
   // A parenthesised group of conditions, as in `((width > 10px) or (height > 10px))`.
   if (inner.startsWith("(")) return evalCondition(inner);
