@@ -3,7 +3,7 @@
 // (shared/css/), so a script-set declaration and a style attribute compile alike.
 
 import { document, Element, Node, ShadowRoot } from "./dom.ts";
-import { parseSelector, splitTopLevel } from "../shared/css/selectors.ts";
+import { parseSelector, setStrictListArguments, splitTopLevel } from "../shared/css/selectors.ts";
 import { highlights } from "./highlights.ts";
 import * as P from "../shared/props.ts";
 import { WC_LIST_AUTO, WC_LIST_CONTENTS, WC_LIST_SCROLL_POSITION, willChangeRows } from "../shared/css/willchange.ts";
@@ -3111,7 +3111,14 @@ function supportsCondition(text: string): boolean {
     const inner = t.slice(selFn[0].length, -1).trim();
     if (inner === "") return false;
     if (splitTopLevel(inner, ",").length > 1) return false;
-    return parseSelector(inner) !== null;
+    // One selector, parsed without the forgiving item-dropping a style sheet does inside
+    // :is()/:where(): Chrome answers false for "selector(:is(:madeup-pseudo))".
+    setStrictListArguments(true);
+    try {
+      return parseSelector(inner) !== null;
+    } finally {
+      setStrictListArguments(false);
+    }
   }
   // A lone declaration needs no parentheses: CSS.supports("display: flex") asks the same
   // question as the two-argument form, as browsers answer it.

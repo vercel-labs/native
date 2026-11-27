@@ -4,7 +4,7 @@
 // lacks them, while `@supports (color: color-mix(in lab, red, red))` holds because it parses.
 
 import { parseDeclarationBlock } from "../../shared/css/declarations.ts";
-import { parseSelector, splitTopLevel } from "../../shared/css/selectors.ts";
+import { parseSelector, setStrictListArguments, splitTopLevel } from "../../shared/css/selectors.ts";
 
 /** Splits on a top-level keyword (`and`, `or`): outside parentheses and between spaces. */
 function splitKeyword(s: string, word: string): string[] {
@@ -103,15 +103,24 @@ export function supportsHolds(cond: string): boolean | null {
     if (close < 0 || s.slice(close + 1).trim() !== "") return null;
     const inner = s.slice(open + 1, close).trim();
     if (inner === "") return false;
-    // Every selector of the list has to be one the build can match.
-    for (const part of splitTopLevel(inner, ",")) {
-      const text = part.trim();
-      if (text === "") return false;
-      if (text.indexOf("&") >= 0) {
-        if (parseSelector(text.split("&").join(":root")) === null) return false;
-      } else if (parseSelector(text) === null) return false;
+    // The argument is one complex selector, not a list: Chrome answers false for
+    // "selector(.a, #b)" here as it does for CSS.supports().
+    if (splitTopLevel(inner, ",").length > 1) return false;
+    // One selector, parsed without the forgiving item-dropping a style sheet does inside
+    // :is()/:where(): Chrome answers false for "selector(:is(:madeup-pseudo))".
+    setStrictListArguments(true);
+    try {
+      for (const part of splitTopLevel(inner, ",")) {
+        const text = part.trim();
+        if (text === "") return false;
+        if (text.indexOf("&") >= 0) {
+          if (parseSelector(text.split("&").join(":root")) === null) return false;
+        } else if (parseSelector(text) === null) return false;
+      }
+      return true;
+    } finally {
+      setStrictListArguments(false);
     }
-    return true;
   }
   // A declaration is always parenthesised; only a nested condition may be written bare.
   if (!(s.startsWith("(") && s.endsWith(")"))) return null;

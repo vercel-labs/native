@@ -314,7 +314,7 @@ const scanMemo = new Map<string, Scan | null>();
 function scanCompound(text: string, inNot: boolean, allowPseudo: boolean = false, dom: boolean = false, shadow: boolean = false): Scan | null {
   // The flags stay in fixed-width fields of their own: a text that begins with the letters they
   // would have used can never be read as flags, nor flags as part of the text.
-  const key = `${inNot ? 1 : 0}${allowPseudo ? 1 : 0}${dom ? 1 : 0}${shadow ? 1 : 0}:${text}`;
+  const key = `${inNot ? 1 : 0}${allowPseudo ? 1 : 0}${dom ? 1 : 0}${shadow ? 1 : 0}${strictListArguments ? 1 : 0}:${text}`;
   const hit = scanMemo.get(key);
   if (hit !== undefined) return hit;
   if (scanMemo.size > 4096) scanMemo.clear();
@@ -470,6 +470,13 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
           const body = lead === null ? "" : lead[2].trim();
           const frag = body === "" ? null : scanFrag(body, dom, shadow);
           if (frag === null) return null;
+          if (strictListArguments) {
+            // The same one-selector reading as a :is() argument: an argument that does not parse
+            // on its own, or ends in a pseudo-element, makes the whole selector invalid.
+            const listed = body === "" ? null : parseSelector(body, dom);
+            if (listed === null) return null;
+            for (const sel of listed) if (sel.pseudo !== P.PE_NONE) return null;
+          }
           // `:has(> :is(.a > .b))`: the leading combinator relates the compound's own subject to
           // the anchor, while the :is() argument's chain sits above that subject. The marker tells
           // the runtime matcher to test the relation on the subject rather than on the leftmost
@@ -536,9 +543,21 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
           const frags: Frag[] = [];
           let dropped = 0;
           for (const a of args) {
-            if (a === "") continue;
+            if (a === "") {
+              if (strictListArguments) return null;
+              continue;
+            }
             const f = scanFrag(a, dom, shadow);
+            if (strictListArguments) {
+              // One selector, not a forgiving list: an item that does not parse on its own, or
+              // one that ends in a pseudo-element, makes the whole argument invalid. An item
+              // that is valid but names nothing here (:visited) leaves it valid.
+              const listed = parseSelector(a, dom);
+              if (listed === null) return null;
+              for (const sel of listed) if (sel.pseudo !== P.PE_NONE) return null;
+            }
             if (f === null || !fragBuilds(f, dom)) {
+              if (strictListArguments) continue;
               // A malformed item is dropped by every browser and weighs nothing; one that is
               // valid but can match nothing here (:visited) adds no alternative, yet :is() still
               // weighs the most specific thing it lists.
@@ -1182,6 +1201,17 @@ function splitComplex(text: string): { compounds: string[]; combs: number[] } | 
 let parseSawInvalid = false;
 let parseDepth = 0;
 
+/**
+ * Set while a `selector()` argument is parsed for CSS.supports() or an @supports condition. That
+ * function reads one complex selector with a parser that forgives nothing: Chrome answers false
+ * for "selector(:is(:madeup-pseudo))", where a style sheet drops the one item and keeps the rule.
+ */
+let strictListArguments = false;
+
+export function setStrictListArguments(on: boolean): void {
+  strictListArguments = on;
+}
+
 /** Whether the last parseSelector() call failed because its selector is invalid. */
 export function selectorWasInvalid(): boolean {
   return parseSawInvalid;
@@ -1201,7 +1231,7 @@ export function parseSelector(text: string, dom: boolean = false, shadow: boolea
     parseSawInvalid = false;
     parseMemo.clear();
   } else {
-    const hit = parseMemo.get((shadow ? "s" : "") + (dom ? "d" : "") + text);
+    const hit = parseMemo.get((shadow ? "s" : "") + (dom ? "d" : "") + (strictListArguments ? "x" : "") + text);
     if (hit !== undefined) {
       if (hit.invalid) parseSawInvalid = true;
       if (specOut !== undefined) specOut.spec = hit.spec;
@@ -1218,7 +1248,7 @@ export function parseSelector(text: string, dom: boolean = false, shadow: boolea
   const out = parseSelectorInner(text, dom, shadow, spec);
   parseDepth--;
   if (!outer) {
-    parseMemo.set((shadow ? "s" : "") + (dom ? "d" : "") + text,
+    parseMemo.set((shadow ? "s" : "") + (dom ? "d" : "") + (strictListArguments ? "x" : "") + text,
       { list: out, invalid: parseSawInvalid, spec: spec.spec });
   }
   return out;

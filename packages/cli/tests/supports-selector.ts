@@ -9,8 +9,17 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const PAGE = `<!doctype html>
-<html><head><title>supports-selector</title></head><body>
-<div id="a"></div>
+<html><head><title>supports-selector</title><style>
+/* The build reads @supports selector() the same way: one selector, parsed without the
+   forgiving item-dropping a style sheet does inside :is(). */
+#s1 { background-color: rgb(0, 0, 0); }
+@supports selector(:is(:madeup-pseudo)) { #s1 { background-color: rgb(255, 0, 0); } }
+#s2 { background-color: rgb(0, 0, 0); }
+@supports selector(:is(:focus-visible)) { #s2 { background-color: rgb(0, 128, 0); } }
+#s3 { background-color: rgb(0, 0, 0); }
+@supports selector(.a, #b) { #s3 { background-color: rgb(255, 0, 0); } }
+</style></head><body>
+<div id="a"></div><div id="s1"></div><div id="s2"></div><div id="s3"></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -27,8 +36,16 @@ const chrome: string[] = [
   "selector(:not(.a, .b))", "selector(.a, .b) or selector(.c)", "selector(.a) and selector(#b)",
   "(--x: a and b)", "(font-family: Rock and Roll)", "((--x: a and b))", "(a: b and c)",
   "(display: flex) and (color: red)", "(color: red",
+  // selector() reads one selector without the forgiving item-dropping a sheet does.
+  "selector(:is(:madeup-pseudo))", "selector(:is(.a, :madeup-pseudo))",
+  "selector(:where(:madeup-pseudo))", "selector(:not(:madeup-pseudo))",
+  "selector(:has(:madeup-pseudo))", "selector(:is(:visited))", "selector(:is(::before))",
+  "selector(:is())", "selector(:is(.a,))", "selector(:is(:focus-visible))",
+  "selector(:is(:is(.a)))",
 ];
 log("chrome " + chrome.map((c) => String(CSS.supports(c))).join(" "));
+const bg = (id: string): string => getComputedStyle(document.getElementById(id) as HTMLElement).backgroundColor;
+log("at-rule " + bg("s1") + " " + bg("s2") + " " + bg("s3"));
 // A declaration's value is read whole once a colon at the top level names the property, so words
 // like "and" inside it are text; an unclosed parenthesis is closed at the end.
 log("declarations " + CSS.supports("(font-family: Rock and Roll)") + " " +
@@ -54,7 +71,11 @@ log("invalid " + threw + " " + sheet.cssRules.length);
 
 const EXPECTED_LOG = [
   "supports true false true false false true false",
-  "chrome false false true false true true true true true true true true true true false true true",
+  "chrome false false true false true true true true true true true true true true false true true" +
+    " false false false false false true false false false true true",
+  // The same reading at build time: the made-up item and the list do not hold, the known
+  // pseudo-class does.
+  "at-rule rgb(0, 0, 0) rgb(0, 128, 0) rgb(0, 0, 0)",
   "declarations true true",
   "inserted 1 :focus-visible",
   "after 2 div",
