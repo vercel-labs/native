@@ -63,7 +63,7 @@ import { evalExpr } from "../shared/css/length-exprs.ts";
 import { compileValue } from "../shared/css/declarations.ts";
 import type { Decl } from "../shared/css/types.ts";
 import { drawGradient, paintUrlAt, resolveGradient } from "./svg-paint.ts";
-import { compileSvgFilter } from "./svg-filters.ts";
+import { compileSvgFilter, shiftFilterDef } from "./svg-filters.ts";
 import { elementFilter } from "./filters.ts";
 import { containerBasis, declaresProperty, fontKey } from "./style.ts";
 import { viewport } from "./viewport.ts";
@@ -1196,6 +1196,9 @@ let svgPixelW = 0, svgPixelH = 0;
  *  whose own origin is that region's corner, not to the root viewport in this local space. */
 let targetWs: number[] = [];
 let targetHs: number[] = [];
+/** The bound each nesting level's filter region was clamped to, in that level's local pixels. */
+let layerClampW: number[] = [];
+let layerClampH: number[] = [];
 /** The furthest edge each nesting level's filter region reached, in that level's local space. */
 let layerEdgesW: number[] = [];
 let layerEdgesH: number[] = [];
@@ -1271,12 +1274,13 @@ function acquireLayer(w: number, h: number): number {
 }
 
 function releaseLayer(): void {
-  if (layerDepth > 0) {
-    layerDepth--;
-    targetWs.pop();
-    targetHs.pop();
-    layerActiveBytes -= layerBytes[layerDepth] ?? 0;
-  }
+  if (layerDepth <= 0) return;
+  layerDepth--;
+  const at = layerDepth;
+  targetWs.pop();
+  targetHs.pop();
+  const held = layerBytes[at];
+  layerActiveBytes -= held === undefined ? 0 : held;
 }
 
 /**
@@ -1312,7 +1316,7 @@ svgDetach.fn = (removed) => releaseSvgOnDetach(removed as unknown as Node);
  * wrote, with the opacity the element's group carries.
  */
 function compositeLayer(id: number, layer: number, x: number, y: number, w: number, h: number,
-  alpha: number, clips: Clip[] = []): void {
+  alpha: number, clips: Clip[] = [], sx: number = 0, sy: number = 0): void {
   if (!(w > 0) || !(h > 0) || !(alpha > 0)) return;
   hostCanvasSave(id);
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
@@ -1322,8 +1326,9 @@ function compositeLayer(id: number, layer: number, x: number, y: number, w: numb
   for (const clip of clips) clipTo(id, clip);
   hostCanvasSetAlpha(id, alpha);
   hostCanvasSetComposite(id, 0);
-  // A 1:1 blit of the layer's own pixels, whose top-left is its region's corner.
-  hostCanvasDrawCanvas(id, layer, x, y, w, h, 0, 0, w, h, 0);
+  // A 1:1 blit of the layer's own pixels from (sx, sy): the region inside the capture rect, or
+  // the whole layer when the capture is the region.
+  hostCanvasDrawCanvas(id, layer, x, y, w, h, sx, sy, w, h, 0);
   hostCanvasRestore(id);
   // The host keeps global alpha and the blend mode beside its saved state, not in it: a Windows
   // or Linux canvas comes back with the composite's alpha still set. The painter always draws at
@@ -1361,9 +1366,11 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
     targetW(), targetH(), (ref) => (ids === null ? undefined : ids.get(ref)));
   if (row === null) return;
   const at = layerDepth;
+  layerClampW[at] = targetW();
+  layerClampH[at] = targetH();
   if (row.x + row.w > (layerEdgesW[at] ?? 0)) layerEdgesW[at] = row.x + row.w;
   if (row.y + row.h > (layerEdgesH[at] ?? 0)) layerEdgesH[at] = row.y + row.h;
-  const layer = acquireLayer(row.w, row.h);
+  const layer = acquireLayer(row.sw, row.sh);
   if (layer < 0) {
     // Over the nesting or memory bound: paint the element unfiltered, as Chrome does when it
     // cannot allocate the filter's result.
@@ -1371,11 +1378,15 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
     return;
   }
   // The filter reads the element unclipped, so the clip applies to its result (see below). The
-  // layer's origin is the region's corner, so the element is drawn shifted into it.
-  const off = mul([1, 0, 0, 1, -row.x, -row.y], m2);
+  // layer is the source's capture rect, which holds the region and what the primitives can pull
+  // into it, so the element is drawn shifted to that rect's corner.
+  const off = mul([1, 0, 0, 1, -row.sx, -row.sy], m2);
   drawElement(node, name, layer, off, vw, vh, 1, inh, depth, []);
-  hostCanvasSvgFilter(layer, row.def, row.linear ? 1 : 0, 0, 0, row.w, row.h);
-  compositeLayer(id, layer, row.x, row.y, row.w, row.h, a, inner);
+  const dx = row.x - row.sx, dy = row.y - row.sy;
+  hostCanvasSvgFilter(layer, shiftFilterDef(row.def, dx, dy), row.linear ? 1 : 0,
+    0, 0, row.sw, row.sh);
+  // Only the region shows: the capture around it is what the primitives read.
+  compositeLayer(id, layer, row.x, row.y, row.w, row.h, a, inner, dx, dy);
   releaseLayer();
 }
 
@@ -1566,6 +1577,8 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   layerMaxDepth = 0;
   layerEdgesW = [];
   layerEdgesH = [];
+  layerClampW = [];
+  layerClampH = [];
   targetWs = [];
   targetHs = [];
   // The clear is in canvas space, so the identity transform restores it after the last pass's
@@ -1588,6 +1601,6 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   hostCanvasDraw(id, x, y, w, h, alpha, 1);
   if (process.env.NATIVE_SVG_FILTER_STATS !== undefined && process.env.NATIVE_SVG_FILTER_STATS !== "0") {
     const which = el.getAttribute("id") ?? "";
-    console.log(`native: svg filter layers svg=${which} peak=${layerPeakBytes} depth=${layerMaxDepth} pool=${layerPoolBytes} nested=${layerEdgesW[1] ?? 0}x${layerEdgesH[1] ?? 0}`);
+    console.log(`native: svg filter layers svg=${which} peak=${layerPeakBytes} depth=${layerMaxDepth} pool=${layerPoolBytes} nested=${layerEdgesW[1] ?? 0}x${layerEdgesH[1] ?? 0} clamp=${layerClampW[1] ?? 0}x${layerClampH[1] ?? 0}`);
   }
 }

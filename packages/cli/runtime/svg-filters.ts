@@ -27,13 +27,20 @@ import * as P from "../shared/props.ts";
 import { parseColor } from "../shared/css/colors.ts";
 import type { Element } from "./dom.ts";
 
-/** A compiled filter: the host definition and the device-pixel rect it paints. */
+/** A compiled filter: the host definition, the device-pixel region it paints, and the rect the
+ *  source is captured over (the region plus whatever the primitives can pull in from outside). */
 export interface FilterRow {
   def: string;
   x: number;
   y: number;
   w: number;
   h: number;
+  /** The source capture rect, in the same device pixels: it holds the region and the element's
+   *  own box, grown by the room the primitives need to move or blur source into the region. */
+  sx: number;
+  sy: number;
+  sw: number;
+  sh: number;
   /** Whether the chain interpolates in linear RGB (Chrome's default for SVG filters). */
   linear: boolean;
 }
@@ -339,6 +346,17 @@ export function compileSvgFilter(target: Element, el: Element, bbox: number[], m
     return [ref(nameAttr, prev), ref(in2Attr, prev)];
   };
 
+  // How much wider than the region the source has to be captured: a primitive reads its input a
+  // little away from where it writes its output, so a chain that offsets or blurs can bring
+  // content into the region from outside it. Each side grows by every primitive's reach along it.
+  let mL = 0, mT = 0, mR = 0, mB = 0;
+  const grow = (l: number, t: number, r: number, b: number): void => {
+    if (Number.isFinite(l) && l > 0) mL += l;
+    if (Number.isFinite(t) && t > 0) mT += t;
+    if (Number.isFinite(r) && r > 0) mR += r;
+    if (Number.isFinite(b) && b > 0) mB += b;
+  };
+
   for (let i = 0; i < prims.length; i++) {
     const prim = prims[i];
     const name = prim.localName.toLowerCase().replace(/^.*:/, "");
@@ -350,13 +368,18 @@ export function compileSvgFilter(target: Element, el: Element, bbox: number[], m
       const parts = words(raw ?? "0").map(Number);
       const stdX = Number.isFinite(parts[0]) ? parts[0] : 0;
       const stdY = parts.length > 1 && Number.isFinite(parts[1]) ? parts[1] : stdX;
-      ops.push(`b,${f(length(Math.abs(stdX), primUnits, "x", bbox) * scaleX)},` +
-        `${f(length(Math.abs(stdY), primUnits, "y", bbox) * scaleY)},${in1},${sub}`);
+      const bl = length(Math.abs(stdX), primUnits, "x", bbox) * scaleX;
+      const bt = length(Math.abs(stdY), primUnits, "y", bbox) * scaleY;
+      ops.push(`b,${f(bl)},${f(bt)},${in1},${sub}`);
+      // A Gaussian reaches about three standard deviations.
+      grow(3 * bl, 3 * bt, 3 * bl, 3 * bt);
     } else if (name === "feoffset") {
       const dx = lengthOf(attr(prim, "dx")) ?? { v: 0, pct: false };
       const dy = lengthOf(attr(prim, "dy")) ?? { v: 0, pct: false };
       const [ox, oy] = deviceVector(dx, dy, primUnits, bbox, m, vw, vh);
       ops.push(`o,${f(ox)},${f(oy)},${in1},${sub}`);
+      // The output at a point reads its input from the opposite side of the shift.
+      grow(Math.max(0, ox), Math.max(0, oy), Math.max(0, -ox), Math.max(0, -oy));
     } else if (name === "fecolormatrix") {
       const matrix = colourMatrix(prim).map((v) => f(v));
       ops.push(`m,${in1},${matrix.join(",")},${sub}`);
@@ -398,10 +421,13 @@ export function compileSvgFilter(target: Element, el: Element, bbox: number[], m
       const mixed = withOpacity(floodColor(prim, el), floodOpacity(prim));
       const [ox, oy] = deviceVector(dx ?? { v: 0, pct: false }, dy ?? { v: 0, pct: false },
         primUnits, bbox, m, vw, vh);
-      ops.push(`d,${f(ox)},${f(oy)},` +
-        `${f(length(stdX, primUnits, "x", bbox) * scaleX)},` +
-        `${f(length(stdY, primUnits, "y", bbox) * scaleY)},` +
+      const bl = length(stdX, primUnits, "x", bbox) * scaleX;
+      const bt = length(stdY, primUnits, "y", bbox) * scaleY;
+      ops.push(`d,${f(ox)},${f(oy)},${f(bl)},${f(bt)},` +
         `${colourParts(mixed, linear)},${in1},${sub}`);
+      // The shadow is the source blurred and shifted, so it reaches the shift plus three sigma.
+      grow(3 * bl + Math.max(0, ox), 3 * bt + Math.max(0, oy),
+        3 * bl + Math.max(0, -ox), 3 * bt + Math.max(0, -oy));
     } else {
       // A primitive this build doesn't draw yet: its input passes through unchanged.
       ops.push(`t,${in1},${sub}`);
@@ -411,7 +437,35 @@ export function compileSvgFilter(target: Element, el: Element, bbox: number[], m
   // A filter with no primitives leaves the element as it is; still route it through the layer so
   // the region rules apply, with a single pass-through primitive.
   if (ops.length === 0) ops.push(`t,${SOURCE},0,0,${regionW},${regionH}`);
-  return { def: ops.join(";"), x: x0, y: y0, w: regionW, h: regionH, linear };
+  // The surface the source is captured on holds the element's own box as well as the region, so
+  // a primitive can move content in from outside the region; each side also grows by what the
+  // chain reaches for. The definition stays region-relative: shiftFilterDef moves it into the
+  // capture surface, and the result is clipped to the region when it is composited.
+  const box = deviceRect(bbox, m);
+  const sx0 = Math.floor(Math.min(x0, box[0]) - mL);
+  const sy0 = Math.floor(Math.min(y0, box[1]) - mT);
+  const sx1 = Math.ceil(Math.max(x1, box[0] + box[2]) + mR);
+  const sy1 = Math.ceil(Math.max(y1, box[1] + box[3]) + mB);
+  const sw = sx1 - sx0, sh = sy1 - sy0;
+  if (!Number.isFinite(sw) || !Number.isFinite(sh) || !(sw > 0) || !(sh > 0)) {
+    return { def: ops.join(";"), x: x0, y: y0, w: regionW, h: regionH,
+      sx: x0, sy: y0, sw: regionW, sh: regionH, linear };
+  }
+  return { def: ops.join(";"), x: x0, y: y0, w: regionW, h: regionH, sx: sx0, sy: sy0, sw, sh, linear };
+}
+
+/** Moves a definition's subregions from the filter region's corner to the capture rect's: a
+ *  primitive's subregion is measured from the region, and the host filters the whole capture. */
+export function shiftFilterDef(def: string, dx: number, dy: number): string {
+  if (!(dx !== 0 || dy !== 0)) return def;
+  return def.split(";").map((op) => {
+    const flds = op.split(",");
+    const n = flds.length;
+    if (n < 4) return op;
+    flds[n - 4] = String(Number(flds[n - 4]) + dx);
+    flds[n - 3] = String(Number(flds[n - 3]) + dy);
+    return flds.join(",");
+  }).join(";");
 }
 
 /** The device-pixel bounding box of a user-space rect under `m`. */
