@@ -866,6 +866,22 @@ static void apply_face_variations(FT_Face ft, double size, double weight, Featur
   FT_Done_MM_Var(ft->glyph->library, mm);
 }
 
+/** How many faces one run may use (its own and the fallbacks it lands in) before the list stops
+ *  being tracked: every face painted must get the run's axes, and a run rarely uses more. */
+#define MAX_RUN_FACES 8
+
+/**
+ * Gives a face the run's variation axes unless it already has them this run. Painting walks the
+ * primary and every fallback face a glyph came from; each one has its own FreeType coordinates,
+ * so updating only the primary leaves fallback glyphs at whichever weight last touched them.
+ */
+static void ensure_face_variations(FT_Face *faces, int *count, FT_Face ft, double size,
+                                   double weight, FeatureRun *run) {
+  for (int i = 0; i < *count; i++) if (faces[i] == ft) return;
+  apply_face_variations(ft, size, weight, run);
+  if (*count < MAX_RUN_FACES) faces[(*count)++] = ft;
+}
+
 typedef void (*shape_cb)(void *ctx, Face *face, FT_Face ft, unsigned glyph,
                          double x, double baseline_offset, double advance);
 
@@ -1110,9 +1126,12 @@ typedef void (*metrics_cb)(const uint8_t *, size_t);
 typedef struct {
   FT_Face primary;
   double size;
+  double weight;
   double shear;
   double x_min, x_max, above, below;
   int ink;
+  FT_Face faces[MAX_RUN_FACES];
+  int face_count;
 } InkBox;
 
 static void ink_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, double x,
@@ -1120,6 +1139,8 @@ static void ink_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, double
   (void)face;
   (void)advance;
   InkBox *ink = data;
+  ensure_face_variations(ink->faces, &ink->face_count, ft, ink->size, ink->weight,
+    run_for_weight(ink->weight));
   FT_BBox box;
   if (FT_Load_Glyph(ft, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP) != 0) return;
   if (ft->glyph->format != FT_GLYPH_FORMAT_OUTLINE || ft->glyph->outline.n_contours == 0) return;
@@ -1156,10 +1177,11 @@ void host_text_metrics(const uint8_t *s, size_t n, double size, double weight, d
     InkBox ink;
     ink.primary = ft;
     ink.size = size;
+    ink.weight = weight;
     ink.shear = italic && !face_is_italic(ft, weight) ? 0.25 : 0;
     ink.x_min = ink.x_max = ink.above = ink.below = 0;
     ink.ink = 0;
-    apply_face_variations(ft, size, weight, run_for_weight(weight));
+    ink.face_count = 0;
     shape_text(s, n, size, weight, letter, word, 0, ink_glyph, &ink);
     if (ink.ink) {
       m[1] = -ink.x_min;
@@ -2351,12 +2373,17 @@ typedef struct {
   Mark *marks;
   int count;
   int cap;
+  /** The faces this run has configured, primary first. */
+  FT_Face faces[MAX_RUN_FACES];
+  int face_count;
 } PaintRun;
 
 static void paint_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, double x,
                         double y_offset, double advance) {
   (void)face;
   PaintRun *p = data;
+  ensure_face_variations(p->faces, &p->face_count, ft, p->size, p->weight,
+    run_for_weight(p->weight));
   glyph_path(p->cr, ft, glyph, p->size, p->weight, x, p->baseline,
     ft == p->primary ? p->shear : 0, y_offset);
   if (p->emphasis > 0 && advance > 0 && p->marks && p->count < p->cap) {
@@ -2380,9 +2407,8 @@ static int paint_run(cairo_t *cr, const uint8_t *s, size_t n, double size, doubl
                      int cap) {
   FT_Face ft = paint_face(weight);
   if (!ft) return 0;
-  // The face draws the same instance shaping measured, with the run's axes and the weight the
-  // font key names (see apply_face_variations).
-  apply_face_variations(ft, size, weight, run_for_weight(weight));
+  // Each face a glyph comes from (the primary and any fallback) is given the run's axes by
+  // paint_glyph before its outline is loaded, so the run draws the instance shaping measured.
   // A run that asks for an italic the face doesn't have is slanted by the host, as a browser
   // slants it.
   int family = 0;
@@ -2401,6 +2427,7 @@ static int paint_run(cairo_t *cr, const uint8_t *s, size_t n, double size, doubl
   p.marks = marks;
   p.count = 0;
   p.cap = cap;
+  p.face_count = 0;
   shape_text(s, n, size, weight, letter, word, x, paint_glyph, &p);
   return p.count;
 }
