@@ -50,7 +50,7 @@ function render(composited: boolean): { at: (x: number, y: number) => number[] }
   // A stale file from the previous pass must not stand in for this pass's snapshot.
   rmSync(flat, { force: true });
   rmSync(merged, { force: true });
-  const env: Record<string, string> = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.NATIVE_SNAPSHOT;
   delete env.NATIVE_SNAPSHOT_COMPOSITED;
   if (composited) env.NATIVE_SNAPSHOT_COMPOSITED = merged;
