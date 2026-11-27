@@ -22,6 +22,7 @@ typedef struct {
   float view[2];   // device width, height
   float flags[2];  // MT_SAMPLE_* bits, then unused
   float tint[4];   // colour multiplied into the sample, white for a plain quad
+  float blur[4];   // the blur pass: 1 along y (0 along x), the tap count, the sigma in texels
 } MTUniforms;
 
 // How a quad samples its texture: by default the nearest texel, which is the texel itself when
@@ -50,6 +51,7 @@ typedef struct {
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> blurPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> maskPipeline;
 @property(nonatomic, strong) id<MTLTexture> white;
 // Untyped: a destroyed texture's slot holds NSNull, which a generic array would reject.
@@ -365,6 +367,65 @@ void mt_surface_end(CompBackend *backend) {
     m.lastCommandBuffer = m.surfaceBuffer;
     m.surfaceBuffer = nil;
   }
+}
+
+/**
+ * Blurs `src` into `dst` with a separable Gaussian: the horizontal pass writes `tmp`, the vertical
+ * one `dst`. `sigma` is in texels; `taps` is how far each side of a texel the kernel reaches.
+ * Answers 0 when the blur pipeline or one of the textures is missing.
+ */
+int mt_tex_blur(CompBackend *backend, id<MTLTexture> src, id<MTLTexture> tmp, id<MTLTexture> dst,
+                double sigma, int taps) {
+  if (backend == NULL) return 0;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil || m.blurPipeline == nil || src == nil || tmp == nil || dst == nil) return 0;
+  id<MTLCommandBuffer> cb = [m.queue commandBuffer];
+  if (cb == nil) return 0;
+  for (int pass = 0; pass < 2; pass++) {
+    id<MTLTexture> from = pass == 0 ? src : tmp;
+    id<MTLTexture> to = pass == 0 ? tmp : dst;
+    MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    rp.colorAttachments[0].texture = to;
+    rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+    rp.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+    id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+    if (enc == nil) return 0;
+    MTUniforms u;
+    memset(&u, 0, sizeof(u));
+    u.m[0] = 1.0f;
+    u.m[5] = 1.0f;
+    u.m[10] = 1.0f;
+    u.m[15] = 1.0f;
+    u.params[0] = 1.0f;
+    u.params[1] = (float)from.width;
+    u.params[2] = (float)from.height;
+    u.view[0] = (float)to.width;
+    u.view[1] = (float)to.height;
+    u.tint[0] = u.tint[1] = u.tint[2] = u.tint[3] = 1.0f;
+    u.blur[0] = pass == 0 ? 0.0f : 1.0f;
+    u.blur[1] = (float)taps;
+    u.blur[2] = (float)sigma;
+    [enc setRenderPipelineState:m.blurPipeline];
+    [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+    [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+    [enc setFragmentTexture:from atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+    [enc endEncoding];
+  }
+  [cb commit];
+  return 1;
+}
+
+int mt_tex_blur_slots(CompBackend *backend, int src, int tmp, int dst, double sigma, int taps) {
+  if (backend == NULL) return 0;
+  MtBackend *m = (__bridge MtBackend *)backend->impl;
+  if (m == nil) return 0;
+  id<MTLTexture> a = mt_texture(m, src);
+  id<MTLTexture> b = mt_texture(m, tmp);
+  id<MTLTexture> c = mt_texture(m, dst);
+  if (a == nil || b == nil || c == nil) return 0;
+  return mt_tex_blur(backend, a, b, c, sigma, taps);
 }
 
 int mt_mask_composite_available(CompBackend *backend) {
@@ -926,6 +987,18 @@ static CompBackend *mt_backend_with_layer(void *layer) {
   m.quadPipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
   if (m.quadPipeline == nil) {
     fprintf(stderr, "native: the compositor's Metal pipeline did not build: %s\n",
+            error == nil ? "unknown error" : [[error description] UTF8String]);
+    return NULL;
+  }
+  MTLRenderPipelineDescriptor *bd = [[MTLRenderPipelineDescriptor alloc] init];
+  bd.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
+  bd.fragmentFunction = [library newFunctionWithName:@"blur_fragment"];
+  bd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+  // A blur pass replaces its target: the two passes hand the result on, nothing is blended.
+  bd.colorAttachments[0].blendingEnabled = NO;
+  m.blurPipeline = [device newRenderPipelineStateWithDescriptor:bd error:&error];
+  if (m.blurPipeline == nil) {
+    fprintf(stderr, "native: the compositor's Metal blur pipeline did not build: %s\n",
             error == nil ? "unknown error" : [[error description] UTF8String]);
     return NULL;
   }

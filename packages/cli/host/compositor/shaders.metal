@@ -9,6 +9,7 @@ struct Uniforms {
   float2 view;
   float2 flags; // MT_SAMPLE_* bits (metal.m), then unused
   float4 tint;
+  float4 blur; // the blur pass: 1 along y (0 along x), the tap count, the sigma in texels
 };
 struct VOut { float4 pos [[position]]; float2 uv; };
 
@@ -52,4 +53,25 @@ fragment float4 quad_mask_fragment(VOut in [[stage_in]], texture2d<float> conten
   float4 c = content.sample(s, in.uv);
   float a = mask.sample(s, in.uv).a;
   return c * a * u.params.x;
+}
+
+// A separable Gaussian blur: run it twice, once along x and once along y, with `flags.x/y` the
+// direction and `flags.z` the tap count, `params.w` the sigma in texels. It is the pass a blurred
+// line or a blurred backdrop runs on the GPU instead of three box passes over the CPU bitmap.
+fragment float4 blur_fragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
+                              constant Uniforms &u [[buffer(0)]]) {
+  constexpr sampler lin(coord::normalized, filter::linear, address::clamp_to_edge);
+  float2 texel = float2(1.0f / max(u.params.y, 1.0f), 1.0f / max(u.params.z, 1.0f));
+  float2 dir = float2(1.0f - u.blur.x, u.blur.x);
+  float sigma = max(u.blur.z, 0.5f);
+  int taps = (int)u.blur.y;
+  if (taps < 1) return tex.sample(lin, in.uv);
+  float4 sum = float4(0.0f);
+  float wsum = 0.0f;
+  for (int i = -taps; i <= taps; i++) {
+    float w = exp(-float(i * i) / (2.0f * sigma * sigma));
+    sum += tex.sample(lin, in.uv + dir * texel * float(i)) * w;
+    wsum += w;
+  }
+  return sum / wsum;
 }

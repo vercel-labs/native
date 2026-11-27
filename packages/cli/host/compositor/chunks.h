@@ -50,6 +50,9 @@ typedef struct {
   // An effect whose filter shows the pixels behind it (a backdrop filter): what it draws depends
   // on the frame around it, so a mask that holds one is not split.
   int backdrop;
+  // An effect whose chain is one blur, in the page's pixels: the radius the host blurs by on the
+  // GPU instead of replaying the filter. 0 for any other effect.
+  double blur_sigma;
 } CompCmdView;
 
 /** How the walker reads a host's display list: the root is list -1, a layer its id. */
@@ -99,6 +102,9 @@ typedef struct {
   int mask_role;
   int mask_id;
   CompRect mask_box;
+  // A chunk whose pixels the host blurs by this radius (page pixels) instead of the raster
+  // replaying the filter: the commands inside it are the filter's content, drawn crisp.
+  double blur_sigma;
 } CompWalkChunk;
 
 typedef struct {
