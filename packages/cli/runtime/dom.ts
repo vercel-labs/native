@@ -1401,6 +1401,42 @@ export class DOMTokenList {
   }
 }
 
+/**
+ * An element's `focusgroup` tokens, as Chrome's `focusGroup` reports them: a DOMTokenList bound to
+ * the attribute, so a change to a token writes the attribute and a change to the attribute is read
+ * again.
+ */
+export class FocusGroupTokenList extends DOMTokenList {
+  el: Element | null = null;
+  /** Set while this list writes the attribute itself, so the write is not read back as a change. */
+  writing: boolean = false;
+
+  refresh(): void {
+    const text = this.el === null ? "" : (this.el.getAttribute("focusgroup") ?? "");
+    if (text !== this.value) super.setValue(text);
+  }
+  private write(): void {
+    const el = this.el;
+    if (el === null) return;
+    this.writing = true;
+    el.setAttribute("focusgroup", this.value);
+    this.writing = false;
+  }
+  setValue(value: string): void { super.setValue(value); this.write(); }
+  add(...tokens: string[]): void { super.add(...tokens); this.write(); }
+  remove(...tokens: string[]): void { super.remove(...tokens); this.write(); }
+  toggle(token: string, force?: boolean): boolean {
+    const on = super.toggle(token, force);
+    this.write();
+    return on;
+  }
+  replace(token: string, newToken: string): boolean {
+    const replaced = super.replace(token, newToken);
+    this.write();
+    return replaced;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Attributes
 
@@ -4563,6 +4599,14 @@ function makeClassList(el: Element): DOMTokenList {
   return list;
 }
 
+/** The focusgroup token list, bound to the element and its focusgroup attribute. */
+function makeFocusGroupList(el: Element): FocusGroupTokenList {
+  const list = new FocusGroupTokenList();
+  list.el = el;
+  list.owner = el;
+  return list;
+}
+
 export class Element extends Node {
   get [Symbol.toStringTag](): string { return "Element"; }
   namespaceURI: string | null = "http://www.w3.org/1999/xhtml";
@@ -4570,6 +4614,10 @@ export class Element extends Node {
   prefix: string | null = null;
   protected idValue: string;
   readonly classList: DOMTokenList = makeClassList(this);
+  /** The element's focusgroup tokens, as the `focusgroup` attribute spells them. */
+  readonly focusGroup: DOMTokenList = makeFocusGroupList(this);
+  /** The item this focusgroup segment last held, so Tab comes back to it (see app/focusgroup.ts). */
+  fgMemory: Element | null = null;
 
   /** The length of an SVG <path>'s outline in user units, as `getTotalLength()` reports it.
    *  Any other element has no path and answers 0. */
@@ -4658,7 +4706,10 @@ export class Element extends Node {
     if (value !== "") this.recordSlotAttribute("id");
     if (this.dynamic) this.rulesStale = true;
     noteAttribute(this, "id", old);
-    invalidateStyle();
+    // A detached node's id can't be named by any rule of the page it isn't in yet: the insertion
+    // styles its subtree then. Parsing markup that carries ids (an <svg>'s <defs>, say) would
+    // otherwise restyle the whole page for each one.
+    if (this.isConnected) invalidateStyle();
   }
 
   /**
@@ -5211,6 +5262,12 @@ export class Element extends Node {
     this.removeAttribute(attr.name);
     return attr;
   }
+  /** Reads the focusgroup attribute into the token list after a script changed the attribute. */
+  syncFocusGroup(): void {
+    const list = this.focusGroup as FocusGroupTokenList;
+    if (!list.writing) list.refresh();
+  }
+
   setAttribute(name: string, value: any): void {
     const key = this.attrKey(name);
     if (key === "") {
@@ -5242,6 +5299,7 @@ export class Element extends Node {
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, text);
         if (key === "for") refreshAllLabels();
+        if (key === "focusgroup") this.syncFocusGroup();
       }
     }
   }
@@ -5267,6 +5325,7 @@ export class Element extends Node {
         noteOtherIdentityChange(this);
         if (this.isConnected) invalidateStyleOf(this);
         noteSheetAttr(this, key, null);
+        if (key === "focusgroup") this.syncFocusGroup();
       }
       const namespaced = this.nsAttributeNamed(key);
       if (namespaced !== null && this.nsAttrs !== null) {
@@ -5391,11 +5450,11 @@ export class Element extends Node {
     return markupOfChildren(this);
   }
   set innerHTML(html: string) {
-    this.replaceChildren(...parseFragment(html));
+    this.replaceChildren(...parseFragment(html, this));
   }
   /** Parses markup that may hold declarative shadow roots, replacing this element's children. */
   setHTMLUnsafe(html: string): void {
-    const nodes = parseFragment(String(html));
+    const nodes = parseFragment(String(html), this);
     const keep: Node[] = [];
     for (const n of nodes) {
       if (n instanceof HTMLTemplateElement && adoptDeclarative(this, n)) continue;
@@ -5420,7 +5479,7 @@ export class Element extends Node {
   set outerHTML(html: string) {
     const parent = this.parentNode;
     if (parent === null) throw new Error("NoModificationAllowedError: the element has no parent");
-    const nodes = parseFragment(html);
+    const nodes = parseFragment(html, parent instanceof Element ? parent : null);
     const at = parent.kids.indexOf(this);
     parent.removeChild(this);
     for (let i = 0; i < nodes.length; i++) {
@@ -5433,7 +5492,14 @@ export class Element extends Node {
   }
 
   insertAdjacentHTML(where: string, html: string): void {
-    this.insertAdjacent(where, parseFragment(html), true);
+    // The fragment is parsed against the element the new nodes become children of: this element,
+    // or its parent when they go beside it, as HTML's insertAdjacentHTML resolves its context.
+    const position = where.toLowerCase();
+    let context: Element | null = this;
+    if (position === "beforebegin" || position === "afterend") {
+      context = this.parentNode instanceof Element ? (this.parentNode as Element) : null;
+    }
+    this.insertAdjacent(where, parseFragment(html, context), true);
   }
   insertAdjacentElement(where: string, element: Element): Element | null {
     return this.insertAdjacent(where, [element], false) === null ? null : element;
@@ -8436,6 +8502,10 @@ function checkedBits(el: Element): number {
     }
   } else if (el instanceof HTMLButtonElement) {
     if (el.type === "submit" && isDefaultButton(el)) bits |= P.S_DEFAULT;
+  } else if (el instanceof HTMLProgressElement) {
+    // A progress bar with no value attribute is indeterminate; its `value` property reads the
+    // absence as 0, so the attribute is what decides.
+    if (!el.hasAttribute("value")) bits |= P.S_INDETERMINATE;
   } else if (el instanceof HTMLOptionElement) {
     // A select picks an option even without the selected attribute, and :checked follows it.
     if (el.selected) bits |= P.S_CHECKED;
@@ -12376,6 +12446,14 @@ export function refreshFocusVisible(): void {
  * Focuses `el` (or clears focus). `visible` decides whether the focus counts as keyboard focus,
  * which :focus-visible matches; when it is omitted the element and the last interaction decide.
  */
+/** A hook the focusgroup layer sets: an element took focus, however it came — a click, focus() or
+ *  Tab — so a segment can remember the item it holds. */
+let focusMovedHook: ((el: Element) => void) | null = null;
+
+export function setFocusMovedHook(fn: ((el: Element) => void) | null): void {
+  focusMovedHook = fn;
+}
+
 /** A hook the accessibility layer sets: focus moved, so its tree's focused node changed. */
 let focusChangedHook: (() => void) | null = null;
 
@@ -12493,6 +12571,7 @@ export function setFocus(el: Element | null, visible?: boolean): void {
         dateSetActive(el, 0);
       }
     }
+    if (focusMovedHook !== null) focusMovedHook(el);
     dispatch(trusted(new FocusEvent("focus", { relatedTarget: prev })), el);
     dispatch(trusted(new FocusEvent("focusin", { bubbles: true, composed: true, relatedTarget: prev })), el);
   }
@@ -13103,10 +13182,13 @@ export class HTMLInputElement extends HTMLElement {
     return this.val;
   }
   set value(v: any) {
+    // A script may hand the field anything: the IDL attribute converts with ToString, with null
+    // as the one exception ({ [LegacyNullToEmptyString] }), so undefined reads as "undefined".
+    const given = v === null ? "" : typeof v === "string" ? v : String(v);
     // A date or time field holds a canonical value, or nothing when the text names none.
     const kind = dateKindOf(this.type);
     if (kind !== null) {
-      const text = sanitizeDateText(kind, v);
+      const text = sanitizeDateText(kind, given);
       if (text !== this.val) moveValueRanges(this, 0, this.val.length, text.length);
       this.val = text;
       this.selStart = text.length;
@@ -13119,13 +13201,13 @@ export class HTMLInputElement extends HTMLElement {
     }
     // A colour field takes a simple colour and nothing else: text that names none leaves it black.
     if (this.type.toLowerCase() === "color") {
-      this.val = simpleColor(v) ?? "#000000";
+      this.val = simpleColor(given) ?? "#000000";
       noteControlChange(this);
       return;
     }
     // A number field holds a number in the floating-point form a browser keeps, and nothing else.
     if (this.type.toLowerCase() === "number") {
-      const text = sanitizeNumberText(v);
+      const text = sanitizeNumberText(given);
       if (text !== this.val) moveValueRanges(this, 0, this.val.length, text.length);
       this.val = text;
       this.selStart = text.length;
@@ -13139,7 +13221,7 @@ export class HTMLInputElement extends HTMLElement {
     // page put it, as a browser does; a framework that controls a field rewrites its value after
     // every keystroke, and moving the caret to the end there would send the next character to the
     // end of the field.
-    let text = String(v);
+    let text = given;
     // An email or url field keeps only what its value sanitization allows.
     const fieldType = this.type.toLowerCase();
     if (fieldType === "email" || fieldType === "url") {
@@ -14047,6 +14129,13 @@ function collectMatches(el: Node, sels: Selector[], scope: Element | null, out: 
 /** Is the element generated at all? A display: none box has no rects and no box, and neither
  *  has one that isn't in the document, since nothing laid it out. A box inside a display: none
  *  subtree isn't generated either: the subtree drops out whole, whatever the box's own display. */
+/** Whether an element takes part in focus and hit testing: it is in the document, no box above it
+ *  is display: none, and it is not visibility: hidden or collapse (which inherits, so its own
+ *  computed value covers its ancestors). */
+export function isRenderedForFocus(el: Element): boolean {
+  return !isUnrendered(el) && el.sv[P.P_VISIBILITY] === P.VIS_VISIBLE;
+}
+
 function isUnrendered(el: Element): boolean {
   if (el.nodeType !== 1 || !el.isConnected) return true;
   for (let p: Element | null = el; p !== null; p = p.parentElement) {
@@ -16683,8 +16772,12 @@ function parseTarget(el: Element): Node {
   return el instanceof HTMLTemplateElement ? (el as HTMLTemplateElement).content : el;
 }
 
-/** Parses HTML text into detached nodes, as an innerHTML assignment does. */
-function parseFragment(html: string): Node[] {
+/**
+ * Parses HTML text into detached nodes, as an innerHTML assignment does. The context element is
+ * whose innerHTML is being set: its namespace (and an <svg>'s, its subtree's) is the namespace
+ * the top-level nodes get, so markup assigned into an <svg> makes SVG elements, not HTML ones.
+ */
+function parseFragment(html: string, context: Element | null = null): Node[] {
   const root = new DocumentFragment();
   const stack: Element[] = [];
   const top = (): Node => stack.length === 0 ? root : parseTarget(stack[stack.length - 1]);
@@ -16805,19 +16898,24 @@ function parseFragment(html: string): Node[] {
       else if (tag === "option") closeInScope(["option"], null);
       else if (tag === "optgroup") closeInScope(["option", "optgroup"], null);
       const el = document.createElement(tag);
-      const parent = stack.length === 0 ? null : stack[stack.length - 1];
-      // An <svg> enters the SVG namespace, and so does its subtree — except inside foreignObject,
-      // whose children are HTML again. Everything else keeps its parent's namespace.
+      const parent = stack.length === 0 ? context : stack[stack.length - 1];
+      // An <svg> enters the SVG namespace, and so does its subtree — except an SVG
+      // <foreignObject>, whose children are HTML again. Everything else keeps its parent's
+      // namespace. The parent's local name is read lower-cased: a parsed tag is already, and an
+      // element a script made with createElementNS keeps its camel case.
       const SVG_NS = "http://www.w3.org/2000/svg";
       const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+      const XHTML_NS = "http://www.w3.org/1999/xhtml";
+      const parentLocal = parent === null ? "" : parent.localName.toLowerCase();
       if (tag === "svg") el.namespaceURI = SVG_NS;
       else if (tag === "math") el.namespaceURI = MATHML_NS;
-      else if (parent !== null && parent.namespaceURI === SVG_NS && parent.localName !== "foreignObject") {
-        el.namespaceURI = SVG_NS;
-      } else if (parent !== null && parent.namespaceURI === MATHML_NS && parent.localName !== "annotation-xml") {
+      else if (parent !== null && parent.namespaceURI === SVG_NS) {
+        el.namespaceURI = parentLocal === "foreignobject" ? XHTML_NS : SVG_NS;
+      } else if (parent !== null && parent.namespaceURI === MATHML_NS && parentLocal !== "annotation-xml") {
         el.namespaceURI = MATHML_NS;
       } else if (parent !== null) el.namespaceURI = parent.namespaceURI;
-      if (tag === "foreignObject" && parent !== null) el.namespaceURI = parent.namespaceURI;
+      // A <foreignObject> element itself takes its parent's namespace (SVG inside an <svg>).
+      if (tag === "foreignobject" && parent !== null) el.namespaceURI = parent.namespaceURI;
       for (let a = 0; a < attrs.length; a++) setParsedAttribute(el, attrs[a], values[a]);
       place(el);
       i = j;

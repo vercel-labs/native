@@ -45,8 +45,8 @@ import { setPaintUrls } from "../svg-paint.ts";
 import * as P from "../../shared/props.ts";
 import { pointer } from "./pointer.ts";
 import { clearSmoothScrolls } from "./smooth.ts";
-import { clearAdopted, refreshSheet, setSheetLiveSink } from "../sheets.ts";
-import { applyWindowEnvironment, clearAllTimers, window, reportUnhandledRejection } from "../window.ts";
+import { clearAdopted, refreshSheet, setSheetLiveSink, resetRuntimeLayers } from "../sheets.ts";
+import { applyWindowEnvironment, clearAllTimers, resetLoadGate, window, reportUnhandledRejection } from "../window.ts";
 import { clearLiveCollections, clearLiveRanges, setValueRangeGeometryHook } from "../dom.ts";
 import { resetAccessibleProperties } from "../a11y.ts";
 import { clearRegistrations, registerCustomProperty } from "../registered.ts";
@@ -783,6 +783,7 @@ export function resetPage(): void {
   resetHighlights();
   resetTargetText();
   clearAdopted();
+  resetRuntimeLayers();
   clearLiveCollections();
   clearLiveRanges();
   clearRegistrations();
@@ -801,6 +802,7 @@ export function resetPage(): void {
   // listeners die with it, and the document it listened on starts over.
   clearAllTimers();
   window.reset();
+  resetLoadGate();
   document.listeners.clear();
   // The WPT runner reads a testharness page's result off the window. The last page's result must
   // not stand in for this one's, so a page that reports nothing is not credited with it.

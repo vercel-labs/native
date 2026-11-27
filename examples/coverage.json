@@ -1,0 +1,211 @@
+{
+  "tags": {
+    "text": "Text shaping, fonts, line breaking and text selection",
+    "layout": "Block, flex, grid and lanes layout",
+    "paint": "Backgrounds, borders, shadows, images and widget painting",
+    "compositing": "Transforms, opacity, layers and compositor work",
+    "css": "Cascade, selectors, custom properties and color functions",
+    "animation": "Frame clock, transitions and keyframe animation",
+    "events": "Pointer, keyboard, focus and timer events",
+    "forms": "Inputs, controls, validation and form submission",
+    "scrolling": "Overflow scrolling, scrollbars and scrolling with the pointer",
+    "virtual-list": "Windowed lists and tables that build rows on demand",
+    "drag-drop": "HTML5 drag and drop",
+    "canvas2d": "Canvas 2D drawing",
+    "webgl": "WebGL 2 and 3D drawing",
+    "svg": "SVG layout and paint",
+    "media": "Audio and video",
+    "ime": "Input-method composition",
+    "editing": "Contenteditable, selection and editing commands",
+    "storage": "localStorage, IndexedDB and persistence",
+    "components": "UI SDK primitives",
+    "framework": "React and Preact integration",
+    "images": "Image decoding, scaling and painting",
+    "networking": "fetch, XHR, WebSocket, EventSource and streams",
+    "dialogs": "Dialogs, menus and popovers",
+    "links": "Links and navigation"
+  },
+  "examples": {
+    "article": [
+      "text",
+      "layout",
+      "paint",
+      "links",
+      "events"
+    ],
+    "canvas": [
+      "canvas2d",
+      "paint",
+      "images"
+    ],
+    "canvas-particles": [
+      "canvas2d",
+      "animation",
+      "compositing"
+    ],
+    "counter": [
+      "events",
+      "layout"
+    ],
+    "css-motion": [
+      "css",
+      "animation",
+      "compositing",
+      "paint"
+    ],
+    "dashboard": [
+      "images",
+      "paint",
+      "layout",
+      "events"
+    ],
+    "halyard": [
+      "components",
+      "framework",
+      "layout",
+      "dialogs",
+      "drag-drop",
+      "svg"
+    ],
+    "ime": [
+      "ime",
+      "forms",
+      "text",
+      "events"
+    ],
+    "player": [
+      "media",
+      "components",
+      "framework",
+      "animation",
+      "images",
+      "svg",
+      "networking"
+    ],
+    "preact-todo": [
+      "framework",
+      "forms",
+      "events"
+    ],
+    "three-game": [
+      "webgl",
+      "animation",
+      "events"
+    ],
+    "three-hero": [
+      "webgl",
+      "animation",
+      "compositing"
+    ],
+    "tickets": [
+      "text",
+      "scrolling",
+      "layout",
+      "events"
+    ],
+    "todo": [
+      "forms",
+      "events"
+    ],
+    "ui-dashboard": [
+      "components",
+      "framework",
+      "layout",
+      "svg"
+    ],
+    "ui-settings": [
+      "components",
+      "framework",
+      "forms",
+      "dialogs",
+      "storage"
+    ],
+    "webgl-cube": [
+      "webgl",
+      "animation"
+    ],
+    "webgl-texture": [
+      "webgl",
+      "images"
+    ],
+    "animation": [
+      "animation",
+      "compositing",
+      "css",
+      "paint"
+    ],
+    "checkout": [
+      "forms",
+      "components",
+      "layout",
+      "events"
+    ],
+    "gallery": [
+      "virtual-list",
+      "scrolling",
+      "images",
+      "paint",
+      "layout",
+      "storage"
+    ],
+    "notes": [
+      "framework",
+      "text",
+      "components",
+      "storage"
+    ],
+    "data-table": [
+      "virtual-list",
+      "scrolling",
+      "framework",
+      "components",
+      "paint"
+    ],
+    "kanban": [
+      "drag-drop",
+      "framework",
+      "layout",
+      "components"
+    ],
+    "chat": [
+      "networking",
+      "scrolling",
+      "text",
+      "storage",
+      "framework",
+      "components"
+    ],
+    "places": [
+      "storage",
+      "forms",
+      "framework",
+      "components",
+      "images"
+    ],
+    "pulse": [
+      "animation",
+      "components",
+      "framework",
+      "paint",
+      "svg"
+    ],
+    "quarry": [
+      "components",
+      "forms",
+      "dialogs",
+      "storage",
+      "framework"
+    ],
+    "editor": [
+      "editing",
+      "text",
+      "storage"
+    ]
+  },
+  "smoke": [
+    "counter",
+    "ui-dashboard",
+    "canvas-particles",
+    "webgl-cube"
+  ]
+}

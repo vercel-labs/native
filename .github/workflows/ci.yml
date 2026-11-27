@@ -26,16 +26,72 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A pull request's new examples are compared with those on its base commit.
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Check example coverage
+        working-directory: packages/cli
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            # The change's own files: the pull request head against its merge base with the
+            # current next tip. Examples that landed on next after the branch forked are not in
+            # this diff, so they are not treated as this pull request's new examples.
+            git fetch --no-tags origin next
+            if git rev-parse -q --verify HEAD^2 >/dev/null; then PR_HEAD=HEAD^2; else PR_HEAD=HEAD; fi
+            MERGE_BASE=$(git merge-base origin/next "$PR_HEAD")
+            git diff --name-only "$MERGE_BASE" "$PR_HEAD" > "$RUNNER_TEMP/changed.txt"
+            node scripts/example-coverage.ts --base "$MERGE_BASE" --changed "$RUNNER_TEMP/changed.txt"
+          else
+            node scripts/example-coverage.ts
+          fi
       - run: pnpm turbo run lint
       - run: pnpm turbo run build --filter=@native-sdk/cli --filter=@native-sdk/docs
 
+  # A pull request runs the examples its own changed files reach: a paint change runs the
+  # paint-heavy apps, a text change the text-heavy apps, and a change to shared ground (the
+  # compiler, the DOM core, the gate itself) runs the smoke set. At most two apps go to each shard, most relevant
+  # first. A push to next runs the full suite, unchanged. The selection logic is
+  # packages/cli/scripts/example-selection.ts and the per-app tags are examples/coverage.json.
+  select-examples:
+    runs-on: ubuntu-24.04
+    outputs:
+      shards: ${{ steps.select.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The changed-file list is the merge base against the base branch.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Select the examples this change touches
+        id: select
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            # The change's own files: the pull request head against its merge base with the
+            # current next tip, so base-branch changes since the fork are not selected.
+            git fetch --no-tags origin next
+            if git rev-parse -q --verify HEAD^2 >/dev/null; then PR_HEAD=HEAD^2; else PR_HEAD=HEAD; fi
+            MERGE_BASE=$(git merge-base origin/next "$PR_HEAD")
+            git diff --name-only "$MERGE_BASE" "$PR_HEAD" > "$RUNNER_TEMP/changed.txt"
+            node packages/cli/scripts/example-selection.ts --changed "$RUNNER_TEMP/changed.txt" --shards 4 --github-output "$GITHUB_OUTPUT"
+          else
+            printf 'shards<<EXAMPLE_SHARDS\n\n\n\n\nEXAMPLE_SHARDS\n' >> "$GITHUB_OUTPUT"
+          fi
+          sed -n '/^shards<</,/^EXAMPLE_SHARDS$/p' "$GITHUB_OUTPUT" | sed 's/^/  /' >> "$GITHUB_STEP_SUMMARY" || true
+
   linux-examples-shards:
+    needs: select-examples
     runs-on: ubuntu-24.04
     # Every example's build is tens of minutes of scriptc on the runner's four cores, and the suite
     # takes about five hours as one job: long enough that the runner is killed for want of memory
@@ -43,24 +99,15 @@ jobs:
     # behind. Four shards each build and run a quarter of the apps, so a job lasts a quarter as
     # long and writes a quarter as much, and a failure names the shard it came from.
     #
-    # A pull request instead builds one app in each shard, the `fast_example` below: that keeps the
-    # job names and the aggregate check unchanged while capping the tier at one build. The four apps
-    # sit in different shards so each job still adds no wall clock beyond its own build, and together
-    # they exercise the runtime paths a pull request most often breaks: counter covers DOM events and
-    # text, ui-dashboard React's state and rendering, canvas-particles Canvas 2D animation with
-    # pointer input, and webgl-cube WebGL 2 drawing through the GPU.
+    # A pull request instead builds the examples its diff selects, at most two per shard, from the
+    # `select-examples` job: the job names and the aggregate check stay the same while the tier is
+    # capped. A change with unfocused reach runs the smoke set (counter, ui-dashboard,
+    # canvas-particles, webgl-cube), one app per shard; a targeted change runs the apps whose
+    # coverage tags match it. A push to next runs the full shards below.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - shard: 1
-            fast_example: webgl-cube
-          - shard: 2
-            fast_example: ui-dashboard
-          - shard: 3
-            fast_example: canvas-particles
-          - shard: 4
-            fast_example: counter
+        shard: [1, 2, 3, 4]
     timeout-minutes: 150
     steps:
       # The image's toolchains (Android, .NET, GHC, CodeQL, ...) take tens of gigabytes this job
@@ -95,22 +142,28 @@ jobs:
       - name: Drop the FFmpeg build tree
         run: rm -rf packages/cli/host/ffmpeg/build packages/cli/host/ffmpeg/src
       - run: pnpm install --frozen-lockfile
-      # A pull request runs this shard's fast example alone; a push or manual dispatch runs the
-      # shard's whole slice of the suite. Both go through tests/scratch.ts so a run's build
-      # directories land under TMPDIR and disappear with the job.
+      # A pull request runs the examples the selection job gives this shard (none is a pass); a
+      # push or manual dispatch runs the shard's whole slice of the suite. Both go through
+      # tests/scratch.ts so a run's build directories land under TMPDIR and disappear with the job.
       - name: Build and run the examples this shard covers
         working-directory: packages/cli
         env:
           # Each app is built once, so the native cache's copy of every app's executable is only
           # space. (The compiler's own cache is bounded on its own, at 4 GB.)
           NATIVE_NO_CACHE: "1"
-          # shard 1 of 4, or just the one app the fast tier names for this shard.
+          # shard 1 of 4, or the examples this shard runs on a pull request.
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
-          FAST_EXAMPLE: ${{ matrix.fast_example }}
+          SHARDS: ${{ needs.select-examples.outputs.shards }}
+          SHARD_INDEX: ${{ matrix.shard }}
           TIER: ${{ github.event_name == 'pull_request' && 'fast' || 'full' }}
         run: |
           if [ "$TIER" = fast ]; then
-            node tests/scratch.ts node tests/examples.ts "$FAST_EXAMPLE"
+            SHARD_EXAMPLES=$(printf '%s\n' "$SHARDS" | sed -n "${SHARD_INDEX}p")
+            if [ -z "$SHARD_EXAMPLES" ]; then
+              echo "no example selected for shard $SHARD_INDEX"
+              exit 0
+            fi
+            node tests/scratch.ts node tests/examples.ts $SHARD_EXAMPLES
           else
             node tests/scratch.ts node tests/examples.ts --shard "$SHARD"
           fi
