@@ -66,7 +66,10 @@ function flowLines(el: Node): number {
 /** Whether a box holds a forced line break, which splits its text into runs of their own. */
 function hasBreak(el: Node): boolean {
   for (const k of boxKids(el)) {
-    if (!k.isTextNode && (k as Element).localName === "br") return true;
+    // A page can hold nodes that are neither text nor elements (a processing instruction, a
+    // doctype): only an element can be a <br>, and narrowing to Element on !isTextNode alone
+    // makes the check trip over those nodes at run time.
+    if (k.isElementNode && (k as Element).localName === "br") return true;
     if (hasBreak(k)) return true;
   }
   return false;
