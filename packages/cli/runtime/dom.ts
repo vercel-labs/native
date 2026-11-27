@@ -3173,11 +3173,20 @@ export class Node extends EventTarget {
       throw new TypeError("Failed to execute 'moveBefore': 2 arguments required, but only 1 present.");
     }
     if (n.parentNode === this) {
-      // Already here: move within the child list.
-      this.insertBefore(n, child);
+      // Already here: move within the child list. The insert takes the node out and puts it back
+      // in one step, so it is the same state-preserving move as a cross-parent one.
+      const wasMoving = atomicMove;
+      atomicMove = true;
+      try { this.insertBefore(n, child); } finally { atomicMove = wasMoving; }
       return n;
     }
-    if (n.parentNode !== null) n.parentNode.removeChild(n);
+    if (n.parentNode !== null) {
+      // The node keeps its state through the move, the focus it holds included: the removal it
+      // takes in passing is not an element leaving the page.
+      const wasMoving = atomicMove;
+      atomicMove = true;
+      try { n.parentNode.removeChild(n); } finally { atomicMove = wasMoving; }
+    }
     this.insertBefore(n, child);
     return n;
   }
@@ -3236,6 +3245,9 @@ export class Node extends EventTarget {
       child.scrollMarkers = [];
     }
     noteChildList(this, [], [child], prev, next);
+    // Focus doesn't survive the element leaving the page: a browser unfocuses it, and the page's
+    // active element falls back to the body. A move keeps it (see moveBefore).
+    if (!atomicMove && wasConnected && focusState.el !== null && !focusState.el.isConnected) setFocus(null);
     // A popover that leaves the document closes, going away from the screen it was on.
     if (wasConnected && openPopoverCount > 0) hidePopoversIn(child);
     if (wasConnected && CUSTOM_DEFS > 0) disconnectedSubtree(child);
@@ -4212,6 +4224,9 @@ let capturedElement: Element | null = null;
 let capturedPointerId = -1;
 
 /** Records a host press or release: a capture is only possible while the pointer is down. */
+/** True while an atomic move takes its node out of its old parent: the node keeps its state. */
+let atomicMove = false;
+
 export function notePointerActive(id: number, active: boolean): void {
   const i = activePointers.indexOf(id);
   if (active === (i >= 0)) return;
@@ -6125,7 +6140,8 @@ export class Element extends Node {
    * the ring, and anything else shows it when the last interaction came from the keyboard.
    */
   focus(options?: { preventScroll?: boolean; focusVisible?: boolean }): void {
-    if (this.isFocusable) setFocus(this, options?.focusVisible);
+    // An element outside the document takes no focus; a browser leaves the active element alone.
+    if (this.isFocusable && this.isConnected) setFocus(this, options?.focusVisible);
   }
   blur(): void {
     if (focusState.el === this) setFocus(null);
@@ -8564,9 +8580,11 @@ function focusWithinBits(el: Element): number {
   if (focused === null) return 0;
   // The focused node lies within every ancestor of the flattened tree: inside a shadow tree or
   // a slot, that chain runs through the host and past the slot's ancestors, not the DOM's own.
+  // A box on the top layer is where the walk stops: it takes the focus it holds for itself.
   let n: Node | null = focused;
   while (n !== null) {
     if (n === el) return P.S_FOCUS_WITHIN;
+    if (isInTopLayer(n)) return 0;
     if (shadowTrees > 0 && n instanceof Element && n.assignedSlot !== null) { n = n.assignedSlot; continue; }
     if (n instanceof ShadowRoot) { n = n.host; continue; }
     n = n.parentNode;
@@ -12445,6 +12463,20 @@ export function setFocus(el: Element | null, visible?: boolean): void {
       prev.commit();
       resetDateEdit(prev);
     }
+  }
+  // A blur handler may have focused something else; a browser keeps that focus, and the call
+  // that lost it in passing does not take it back.
+  if (prev !== null && focusState.el !== null) {
+    invalidatePaint();
+    return;
+  }
+  // A focusout handler may have taken the element out of the page: a browser leaves the document
+  // unfocused then, rather than focusing a node that is no longer in it.
+  if (el !== null && !el.isConnected) {
+    focusState.el = null;
+    if (focusChangedHook !== null) focusChangedHook();
+    invalidatePaint();
+    return;
   }
   if (el !== null) {
     focusState.el = el;
