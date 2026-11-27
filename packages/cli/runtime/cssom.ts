@@ -37,7 +37,7 @@ import { registerShadow, shadowList } from "./shadows.ts";
 import { areaList, lineNamesText, nameText, placementRow, registerAreaList, registerPlacement, registerTrackList, registerTrackName, trackList } from "./grid.ts";
 import type { TrackSize } from "./grid.ts";
 import { registerBorderImageRow } from "./border-image.ts";
-import { registerPaintUrl } from "./svg-paint.ts";
+import { paintUrlAt, registerPaintUrl } from "./svg-paint.ts";
 import { filterList, registerFilter } from "./filters.ts";
 import { listCss, lengthText as sharedLengthText, originRows, transformRows } from "../shared/css/transforms.ts";
 import { hasTransform, individualCss, originCss, transformCss } from "./transform.ts";
@@ -993,6 +993,9 @@ function filterText(el: Node, id: number): string {
           lengthText(op.dy, P.U_PX) + " " + lengthText(op.blur, P.U_PX) + ")";
         break;
       }
+      case P.FK_URL:
+        s += "url(#" + (paintUrlAt(op.a) ?? "") + ")";
+        break;
       default:
         break;
     }
