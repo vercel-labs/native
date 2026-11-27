@@ -8436,6 +8436,10 @@ function checkedBits(el: Element): number {
     }
   } else if (el instanceof HTMLButtonElement) {
     if (el.type === "submit" && isDefaultButton(el)) bits |= P.S_DEFAULT;
+  } else if (el instanceof HTMLProgressElement) {
+    // A progress bar with no value attribute is indeterminate; its `value` property reads the
+    // absence as 0, so the attribute is what decides.
+    if (!el.hasAttribute("value")) bits |= P.S_INDETERMINATE;
   } else if (el instanceof HTMLOptionElement) {
     // A select picks an option even without the selected attribute, and :checked follows it.
     if (el.selected) bits |= P.S_CHECKED;
@@ -13103,10 +13107,13 @@ export class HTMLInputElement extends HTMLElement {
     return this.val;
   }
   set value(v: any) {
+    // A script may hand the field anything: the IDL attribute converts with ToString, with null
+    // as the one exception ({ [LegacyNullToEmptyString] }), so undefined reads as "undefined".
+    const given = v === null ? "" : typeof v === "string" ? v : String(v);
     // A date or time field holds a canonical value, or nothing when the text names none.
     const kind = dateKindOf(this.type);
     if (kind !== null) {
-      const text = sanitizeDateText(kind, v);
+      const text = sanitizeDateText(kind, given);
       if (text !== this.val) moveValueRanges(this, 0, this.val.length, text.length);
       this.val = text;
       this.selStart = text.length;
@@ -13119,13 +13126,13 @@ export class HTMLInputElement extends HTMLElement {
     }
     // A colour field takes a simple colour and nothing else: text that names none leaves it black.
     if (this.type.toLowerCase() === "color") {
-      this.val = simpleColor(v) ?? "#000000";
+      this.val = simpleColor(given) ?? "#000000";
       noteControlChange(this);
       return;
     }
     // A number field holds a number in the floating-point form a browser keeps, and nothing else.
     if (this.type.toLowerCase() === "number") {
-      const text = sanitizeNumberText(v);
+      const text = sanitizeNumberText(given);
       if (text !== this.val) moveValueRanges(this, 0, this.val.length, text.length);
       this.val = text;
       this.selStart = text.length;
@@ -13139,7 +13146,7 @@ export class HTMLInputElement extends HTMLElement {
     // page put it, as a browser does; a framework that controls a field rewrites its value after
     // every keystroke, and moving the caret to the end there would send the next character to the
     // end of the field.
-    let text = String(v);
+    let text = given;
     // An email or url field keeps only what its value sanitization allows.
     const fieldType = this.type.toLowerCase();
     if (fieldType === "email" || fieldType === "url") {
