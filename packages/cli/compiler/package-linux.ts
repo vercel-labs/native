@@ -146,10 +146,18 @@ export function linuxAppOf(resources: string, htmlPath: string, executable: stri
   const appJson = join(resources, ".native", "app.json");
   if (existsSync(appJson)) {
     try {
-      const facts = JSON.parse(readFileSync(appJson, "utf8")) as { name?: unknown; shortName?: unknown; version?: unknown; icon?: unknown };
+      const facts = JSON.parse(readFileSync(appJson, "utf8")) as {
+        name?: unknown; shortName?: unknown; version?: unknown; icon?: unknown; iconReady?: unknown;
+      };
       if (typeof facts.name === "string" && facts.name.trim() !== "") name = facts.name.trim();
       if (typeof facts.version === "string") version = packageVersionOf(facts.version);
-      if (typeof facts.icon === "string" && facts.icon !== "") {
+      // The build's platform-ready icon (inset, and full-bleed pictures padded) comes first; the
+      // source beside it answers for a bundle written before builds drew one.
+      if (typeof facts.iconReady === "string" && facts.iconReady !== "") {
+        const file = join(resources, ...facts.iconReady.split("/"));
+        if (existsSync(file)) icon = file;
+      }
+      if (icon === null && typeof facts.icon === "string" && facts.icon !== "") {
         const file = join(resources, ...facts.icon.split("/"));
         if (existsSync(file)) icon = file;
       }
