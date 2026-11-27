@@ -1431,6 +1431,10 @@ export class StyleDeclaration {
     const err = compileValue(prop, value, out, fonts, undefined, getSheetContent());
     // An invalid value leaves the property as it was, as in a browser.
     if (err !== null) return;
+    // The value written may spell the declaration the object already holds another way — a
+    // settled `scale(1.0000)` against `scale(1)` — so the compiled declarations decide. A frame
+    // loop that rewrites a value it didn't move would otherwise restyle and repaint for it.
+    if (out.length > 0 && this.holdsDeclarations(out, important)) return;
     for (const d of out) {
       // A CSS-wide keyword compiles to a declaration kept as text, which the style pass resolves
       // against the parent and the initial value once it has the property's longhands in hand.
@@ -1455,6 +1459,36 @@ export class StyleDeclaration {
       if (d.p !== P.P_TRANSFORM && d.p !== P.P_TRANSLATE && d.p !== P.P_ROTATE && d.p !== P.P_SCALE)
         return false;
       if (!hasTransform(this.el)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Whether every declaration a write compiled is one this object already holds, at the same
+   * priority, with no other declaration for its property standing beside it.
+   */
+  private holdsDeclarations(out: Decl[], important: boolean): boolean {
+    for (const d of out) {
+      let found = 0;
+      if (d.prop !== undefined) {
+        const ids = longhandIds(d.prop);
+        for (const e of this.decls) {
+          if (e.prop === d.prop) {
+            if (e.value === (d.value === undefined ? "" : d.value) && (e.important === true) === important) found++;
+            else return false;
+          } else if (e.prop === undefined && ids !== null && ids.indexOf(e.p) >= 0) return false;
+        }
+        if (found !== 1) return false;
+      } else {
+        const name = P.PROPERTY_NAMES[d.p];
+        for (const e of this.decls) {
+          if (e.prop === undefined && e.p === d.p) {
+            if (e.v === d.v && e.u === d.u && (e.important === true) === important) found++;
+            else return false;
+          } else if (e.prop === name) return false;
+        }
+        if (found !== 1) return false;
+      }
     }
     return true;
   }
