@@ -928,6 +928,8 @@ export function layoutRoot(root: Node): void {
     bumpSizeCache();
     layoutRootPass(root);
     layoutPasses.full++;
+    layoutCounts.full++;
+    layoutCounts.full++;
     return;
   }
   if (unsupportedLayout.nodes > 0) {
@@ -963,6 +965,7 @@ export function layoutRoot(root: Node): void {
   // row that only moved has nothing marked.
   if (relayoutDirtyRoots(root)) {
     layoutPasses.local++;
+    layoutCounts.local++;
     placeAndClamp(root);
   } else {
     layoutPasses.full++;

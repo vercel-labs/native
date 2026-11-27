@@ -6838,6 +6838,107 @@ static size_t skip_layer(size_t i) {
   return g_list->count;
 }
 
+/** A box a run of commands paints, in the user space the run starts in. */
+typedef struct { double x0, y0, x1, y1; int any; } InkBox;
+
+static void ink_add(InkBox *b, double x, double y, double w, double h) {
+  if (!(w > 0 && h > 0)) return;
+  if (!b->any) { b->x0 = x; b->y0 = y; b->x1 = x + w; b->y1 = y + h; b->any = 1; return; }
+  if (x < b->x0) b->x0 = x;
+  if (y < b->y0) b->y0 = y;
+  if (x + w > b->x1) b->x1 = x + w;
+  if (y + h > b->y1) b->y1 = y + h;
+}
+
+/** A rect mapped through a matrix, as the box its four corners make. */
+static void ink_map(const CGAffineTransform *m, double x, double y, double w, double h,
+                    double *ox, double *oy, double *ow, double *oh) {
+  CGPoint p[4] = {CGPointMake(x, y), CGPointMake(x + w, y), CGPointMake(x + w, y + h), CGPointMake(x, y + h)};
+  double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  for (int i = 0; i < 4; i++) {
+    CGPoint q = CGPointApplyAffineTransform(p[i], *m);
+    if (i == 0 || q.x < x0) x0 = q.x;
+    if (i == 0 || q.y < y0) y0 = q.y;
+    if (i == 0 || q.x > x1) x1 = q.x;
+    if (i == 0 || q.y > y1) y1 = q.y;
+  }
+  *ox = x0; *oy = y0; *ow = x1 - x0; *oh = y1 - y0;
+}
+
+/**
+ * The ink a run of commands paints, in the user space it starts in: every box it draws, grown the
+ * way the chunk walk grows one (a shadow's reach, a text run's estimate, a filter's region) and
+ * mapped through the transforms inside the run, with layer refs followed into their lists. What an
+ * opacity group's transparency layer has to cover is this, not the group's border box: children
+ * that overflow it, a box-shadow, an outline and a filtered child all paint outside the border.
+ */
+static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGAffineTransform m, int depth) {
+  CGAffineTransform stack[64];
+  int states = 0;
+  for (size_t i = first; i < last && i < list->count; i++) {
+    Cmd *c = &list->cmds[i];
+    switch (c->kind) {
+      case CMD_TRANSFORM:
+        if (states >= 64) return;
+        stack[states++] = m;
+        m = CGAffineTransformConcat(CGAffineTransformMake(c->p0, c->p1, c->p2, c->p3, c->r[0], c->r[1]), m);
+        break;
+      case CMD_CLIP: case CMD_CLIP_ROUND: case CMD_CLIP_POLY: case CMD_CLIP_ELLIPSE: case CMD_CLIP_SHAPE:
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      case CMD_UNCLIP: case CMD_EFFECT_POP: case CMD_MASK_POP: case CMD_PERSPECTIVE_POP: case CMD_MASK_SPLIT:
+        if (states > 0) m = stack[--states];
+        break;
+      case CMD_EFFECT_PUSH: {
+        // The filter region: the border box grown by 10% on every side.
+        double gx = c->w * 0.1 + 12, gy = c->h * 0.1 + 12;
+        double x, y, w, h;
+        ink_map(&m, c->x - gx, c->y - gy, c->w + 2 * gx, c->h + 2 * gy, &x, &y, &w, &h);
+        ink_add(box, x, y, w, h);
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      }
+      case CMD_MASK_PUSH: {
+        // Masked content paints within the mask's box, whatever the mask itself draws there.
+        double x, y, w, h;
+        ink_map(&m, c->x, c->y, c->w, c->h, &x, &y, &w, &h);
+        ink_add(box, x, y, w, h);
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      }
+      case CMD_PERSPECTIVE_PUSH:
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      case CMD_LAYER_REF:
+        if (depth < 6 && c->layer >= 0 && c->layer < g_layer_count) {
+          CmdList *inner = &g_layers[c->layer].list;
+          ink_range(box, inner, 0, inner->count, m, depth + 1);
+        }
+        break;
+      default: {
+        double pad = 2;
+        if (c->kind == CMD_SHADOW || c->kind == CMD_SHADOW_INSET || c->kind == CMD_TEXT_SHADOW)
+          pad += fabs(c->dx) + fabs(c->dy) + 2 * fabs(c->blur) + fabs(c->line_width);
+        if (c->emphasis != 0) pad += 12;
+        double x = c->x, y = c->y, w = c->w, h = c->h;
+        if (c->kind == CMD_TEXT || c->kind == CMD_TEXT_SHADOW) {
+          w = (double)c->len * (c->size + fabs(c->letter) + fabs(c->word));
+          h = (c->line_height > c->size * 1.4 ? c->line_height : c->size * 1.4) + c->size * 0.5;
+          pad += c->size * 0.25;
+        }
+        double mx, my, mw, mh;
+        ink_map(&m, x - pad, y - pad, w + 2 * pad, h + 2 * pad, &mx, &my, &mw, &mh);
+        ink_add(box, mx, my, mw, mh);
+        break;
+      }
+    }
+  }
+}
+
 /**
  * Replays one layer: the commands from `i` (a CMD_EFFECT_PUSH) to its CMD_EFFECT_POP are drawn
  * into a bitmap covering the layer's filter region in device pixels, the filter chain runs on that
@@ -6854,12 +6955,24 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
   if (spec.alpha < 1 && spec.count == 0 && spec.bcount == 0 && spec.blend == 0) {
     CGContextSaveGState(ctx);
     CGContextSetAlpha(ctx, spec.alpha);
-    // The group's layer covers the box it paints, not the whole context: a fading word inside a
-    // masked column used to make a layer the size of the frame on every frame. 10% and a dozen
-    // pixels of room are the slack the filter path allows for edges and antialiasing.
+    // The layer covers the ink the group paints — children that overflow its border box, shadows,
+    // outlines, filtered children — not the whole context: a fading word inside a masked column
+    // used to make a layer the size of the frame on every frame. It is bounded, at least, by the
+    // border box with the slack the filter path allows, so a group that paints nothing still has
+    // a layer to fade.
+    size_t group_pop = skip_layer(i);
+    InkBox ink;
+    ink.any = 0;
+    ink_range(&ink, g_list, i + 1, group_pop, CGAffineTransformIdentity, 0);
     double gx = c->w * 0.1 + 12, gy = c->h * 0.1 + 12;
-    CGContextBeginTransparencyLayerWithRect(ctx, CGRectMake(c->x - gx, c->y - gy,
-                                                            c->w + 2 * gx, c->h + 2 * gy), NULL);
+    double bx = c->x - gx, by = c->y - gy, bw = c->w + 2 * gx, bh = c->h + 2 * gy;
+    if (ink.any) {
+      if (ink.x0 < bx) bx = ink.x0;
+      if (ink.y0 < by) by = ink.y0;
+      if (ink.x1 > bx + bw) bw = ink.x1 - bx;
+      if (ink.y1 > by + bh) bh = ink.y1 - by;
+    }
+    CGContextBeginTransparencyLayerWithRect(ctx, CGRectMake(bx, by, bw, bh), NULL);
     ReplayState plain;
     plain.depth = 0;
     plain.transforms = 0;

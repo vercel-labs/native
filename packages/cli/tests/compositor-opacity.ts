@@ -30,8 +30,12 @@ body { margin: 0; background: #060607; color: #f4f2ee; font: 20px/1.3 sans-serif
 #fade { position: absolute; left: 8px; top: 20px; width: 220px; padding: 6px; opacity: .45;
   background: #f4f2ee; color: #060607; border-radius: 6px; }
 #tick { position: absolute; left: 16px; top: 200px; font: 13px/18px monospace; }
+#over { position: absolute; left: 210px; top: 200px; width: 100px; height: 30px; opacity: .5;
+  background: #ff3b30; box-shadow: 0 0 16px 6px #6dffb0; }
+#over i { position: absolute; left: -30px; top: 6px; width: 40px; height: 18px; background: #2a7cff; }
 </style></head><body>
 <div id="masked"><div id="fade">a fading group inside a mask</div></div>
+<div id="over"><i></i></div>
 <div id="tick">0</div>
 <script src="app.ts"></script>
 </body></html>`);
@@ -88,6 +92,17 @@ for (let i = 0; i < n; i += 4) {
   if (a.rgba[i] !== 6 || a.rgba[i + 1] !== 6 || a.rgba[i + 2] !== 7) inked++;
 }
 ok("the page drew something", inked > 3000, `${inked} pixels are not the background`);
+// The group's ink outside its border box: the child that hangs 30 px past its left edge, and the
+// shadow that spreads past its top. An opacity group bounds its layer by this ink.
+function pixelAt(x: number, y: number): number[] {
+  const at = (y * a.w + x) * 4;
+  return [a.rgba[at], a.rgba[at + 1], a.rgba[at + 2]];
+}
+function notBackground(c: number[]): boolean {
+  return Math.abs(c[0] - 6) > 8 || Math.abs(c[1] - 6) > 8 || Math.abs(c[2] - 7) > 8;
+}
+ok("an overflowing child paints outside the group's border box", notBackground(pixelAt(190, 214)), `${pixelAt(190, 214)}`);
+ok("a shadow paints outside the group's border box", notBackground(pixelAt(255, 186)), `${pixelAt(255, 186)}`);
 ok("the presented frame holds the masked opacity group", differing === 0,
   `${differing} pixels differ by more than one step, worst ${worst}`);
 
