@@ -46,8 +46,10 @@ if (r.status !== 0) {
 const results: { path: string; status: string; reason?: string }[] = JSON.parse(readFileSync(out, "utf8")).results;
 const first = results.find((x) => x.path === "passes/page.html");
 const second = results.find((x) => x.path === "silent/page.html");
+// A page that never reports now names the test it is waiting on instead of coming back with
+// nothing: the failure is the page's, and its reason has to carry that test's name.
 const ok = first !== undefined && first.status === "pass" &&
-  second !== undefined && second.status === "error" && /no result/.test(second.reason ?? "");
+  second !== undefined && second.status === "fail" && /tests still waiting: second page test/.test(second.reason ?? "");
 console.log(`${ok ? "ok  " : "FAIL"} a page with no harness result is not credited with the previous page's`);
 if (!ok) console.log(`  got ${JSON.stringify({ first, second })}\n`);
 console.log(ok ? "\nall passed" : "\n1 failed");

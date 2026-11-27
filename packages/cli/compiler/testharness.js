@@ -104,6 +104,16 @@ function __hResult() {
 }
 
 function __hMaybeSettle() { __hResult(); }
+// The tests still unfinished, for the runner to name when a page never reports its outcome: a page
+// waiting on something that never happens is otherwise a silent "no result".
+window.__nativePendingTests = function () {
+  var pending = [];
+  for (var i = 0; i < __hTests.length; i++) {
+    if (!__hTests[i]._finished) pending.push(__hTests[i].name);
+  }
+  return pending.join(", ");
+};
+
 
 // A page may declare one implicit test for the whole document (`setup({single_test: true})`, or
 // simply assert at the top level and call done()), as WPT's harness has it.
@@ -394,6 +404,8 @@ function test(fn, name) {
   // as soon as it returns, before the next test reads the page, as WPT's harness has them.
   var t = __hTest(name === undefined ? (fn.name || "test") : name, false, true);
   __hRun(t, fn);
+  // A synchronous test is finished when its body returns: done() marks it, runs its cleanups and
+  // settles the count it took above.
   t.done();
   return t;
 }
@@ -420,10 +432,12 @@ function promise_test(fn, name, properties) {
       var prev = __hCurrent;
       __hCurrent = t;
       var p;
-      try { p = fn(t); } catch (e) { t._fail(e); __hCurrent = prev; __hPending--; __hMaybeSettle(); settle(); return; }
+      try { p = fn(t); } catch (e) { t._fail(e); t._finished = true; __hCurrent = prev; __hPending--; __hMaybeSettle(); settle(); return; }
       __hCurrent = prev;
-      Promise.resolve(p).then(function () { __hPending--; __hMaybeSettle(); settle(); },
-        function (e) { t._fail(e); __hPending--; __hMaybeSettle(); settle(); });
+      // A promise test is finished when its promise settles, either way: mark it so the pending
+      // report does not list it if the page times out waiting for another test.
+      Promise.resolve(p).then(function () { t._finished = true; __hPending--; __hMaybeSettle(); settle(); },
+        function (e) { t._fail(e); t._finished = true; __hPending--; __hMaybeSettle(); settle(); });
     });
   });
   return t;
@@ -484,12 +498,21 @@ function format_value(v) {
 }
 
 function __hFail(kind, a, b, message) {
-  var t = __hCurrent === null ? __hImplicit() : __hCurrent;
   var m = (message === undefined ? "" : message + ": ") + "expected " + format_value(b) + ", got " + format_value(a);
-  if (t === null) {
-    throw new Error(kind + ": " + m);
+  if (__hCurrent !== null) {
+    __hCurrent._fail(new Error(kind + ": " + m));
+    return;
   }
-  t._fail(new Error(kind + ": " + m));
+  // A page's own implicit test (setup({single_test: true})) hears an assertion made outside any
+  // step.
+  if (__hImplicitTest !== null) {
+    __hImplicitTest._fail(new Error(kind + ": " + m));
+    return;
+  }
+  // Otherwise the assertion throws, as WPT's do: in a promise test's continuation that rejects the
+  // test's promise, which fails the test that made it. Making an implicit test instead would leave
+  // a test nothing ever finishes, and the page would wait for ever.
+  throw new Error(kind + ": " + m);
 }
 
 function __hSame(a, b) {
