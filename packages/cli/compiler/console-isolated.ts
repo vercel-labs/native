@@ -156,7 +156,12 @@ function (jsonText) {
     }
     return String(reason);
   }
-  globalThis.__inspectRun = function (source) {
+  // The host calls these across the realm boundary, so an expression must not be able to replace
+  // them: a replaced helper could return a context object that the host is asked to convert.
+  function expose(name, value) {
+    Object.defineProperty(globalThis, name, { value: value, writable: false, enumerable: false, configurable: false });
+  }
+  expose("__inspectRun", function (source) {
     var value;
     lastThenable = null;
     try {
@@ -184,11 +189,11 @@ function (jsonText) {
       }
     }
     return stringify({ value: describe(value) });
-  };
-  globalThis.__inspectThenable = function () {
+  });
+  expose("__inspectThenable", function () {
     return lastThenable === null ? "null" : stringify(lastThenable);
-  };
-  globalThis.__inspectLogs = function () { return stringify(logs); };
+  });
+  expose("__inspectLogs", function () { return stringify(logs); });
 }`;
 
 /**
@@ -208,17 +213,29 @@ const input = await new Promise((resolve) => {
 const { snapshotJson, expression } = JSON.parse(input);
 const context = vm.createContext(vm.constants.DONT_CONTEXTIFY);
 vm.runInContext("(" + sandboxSource + ")(" + JSON.stringify(snapshotJson) + ")", context, { timeout: 1000 });
-let raw;
-try {
-  raw = String(vm.runInContext("__inspectRun(" + JSON.stringify(expression) + ")", context,
-    { timeout: 1000, displayErrors: false }));
-} catch (err) {
-  raw = JSON.stringify({ exception: err && err.message ? err.message : String(err) });
+// Everything the context returns is untrusted data. Only a primitive string is read from it:
+// converting a context value (String(), a template literal, a property read) would run that
+// object's code in this realm, where its constructor chain reaches this realm's Function.
+function contextText(code) {
+  let value;
+  try {
+    value = vm.runInContext(code, context, { timeout: 1000, displayErrors: false });
+  } catch {
+    // A thrown value can be a context object too (a Proxy runs code when it is inspected), so
+    // nothing about it is read here: even typeof and instanceof would reach into the context.
+    return { error: "the console expression could not be evaluated" };
+  }
+  return typeof value === "string" ? { text: value } : {};
 }
+const run = contextText("__inspectRun(" + JSON.stringify(expression) + ")");
+let raw = run.text !== undefined ? run.text
+  : JSON.stringify({ exception: run.error !== undefined ? run.error : "the expression produced no result" });
 let thenable = null;
-try { thenable = JSON.parse(String(vm.runInContext("__inspectThenable()", context, { timeout: 1000 }))); } catch {}
+const thenableRun = contextText("__inspectThenable()");
+if (thenableRun.text !== undefined) { try { thenable = JSON.parse(thenableRun.text); } catch {} }
 let logs = [];
-try { logs = JSON.parse(String(vm.runInContext("__inspectLogs()", context, { timeout: 1000 }))); } catch {}
+const logsRun = contextText("__inspectLogs()");
+if (logsRun.text !== undefined) { try { logs = JSON.parse(logsRun.text); } catch {} }
 let answer;
 try { answer = JSON.parse(raw); } catch { answer = { exception: "the expression produced no result" }; }
 process.stdout.write(JSON.stringify({ answer, thenable, logs }));

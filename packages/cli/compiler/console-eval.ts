@@ -26,11 +26,12 @@ const REFLECTION_KEYS = new Set([
  * by `registerConsoleFunction`) and the helpers the evaluator makes for strings and arrays. Anything
  * else a value leads to is data, never a call target.
  */
-const callableFunctions = new WeakSet<object>();
+type ConsoleFunction = (...args: unknown[]) => unknown;
+const callableFunctions = new WeakSet<ConsoleFunction>();
 
 /** Registers a function the console is allowed to call; the inspector registers what it exposes. */
 export function registerConsoleFunction(value: unknown): void {
-  if (typeof value === "function") callableFunctions.add(value as object);
+  if (typeof value === "function") callableFunctions.add(value as ConsoleFunction);
 }
 
 interface Token {
@@ -317,10 +318,8 @@ class Evaluator {
     if (typeof object === "object") {
       // Only what the object itself carries: an inherited key is not the console's to read, and a
       // getter the inspector defined runs with its own object as `this`.
-      const descriptor = Object.getOwnPropertyDescriptor(object as object, name);
-      if (descriptor === undefined) return { value: undefined, receiver: object };
-      if (descriptor.get !== undefined) return { value: descriptor.get.call(object), receiver: object };
-      return { value: descriptor.value, receiver: object };
+      if (!Object.prototype.hasOwnProperty.call(object, name)) return { value: undefined, receiver: object };
+      return { value: (object as Scope)[name], receiver: object };
     }
     return { value: undefined, receiver: object };
   }
@@ -338,7 +337,7 @@ class Evaluator {
     const fn = callee.value;
     if (optional && (fn === null || fn === undefined)) return { value: undefined, receiver: undefined };
     if (typeof fn !== "function") throw new TypeError(`${describeCallee(fn)} is not a function`);
-    if (!callableFunctions.has(fn as object)) throw new TypeError("the console only calls the functions it exposes");
+    if (!callableFunctions.has(fn as ConsoleFunction)) throw new TypeError("the console only calls the functions it exposes");
     return { value: (fn as (...a: unknown[]) => unknown)(...args), receiver: undefined };
   }
 
@@ -378,9 +377,7 @@ class Evaluator {
       return items;
     }
     if (t.kind === "punct" && t.text === "{") {
-      // A literal has no prototype and its keys are ordinary data properties, so a key like
-      // `__proto__` can never point the object at a host value (and reflection keys are refused).
-      const object: Scope = Object.create(null) as Scope;
+      const object: Scope = {};
       while (!this.is("}")) {
         const key = this.next();
         if (key.kind !== "name" && key.kind !== "str" && key.kind !== "num") throw new SyntaxError(`unexpected '${key.text}' in an object literal`);
@@ -398,7 +395,10 @@ class Evaluator {
           this.expect(":");
           value = undefined;
         }
-        Object.defineProperty(object, name, { value, writable: true, enumerable: true, configurable: true });
+        // The keys that could reach a setter on Object.prototype (__proto__ and the rest of the
+        // reflection keys) are refused above, so this assignment only ever defines an own data
+        // property: the object can never be pointed at a host value.
+        object[name] = value;
         if (!this.is("}")) this.expect(",");
       }
       this.expect("}");

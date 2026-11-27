@@ -360,7 +360,9 @@ function consoleDom(snapshot: Snapshot): { document: unknown; getComputedStyle: 
     },
     querySelectorAll: (selector: string): unknown[] => snapshot.nodes.filter((n) => n.type === 1 && matches(n, selector)).map(view),
   });
-  for (const name of ["getElementById", "querySelector", "querySelectorAll"]) registerConsoleFunction((documentView as { [name: string]: unknown })[name]);
+  registerConsoleFunction(documentView.getElementById);
+  registerConsoleFunction(documentView.querySelector);
+  registerConsoleFunction(documentView.querySelectorAll);
   return {
     document: documentView,
     getComputedStyle: (el: unknown): { getPropertyValue: (name: string) => string } => {

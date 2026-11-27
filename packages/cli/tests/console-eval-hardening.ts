@@ -166,6 +166,24 @@ if (isolated === null) {
   check("Node run: the console reads the snapshot's DOM", dom.value?.value === "box", JSON.stringify(dom));
   const processType = answer("typeof process");
   check("Node run: process is not defined in the console", processType.value?.value === "undefined", JSON.stringify(processType));
+
+  // --- The helpers the host calls are out of the expression's reach, and the host reads only
+  // primitive strings from the context -----------------------------------------------------
+  // The expression replaces __inspectLogs with a function that returns an object whose
+  // Symbol.toPrimitive is a proxy. If the replacement sticks and the host converts the object, the
+  // proxy runs from this (host) realm; the console is asked for its logs after the expression.
+  const full = (expression: string): { logs?: { level?: unknown; text?: unknown }[] } =>
+    JSON.parse(isolated!.evaluateConsole(snapshot, expression)) as { logs?: { level?: unknown; text?: unknown }[] };
+  const replaced = full(`(globalThis.__inspectLogs = function () {
+    return { [Symbol.toPrimitive]: function () { return '[{"level":"log","text":"HIJACKED"}]'; } };
+  }, console.log("real log"), 1)`);
+  const texts = (replaced.logs ?? []).map((entry) => String(entry.text));
+  check("Node run: an expression cannot replace a helper the host calls",
+    texts.includes("real log") && !texts.includes("HIJACKED"), JSON.stringify(replaced.logs));
+  const descriptor = answer(`JSON.stringify(Object.getOwnPropertyDescriptor(globalThis, "__inspectLogs"))`);
+  const descriptorText = typeof descriptor.value?.value === "string" ? descriptor.value.value : "";
+  check("Node run: the helpers are non-writable and non-configurable",
+    descriptorText.includes('"writable":false') && descriptorText.includes('"configurable":false'), descriptorText);
 }
 
 if (failed > 0) {
