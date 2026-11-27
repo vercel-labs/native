@@ -22,7 +22,7 @@ import { evalExpr, exprHasCq, exprHasPercent } from "../shared/css/length-exprs.
 import { longhandIds } from "../shared/css/shorthands.ts";
 import { hasVar, substituteVars, wideKeyword } from "../shared/css/vars.ts";
 import { fitsSyntax } from "../shared/css/syntax.ts";
-import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
+import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, isInTopLayer, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
 import { textRunDependence } from "./text-runs.ts";
 import { animatedFontSize, elementMoves, noteComputed } from "./animation.ts";
 import { rootFontSize } from "./root-size.ts";
@@ -34,14 +34,19 @@ import { hostBackingScale, hostFontAscentDevice, hostFontDescentDevice, hostFont
 import { mediaMatches } from "./media.ts";
 import { containerMatches } from "./container.ts";
 import { hintDecls } from "./hints.ts";
-import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesReachBeyond, setCompiledSheetMediaSink, setCompiledSheetOffSink, setCounterStyleSink, setSheetContent } from "./sheets.ts";
+import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesReachBeyond, setCompiledSheetMediaSink, setCompiledSheetOffSink, setCounterStyleSink, setSheetContent, sheetLayerRank, sheetLayerTotal } from "./sheets.ts";
 import type { CSSStyleSheet, SheetRule } from "./sheets.ts";
 import { registrationCount, registeredProperty, registrations } from "./registered.ts";
 import { viewport } from "./viewport.ts";
+import { isQuirks } from "./quirk.ts";
 import { frameTimes } from "./frame-times.ts";
 
 export class StyleTables {
   ruleClasses: string[][] = [];
+  /** Class-prefix conditions on each rule's subject compound (".foo-*"). */
+  ruleClassPrefixes: string[][] = [];
+  /** The same condition on the ancestor compounds of each rule's chain. */
+  chainClassPrefixes: string[][][] = [];
   ruleStates: number[] = [];
   /** True for a rule whose declarations set a custom property (or hold a var()). */
   ruleCustoms: boolean[] = [];
@@ -375,7 +380,11 @@ function attrMatches(el: Element, enc: string): boolean {
   if (opWithFlag === "") return true;
   const op = opWithFlag.charAt(0);
   const flag = opWithFlag.slice(1);
-  const ci = flag === "i" || (flag === "" && attrDefaultsInsensitive(el, name));
+  // An author's own [id]/[class] condition is case-sensitive even in a quirks document. Only the
+  // condition a subject id becomes when a script may change markup ("Q") folds there, since it
+  // stands for the #id selector, which does.
+  const ci = flag === "i" || (flag === "Q" && isQuirks()) ||
+    (flag === "" && attrDefaultsInsensitive(el, name));
   const h = ci ? have.toLowerCase() : have;
   const w = ci ? want.toLowerCase() : want;
   if (op === "=") return h === w;
@@ -391,6 +400,36 @@ function attrMatches(el: Element, enc: string): boolean {
   if (op === "^") return h.length >= w.length && h.slice(0, w.length) === w;
   if (op === "$") return h.length >= w.length && h.slice(h.length - w.length) === w;
   if (op === "*") return h.indexOf(w) >= 0;
+  return false;
+}
+
+/** Whether a class token matches a class-prefix selector: it starts with the prefix, something
+ *  follows it, and what follows is not another "-" (the separator ends the prefix). */
+export function classPrefixFits(el: Element, prefix: string): boolean {
+  const names = el.classList.tokens();
+  // A quirks document reads the class attribute ASCII-lowercased, while the prefix itself keeps
+  // the case it was written with.
+  const fold = isQuirks();
+  for (let i = 0; i < names.length; i++) {
+    const n = fold ? names[i].toLowerCase() : names[i];
+    if (n.length > prefix.length && n.startsWith(prefix) && n.charAt(prefix.length) !== "-") return true;
+  }
+  return false;
+}
+
+/** Whether an id matches a selector's id: a quirks document reads ids case-insensitively. */
+function idFits(el: Element, want: string): boolean {
+  if (el.id === want) return true;
+  return isQuirks() && el.id.toLowerCase() === want.toLowerCase();
+}
+
+/** Whether the class list carries a class: a quirks document folds the name too. */
+function classFits(el: Element, want: string): boolean {
+  if (el.classList.contains(want)) return true;
+  if (!isQuirks()) return false;
+  const lower = want.toLowerCase();
+  const names = el.classList.tokens();
+  for (let i = 0; i < names.length; i++) if (names[i].toLowerCase() === lower) return true;
   return false;
 }
 
@@ -414,9 +453,11 @@ function encodedMatches(el: Element, enc: string): boolean {
     if (kind === "t") {
       if (el.localName !== v) return false;
     } else if (kind === "i") {
-      if (el.id !== v) return false;
+      if (!idFits(el, v)) return false;
     } else if (kind === "c") {
-      if (!el.classList.contains(v)) return false;
+      if (!classFits(el, v)) return false;
+    } else if (kind === "p") {
+      if (!classPrefixFits(el, v)) return false;
     } else if (kind === "s") {
       const s = Number(v);
       if ((s & P.S_FORM_STATES) !== 0) refreshFormState(el, s);
@@ -474,17 +515,57 @@ function hasApplies(el: Element, list: readonly string[]): boolean {
   for (const raw of list) {
     const at = raw.indexOf("\u0003");
     const lead = at < 0 ? "" : raw.slice(0, at);
-    const body = at < 0 ? raw : raw.slice(at + 1);
+    let body = at < 0 ? raw : raw.slice(at + 1);
+    // A leading \u0005 marks an argument whose leading combinator relates the :is() compound's
+    // own subject to the anchor (`:has(> :is(.a > .b))`).
+    const onSubject = body.charAt(0) === "\u0005";
+    if (onSubject) body = body.slice(1);
     const comb = lead === ">" ? COMB_CHILD : lead === "+" ? COMB_ADJACENT
       : lead === "~" ? COMB_GENERAL : COMB_DESCENDANT;
-    if (hasOne(el, comb, body)) return true;
+    if (hasOne(el, comb, body, onSubject)) return true;
   }
   return list.length === 0;
 }
 
-function hasOne(anchor: Element, comb: number, body: string): boolean {
+function hasOne(anchor: Element, comb: number, body: string, onSubject: boolean = false): boolean {
   const sels = parsedHas(body);
   if (sels === null) return false;
+  if (onSubject) {
+    // The related element is the argument's subject: `:has(> :is(.a > .b))` wants a child that
+    // matches `.b`, with `.a` above it. Its chain is a constraint on ancestors, not the anchor
+    // relation.
+    const at = (c: Element): boolean => {
+      for (const sel of sels) {
+        if (!compoundFits(c, sel)) continue;
+        if (!relatedTo(c, anchor, comb)) continue;
+        if (chainMatchesPlain(sel.chain, 0, c)) return true;
+      }
+      return false;
+    };
+    if (comb === COMB_ADJACENT) {
+      const s = anchor.nextElementSibling;
+      return s !== null && at(s);
+    }
+    if (comb === COMB_GENERAL) {
+      for (let s = anchor.nextElementSibling; s !== null; s = s.nextElementSibling) if (at(s)) return true;
+      return false;
+    }
+    if (comb === COMB_CHILD) {
+      for (const k of anchor.kids) if (k instanceof Element && at(k)) return true;
+      return false;
+    }
+    let found = false;
+    const walk = (n: Node): void => {
+      if (found) return;
+      for (const k of n.kids) {
+        if (!(k instanceof Element)) continue;
+        if (at(k)) { found = true; return; }
+        walk(k);
+      }
+    };
+    walk(anchor);
+    return found;
+  }
   const tryAt = (c: Element): boolean => {
     for (const sel of sels) {
       if (!compoundFits(c, sel)) continue;
@@ -523,6 +604,29 @@ function hasOne(anchor: Element, comb: number, body: string): boolean {
 function subtreeMatches(el: Element, f: (c: Element) => boolean): boolean {
   if (f(el)) return true;
   for (const kid of el.kids) if (kid instanceof Element && subtreeMatches(kid, f)) return true;
+  return false;
+}
+
+/** Does the element's ancestor/sibling chain match, with no relation to an anchor at its end? */
+function chainMatchesPlain(chain: ChainLink[], k: number, el: Element): boolean {
+  if (k === chain.length) return true;
+  const c = chain[k].comb;
+  if (c === COMB_ADJACENT) {
+    const s = el.previousElementSibling;
+    return s !== null && compoundFits(s, chain[k]) && chainMatchesPlain(chain, k + 1, s);
+  }
+  if (c === COMB_GENERAL) {
+    for (let s = el.previousElementSibling; s !== null; s = s.previousElementSibling) {
+      if (compoundFits(s, chain[k]) && chainMatchesPlain(chain, k + 1, s)) return true;
+    }
+    return false;
+  }
+  let a = el.parentElement;
+  while (a !== null) {
+    if (compoundFits(a, chain[k]) && chainMatchesPlain(chain, k + 1, a)) return true;
+    if (c === COMB_CHILD) return false;
+    a = a.parentElement;
+  }
   return false;
 }
 
@@ -565,7 +669,7 @@ function linkMatches(rule: number, k: number, el: Element): boolean {
   const tag = tables.chainTag[rule][k];
   if (tag !== "" && tag !== el.localName) return false;
   const id = tables.chainId[rule][k];
-  if (id !== "" && id !== el.id) return false;
+  if (id !== "" && !idFits(el, id)) return false;
   if (tables.chainRoot[rule][k] && el !== document.documentElement) return false;
   const states = tables.chainStates[rule][k];
   if ((states & P.S_FORM_STATES) !== 0) refreshFormState(el, states);
@@ -575,7 +679,10 @@ function linkMatches(rule: number, k: number, el: Element): boolean {
   const chainEndOf = rule < tables.chainNthEndOf.length && k < tables.chainNthEndOf[rule].length
     ? tables.chainNthEndOf[rule][k] : NO_OF;
   if (!nthApplies(el, tables.chainNthStart[rule][k], tables.chainNthEnd[rule][k], chainStartOf, chainEndOf)) return false;
-  for (const c of tables.chainClasses[rule][k]) if (!el.classList.contains(c)) return false;
+  for (const c of tables.chainClasses[rule][k]) if (!classFits(el, c)) return false;
+  const chainPrefixes = rule < tables.chainClassPrefixes.length && k < tables.chainClassPrefixes[rule].length
+    ? tables.chainClassPrefixes[rule][k] : undefined;
+  if (chainPrefixes !== undefined) for (const p of chainPrefixes) if (!classPrefixFits(el, p)) return false;
   for (const a of tables.chainAttrs[rule][k]) if (!attrMatches(el, a)) return false;
   if (!langApplies(el, rule < tables.chainLang.length && k < tables.chainLang[rule].length
     ? tables.chainLang[rule][k] : NO_LANG)) return false;
@@ -620,6 +727,8 @@ function chainMatches(rule: number, k: number, el: Element): boolean {
  *  the rules its own classes name instead of the whole table. A page whose elements are built
  *  by script (a UI kit, a list rendered a few rows a frame) asks this for every element. */
 let dynIndexFor: number[] | null = null;
+/** The document mode the index was built for: a quirks document folds names. */
+let dynIndexQuirks = false;
 let dynByClass: Map<string, number[]> = new Map();
 let dynNoClass: number[] = [];
 let dynSeen: Int32Array = new Int32Array(0);
@@ -629,8 +738,12 @@ let dynCandidates: number[] = [];
 /** Builds the class index once per compiled rule table. */
 function dynIndex(): void {
   const dynRules = tables.dynRules;
-  if (dynIndexFor === dynRules) return;
+  // A quirks document reaches a rule through a class or id in any case, so the index it builds
+  // folds the names; a runner that shows pages of both kinds rebuilds it when the mode changes.
+  const fold = isQuirks();
+  if (dynIndexFor === dynRules && dynIndexQuirks === fold) return;
   dynIndexFor = dynRules;
+  dynIndexQuirks = fold;
   dynByClass = new Map();
   dynNoClass = [];
   dynSeen = new Int32Array(dynRules.length);
@@ -642,10 +755,11 @@ function dynIndex(): void {
       continue;
     }
     for (let c = 0; c < classes.length; c++) {
-      let list = dynByClass.get(classes[c]);
+      const key = fold ? classes[c].toLowerCase() : classes[c];
+      let list = dynByClass.get(key);
       if (list === undefined) {
         list = [];
-        dynByClass.set(classes[c], list);
+        dynByClass.set(key, list);
       }
       list.push(i);
     }
@@ -670,8 +784,9 @@ function resolveDynamicRules(el: Element): void {
   // reached through the classes the element actually has.
   for (let i = 0; i < dynNoClass.length; i++) addCandidate(dynNoClass[i]);
   const names = el.classList.tokens();
+  const fold = isQuirks();
   for (let k = 0; k < names.length; k++) {
-    const list = dynByClass.get(names[k]);
+    const list = dynByClass.get(fold ? names[k].toLowerCase() : names[k]);
     if (list === undefined) continue;
     for (let i = 0; i < list.length; i++) addCandidate(list[i]);
   }
@@ -682,13 +797,17 @@ function resolveDynamicRules(el: Element): void {
   const placeholder: number[] = [];
   const carriers = new Map<number, number[]>();
   let states = 0;
+  // A document's author rules style the document's own elements, not a shadow tree's: the rules
+  // that tree's sheets carry are matched when the sheet is read (see selectorFitsSheet).
+  const inShadow = shadowRootOf(el) !== null;
   for (let c = 0; c < candidates.length; c++) {
     const i = candidates[c];
     const tag = tables.dynTags[i];
     const id = tables.dynIds[i];
     if (tag !== "" && tag !== el.localName) continue;
-    if (id !== "" && id !== el.id) continue;
+    if (id !== "" && !idFits(el, id)) continue;
     const r = tables.dynRules[i];
+    if (inShadow && !tables.ruleUa[r]) continue;
     const pseudo = tables.dynPseudo[i];
     if (pseudo === P.PE_NONE) rules.push(r);
     else if (pseudo === P.PE_BEFORE) before.push(r);
@@ -1028,7 +1147,16 @@ function collectCustoms(el: Element, runtime: RuntimeMatch[], parent: Node | nul
         if (isCustom(prop)) setCustom(raw, prop, tables.textDeclValues[id], fromParent);
       }
     }
-    for (const m of runtime) {
+    // Important declarations reverse the layer order, as applyRuntime does for the properties it
+    // sets: the earliest layer's !important wins. Apart from the layers the matches stay in
+    // cascade order: ascending specificity, then source order.
+    let matches = runtime;
+    if (important && runtime.length > 1) {
+      const total = sheetLayerTotal();
+      matches = runtime.slice().sort((a, b) =>
+        (total - a.layer) - (total - b.layer) || a.spec - b.spec || a.order - b.order);
+    }
+    for (const m of matches) {
       for (const d of m.rule.decls) {
         if ((d.important === true) !== important) continue;
         if (d.prop !== undefined && isCustom(d.prop)) setCustom(raw, d.prop, d.value === undefined ? "" : d.value, fromParent);
@@ -1688,7 +1816,9 @@ function ruleApplies(el: Element, rule: number): boolean {
   const test = origin;
   // The subject's own tests come first: a rule that names a class this element doesn't have — the
   // common case — costs one lookup rather than the media, container and scope lookups below.
-  for (const c of tables.ruleClasses[rule]) if (!test.classList.contains(c)) return false;
+  for (const c of tables.ruleClasses[rule]) if (!classFits(test, c)) return false;
+  const prefixes = rule < tables.ruleClassPrefixes.length ? tables.ruleClassPrefixes[rule] : undefined;
+  if (prefixes !== undefined) for (const p of prefixes) if (!classPrefixFits(test, p)) return false;
   if (!ruleMediaHolds(rule)) return false;
   // A rule inside @container applies while a matching ancestor container's size says so. The
   // generated box of a pseudo-element asks about the containers around the element that makes it.
@@ -1737,7 +1867,7 @@ function dynamicPseudoRules(el: Element, kind: number): number[] {
     const tag = tables.dynTags[i];
     const id = tables.dynIds[i];
     if (tag !== "" && tag !== el.localName) continue;
-    if (id !== "" && id !== el.id) continue;
+    if (id !== "" && !idFits(el, id)) continue;
     out.push(tables.dynRules[i]);
   }
   return out;
@@ -2216,7 +2346,7 @@ function syncCarriers(el: Element): void {
   carrierRuleIndex();
   const take = (i: number): void => {
     const id = tables.dynIds[i];
-    if (id !== "" && id !== el.id) return;
+    if (id !== "" && !idFits(el, id)) return;
     const r = tables.dynRules[i];
     // Only a rule that matches now gives the element a carrier: the class or state test is the
     // cascade's own, so a rule that matches later is picked up by a later pass.
@@ -2572,7 +2702,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     applyCounters(el);
   }
   // Generated content: the pseudo-element's text comes from `content`, and one whose content
-  // is none isn't generated at all, so it gets no box. A marker draws the list marker instead.
+  // is none isn't generated at all, so it gets no box. A marker draws the list marker instead,
+  // and a ::backdrop is no generated content either: the top layer paints its box.
   if (el instanceof Element) {
     if (!runningPrepass) {
       if (el.pseudoKind === P.PE_MARKER) applyMarker(el);
@@ -2580,7 +2711,7 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
         el.pseudoKind !== P.PE_FIRST_LINE && el.pseudoKind !== P.PE_FIRST_LETTER &&
         el.pseudoKind !== P.PE_SELECTION && el.pseudoKind !== P.PE_HIGHLIGHT &&
         el.pseudoKind !== P.PE_TARGET_TEXT && el.pseudoKind !== P.PE_SCROLL_MARKER &&
-        el.pseudoKind !== P.PE_SCROLL_MARKER_GROUP) applyContent(el);
+        el.pseudoKind !== P.PE_SCROLL_MARKER_GROUP && el.pseudoKind !== P.PE_BACKDROP) applyContent(el);
     }
     // Every list item has a marker box, including one that only became a list item at runtime.
     if (sv[P.P_DISPLAY] === P.D_LIST_ITEM && el.markerPseudo === null) el.ensureMarker();
@@ -2591,6 +2722,12 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     if (el.pseudoKind === P.PE_NONE) syncScrollMarkers(el);
   }
   el.wasInline = false;
+  // CSS Position 4: an element in the top layer is positioned there whatever its style says, so
+  // a static or relative position computes to absolute.
+  if (!el.isTextNode && el.pseudoKind === P.PE_NONE && isInTopLayer(el) &&
+    (sv[P.P_POSITION] === P.POS_STATIC || sv[P.P_POSITION] === P.POS_RELATIVE)) {
+    sv[P.P_POSITION] = P.POS_ABSOLUTE;
+  }
   // An absolutely positioned box is blockified (except for a flex container, which stays flex).
   if (!el.isTextNode && (sv[P.P_POSITION] === P.POS_ABSOLUTE || sv[P.P_POSITION] === P.POS_FIXED)) {
     if (isInlineLevelDisplay(sv[P.P_DISPLAY])) {
@@ -2599,8 +2736,15 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
       sv[P.P_DISPLAY] = blockified(sv[P.P_DISPLAY]);
     }
   }
+  // The formatting context a box takes part in comes from the nearest ancestor that generates a
+  // box: a `display: contents` wrapper generates none, so its children are the outer container's
+  // own items and floats.
+  let boxParent: Node | null = parent;
+  while (boxParent !== null && !boxParent.isTextNode && boxParent.sv[P.P_DISPLAY] === P.D_CONTENTS) {
+    boxParent = boxParent.parentElement;
+  }
   // A float is block-level, whatever its display was. It has no effect on a flex item.
-  if (!el.isTextNode && sv[P.P_FLOAT] !== P.FL_NONE && (parent === null || !isFlexContainer(parent))) {
+  if (!el.isTextNode && sv[P.P_FLOAT] !== P.FL_NONE && (boxParent === null || !isFlexContainer(boxParent))) {
     const d = sv[P.P_DISPLAY];
     // One that was inline-level belongs to the inline content it sits in, not to the block flow
     // around it (CSS 2.1 9.5).
@@ -2618,15 +2762,8 @@ function computeStyleCore(el: Node, parent: Node | null): PrepassNode | null {
     // in an anonymous table (CSS 2.1 9.7, 17.2.1).
     else if (d >= P.D_TABLE_ROW_GROUP && d <= P.D_TABLE_CAPTION) sv[P.P_DISPLAY] = P.D_BLOCK;
   }
-  // A text node is no box of its own: inheriting `display: contents` from the box it sits in
-  // would leave it with nothing to lay out or paint it, so its text is inline there.
-  if (el.isTextNode && sv[P.P_DISPLAY] === P.D_CONTENTS) sv[P.P_DISPLAY] = P.D_INLINE;
-  // Flex and grid items are blockified; whitespace-only text in one isn't rendered. A display:
-  // contents box generates no box, so what it holds are items of the container the contents boxes
-  // are flattened into — the item parent is the nearest ancestor that generates a box.
-  let itemParent = parent;
-  while (itemParent !== null && itemParent.sv[P.P_DISPLAY] === P.D_CONTENTS) itemParent = itemParent.parentElement;
-  if (itemParent !== null && (isFlexContainer(itemParent) || isGridContainer(itemParent) || isLanesContainer(itemParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
+  // Flex and grid items are blockified; whitespace-only text in one isn't rendered.
+  if (boxParent !== null && (isFlexContainer(boxParent) || isGridContainer(boxParent) || isLanesContainer(boxParent)) && sv[P.P_DISPLAY] !== P.D_NONE) {
     // A text run's white space is not rendered as a flex item when it all collapses; a
     // preserved character such as an ideographic space makes it one.
     if (el.isTextNode && !/[^ \t\f\r\n]/.test(el.layoutText)) sv[P.P_DISPLAY] = P.D_NONE;
@@ -2793,6 +2930,8 @@ function sameCustoms(a: Map<string, string> | null, b: Map<string, string> | nul
  */
 let chainIndexFor: number[][] | null = null;
 let ancestorClassNames: Set<string> | null = null;
+/** The document mode the chain index was built for: a quirks document folds class names. */
+let chainIndexQuirks = false;
 let ancestorChainsTestMore = false;
 /**
  * The state bits a rule tests on a compound other than its subject — an ancestor or an earlier
@@ -2805,8 +2944,10 @@ let ancestorStates = 0;
 let notStates = 0;
 
 function ensureChainIndex(): void {
-  if (chainIndexFor === tables.chainComb) return;
+  const foldNames = isQuirks();
+  if (chainIndexFor === tables.chainComb && chainIndexQuirks === foldNames) return;
   chainIndexFor = tables.chainComb;
+  chainIndexQuirks = foldNames;
   ancestorClassNames = null;
   ancestorChainsTestMore = false;
   ancestorStates = 0;
@@ -2829,12 +2970,17 @@ function ensureChainIndex(): void {
       for (const link of links) {
         for (const c of link) {
           if (ancestorClassNames === null) ancestorClassNames = new Set<string>();
-          ancestorClassNames.add(c);
+          ancestorClassNames.add(foldNames ? c.toLowerCase() : c);
         }
       }
     }
     if (r < tables.chainId.length) {
       for (const id of tables.chainId[r]) if (id !== "") { ancestorChainsTestMore = true; break; }
+    }
+    if (r < tables.chainClassPrefixes.length) {
+      // A class prefix on an ancestor names no class to index, so any class change has to be
+      // checked against it.
+      for (const link of tables.chainClassPrefixes[r]) if (link.length > 0) { ancestorChainsTestMore = true; break; }
     }
     if (r < tables.chainAttrs.length) {
       for (const attrs of tables.chainAttrs[r]) if (attrs.length > 0) { ancestorChainsTestMore = true; break; }
@@ -2859,6 +3005,31 @@ function ensureChainIndex(): void {
   }
 }
 
+/** True when a generated box of `el` has a rule that tests the identity `el` just changed: the
+ *  subject of a pseudo-element rule is the element that generates the box (see ruleApplies), so
+ *  a class or attribute write there can start or stop matching one of its rules. */
+function pseudoRulesTestIdentity(el: Element, ident: IdentityChange): boolean {
+  const classes = ident.classes;
+  for (const c of el.kids) {
+    if (!(c instanceof Element) || c.pseudoKind === P.PE_NONE) continue;
+    for (const r of c.rules) {
+      if (classes !== null && classes.length > 0) {
+        // A quirks document folds the names it compares, so "Bar" removed still ends ".bar".
+        const foldIt = isQuirks();
+        for (const k of tables.ruleClasses[r]) {
+          const want = foldIt ? k.toLowerCase() : k;
+          for (let j = 0; j < classes.length; j++) {
+            const c2 = foldIt ? classes[j].toLowerCase() : classes[j];
+            if (c2 === want) return true;
+          }
+        }
+      }
+      if (ident.other && r < tables.ruleAttrs.length && tables.ruleAttrs[r].length > 0) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * True when the change to `el` can alter what a rule matches in its descendants: a class the page
  * names on an ancestor, an id or attribute test, a moved state a `:nth-*` or state rule below it
@@ -2873,6 +3044,9 @@ function descendantsCanSeeChange(el: Element, ident: IdentityChange, stateDelta:
   if (identityMoved && runtimeRulesExist()) return true;
   // A filter or a complex :not() argument can look at the element from a descendant's rule too.
   if (identityMoved && sideLookingRulesExist()) return true;
+  // A generated box is styled by the element that makes it, so a write here can move a rule its
+  // ::before, ::after or ::backdrop tests this element's classes or attributes in.
+  if (identityMoved && pseudoRulesTestIdentity(el, ident)) return true;
   // A filtered ancestor compound matches through its descendants' positions, so a restyled root
   // can change what a rule below it matches even when the root's own style did not move.
   if (chainNthOfRulesExist()) return true;
@@ -2882,7 +3056,8 @@ function descendantsCanSeeChange(el: Element, ident: IdentityChange, stateDelta:
   if (ident.classes !== null && ident.classes.length > 0) {
     if (ancestorChainsTestMore) return true;
     if (ancestorClassNames !== null) {
-      for (const c of ident.classes) if (ancestorClassNames.has(c)) return true;
+      const foldNames = isQuirks();
+      for (const c of ident.classes) if (ancestorClassNames.has(foldNames ? c.toLowerCase() : c)) return true;
     }
   }
   if (ident.other && ancestorChainsTestMore) return true;
@@ -3439,7 +3614,9 @@ function autoDirection(el: Element): number {
  */
 function applyDirHint(el: Element): void {
   let dir = el.getAttribute("dir");
-  if (dir === null && el.localName === "bdi") dir = "auto";
+  // A <bdi> is auto unless its dir names a direction: an invalid value is ignored, so the
+  // element keeps the auto default rather than inheriting.
+  if (el.localName === "bdi" && (dir === null || !/^(ltr|rtl|auto)$/i.test(dir.trim()))) dir = "auto";
   if (dir === null) return;
   const v = dir.trim().toLowerCase();
   let rtl: boolean;
@@ -3770,6 +3947,8 @@ interface RuntimeMatch {
   rule: SheetRule;
   spec: number;
   order: number;
+  /** The rule's cascade layer rank; unlayered rules sort above every layer. */
+  layer: number;
 }
 
 /**
@@ -3804,6 +3983,8 @@ function selectorFitsSheet(el: Element, sel: Selector, root: any): boolean {
     return slot !== null && shadowRootOf(slot) === root && compoundFits(el, sel);
   }
   if (root !== null && !insideShadowTree(el, root)) return false;
+  // A document's sheet styles the document's own elements, not the trees its elements host.
+  if (root === null && shadowRootOf(el) !== null) return false;
   return selectorFits(el, sel);
 }
 
@@ -3836,14 +4017,17 @@ function runtimeMatches(test: Element, pseudo: number): RuntimeMatch[] {
         if (!selectorFitsSheet(test, sel, root)) continue;
         if (sel.specificity > spec) spec = sel.specificity;
       }
-      if (spec >= 0) out.push({ rule, spec, order });
+      if (spec >= 0) out.push({ rule, spec, order, layer: sheetLayerRank(rule.layer) });
     }
   }
-  // Insertion sort by (specificity, source order): the cascade wants the last applied to win.
+  // Insertion sort by (layer, specificity, source order): the cascade wants the last applied to
+  // win, and a later layer outranks an earlier one.
   for (let i = 1; i < out.length; i++) {
     const m = out[i];
     let k = i - 1;
-    while (k >= 0 && (out[k].spec > m.spec || (out[k].spec === m.spec && out[k].order > m.order))) {
+    while (k >= 0 && (out[k].layer > m.layer ||
+      (out[k].layer === m.layer && (out[k].spec > m.spec ||
+        (out[k].spec === m.spec && out[k].order > m.order))))) {
       out[k + 1] = out[k];
       k--;
     }
@@ -3861,7 +4045,10 @@ function runtimeMatches(test: Element, pseudo: number): RuntimeMatch[] {
  */
 function elementDirection(el: Element): number {
   const dir = el.getAttribute("dir");
-  const value = dir !== null ? dir.trim().toLowerCase() : (el.localName === "bdi" ? "auto" : "");
+  let value = dir !== null ? dir.trim().toLowerCase() : "";
+  // A <bdi> is auto unless its dir names a direction: an invalid value is ignored, as browsers
+  // ignore it, so the element takes its direction from its contents.
+  if (el.localName === "bdi" && value !== "rtl" && value !== "ltr" && value !== "auto") value = "auto";
   if (value === "rtl") return P.DIR_RTL;
   if (value === "ltr") return P.DIR_LTR;
   if (value === "auto") {
@@ -3894,14 +4081,15 @@ function isEmptyElement(el: Element): boolean {
 
 function compoundFits(el: Element, c: Compound, scope: Element | null = null): boolean {
   if (!tagMatches(c, el.localName, el.namespaceURI)) return false;
-  if (c.id !== null && c.id !== el.id) return false;
+  if (c.id !== null && !idFits(el, c.id)) return false;
   if (c.root && el !== document.documentElement) return false;
   if (c.empty === true && !isEmptyElement(el)) return false;
   if (c.dir !== undefined && elementDirection(el) + 1 !== c.dir) return false;
   // :scope is the element a DOM API call was made on. A style sheet's selectors have none, where
   // parseSelector has already turned :scope into :root.
   if (c.scope === true && el !== (scope === null ? document.documentElement : scope)) return false;
-  for (const k of c.classes) if (!el.classList.contains(k)) return false;
+  for (const k of c.classes) if (!classFits(el, k)) return false;
+  if (c.classPrefixes !== undefined) for (const p of c.classPrefixes) if (!classPrefixFits(el, p)) return false;
   if ((c.states & P.S_FORM_STATES) !== 0) refreshFormState(el, c.states);
   if ((c.states & el.state) !== c.states) return false;
   if (!nthApplies(el, c.nthStart, c.nthEnd, c.nthStartOf ?? NO_OF, c.nthEndOf ?? NO_OF)) return false;
@@ -3960,7 +4148,14 @@ function runtimeChainFits(chain: ChainLink[], k: number, el: Element, scope: Ele
 function applyRuntime(el: Element, matched: RuntimeMatch[], important: boolean, parent: Node | null): void {
   const sv = el.sv;
   const su = el.su;
-  for (const m of matched) {
+  // Important declarations reverse the layer order: an earlier layer's !important beats a
+  // later one's, and an unlayered !important is the weakest of them.
+  let list = matched;
+  if (important && matched.length > 1) {
+    const total = sheetLayerTotal();
+    list = matched.slice().sort((a, b) => (total - a.layer) - (total - b.layer) || a.spec - b.spec || a.order - b.order);
+  }
+  for (const m of list) {
     for (const d of m.rule.decls) {
       if ((d.important === true) !== important) continue;
       if (d.prop !== undefined) {

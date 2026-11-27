@@ -1,7 +1,9 @@
 // :focus-visible matches the focus a UA shows a ring for: keyboard focus (Tab, or focus() after
-// a key press), and any focus of a text field, which always accepts keyboard input. A pointer
-// press focuses but doesn't match it. Each case pairs a focusable with the sibling box its
-// state colours, so a snapshot of one run shows what one interaction did.   npm test
+// a key press), any focus of a text field, which always accepts keyboard input, and a focused
+// element once a key arrives, since the key switches the page to keyboard modality. A pointer
+// press focuses but doesn't match it, and pressing the element that already has focus leaves the
+// ring it had. Each case pairs a focusable with the sibling box its state colours, so a snapshot
+// of one run shows what one interaction did.   npm test
 
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -47,6 +49,8 @@ const CASES: [string, string, string[]][] = [
   ["a text field is :focus-visible even when clicked", "click #in", [BLACK, BLACK, CYAN, BLACK]],
   ["focus() inside a click handler isn't :focus-visible", "click #go1", [BLACK, BLACK, BLACK, BLUE]],
   ["focus({focusVisible: true}) is :focus-visible", "click #go2", [BLACK, BLACK, BLACK, WHITE]],
+  ["a key press gives the focused element the ring", "click #a | key Enter", [RED, BLACK, BLACK, BLACK]],
+  ["a press on the focused element leaves its ring", "click #a | key Enter | click #a", [RED, BLACK, BLACK, BLACK]],
 ];
 
 let failed = 0;

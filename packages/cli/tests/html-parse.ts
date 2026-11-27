@@ -4,7 +4,7 @@
 //
 //   node tests/html-parse.ts
 
-import { parseHtml } from "../compiler/html.ts";
+import { decodeEntities, parseHtml } from "../compiler/html.ts";
 import { Diagnostics } from "../compiler/diagnostics.ts";
 import type { HElement } from "../compiler/html.ts";
 
@@ -98,6 +98,13 @@ function shape(src: string): { tags: string[]; body: string[] } {
   const s = shape(`<!DOCTYPE html><div id="box"></div>`);
   check("content with no body implies one", s.body.includes("div"), s.body.join(","));
   check("implied body sits in a single html", s.tags.filter((t) => t === "html").length === 1, s.tags.join(","));
+}
+
+// The HTML named character references are the spec's whole set, and their names are
+// case-sensitive as the tokenizer's are: `&infin;` used to stay as written.
+{
+  const d = decodeEntities("&minus;&infin; &AMP; &Amp; &#x221E;");
+  check("the spec's named references decode, case-sensitively", d === "−∞ & &Amp; ∞", d);
 }
 
 if (failed > 0) {

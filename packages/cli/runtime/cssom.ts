@@ -38,7 +38,8 @@ import { registerShadow, shadowList } from "./shadows.ts";
 import { areaList, lineNamesText, nameText, placementRow, registerAreaList, registerPlacement, registerTrackList, registerTrackName, trackList } from "./grid.ts";
 import type { TrackSize } from "./grid.ts";
 import { registerBorderImageRow } from "./border-image.ts";
-import { registerPaintUrl } from "./svg-paint.ts";
+import { paintUrlAt, registerPaintUrl } from "./svg-paint.ts";
+import { paintUrlIndex } from "../shared/svg-paint.ts";
 import { filterList, registerFilter } from "./filters.ts";
 import { listCss, lengthText as sharedLengthText, originRows, transformRows } from "../shared/css/transforms.ts";
 import { hasTransform, individualCss, originCss, transformCss } from "./transform.ts";
@@ -854,10 +855,17 @@ export function valueText(p: number, v: number, u: number, currentColor: number,
     case P.P_STROKE_DASHARRAY: return u === P.U_LIST ? dashText(v) : "none";
     case P.P_STROKE_DASHOFFSET: return lengthText(v, u);
     case P.P_FILL:
-    case P.P_STROKE:
+    case P.P_STROKE: {
       if (v === P.PAINT_NONE) return "none";
       if (v === P.PAINT_CURRENT) return "currentColor";
+      // A paint server keeps its url(#id) text: a script reading the computed value back gets the
+      // reference it wrote, as a browser answers, rather than the colour that url happens to use.
+      if (v <= P.PAINT_URL) {
+        const id = paintUrlAt(paintUrlIndex(v));
+        return id === null ? "none" : 'url("#' + id + '")';
+      }
       return v < 0 ? colorText(currentColor < 0 ? 0 : currentColor) : colorText(v);
+    }
     // A background longhand with no layer list keeps its initial value, which CSS names in words;
     // a list's own text isn't rebuilt here yet.
     case P.P_BACKGROUND_IMAGE:
@@ -994,6 +1002,9 @@ function filterText(el: Node, id: number): string {
           lengthText(op.dy, P.U_PX) + " " + lengthText(op.blur, P.U_PX) + ")";
         break;
       }
+      case P.FK_URL:
+        s += "url(#" + (paintUrlAt(op.a) ?? "") + ")";
+        break;
       default:
         break;
     }

@@ -413,6 +413,9 @@ static void test_walk(void) {
      more.count == 1 && more.chunks[0].first == 0 && more.chunks[0].count == 5, "");
   walk_root_len = 4;
   ok("a mask that never pops still falls back", comp_walk_grouped(&WALK_SOURCE, NULL, 1.0, &more) == 0, "");
+  walk_root_len = 5;
+  ok("the nested walk takes a mask as one chunk", comp_walk_nested(&WALK_SOURCE, NULL, 1.0, &more) == 1 &&
+     more.count == 1 && more.chunks[0].first == 0 && more.chunks[0].count == 5, "");
 }
 
 static void test_tiles(void) {

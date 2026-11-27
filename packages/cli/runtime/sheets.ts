@@ -5,6 +5,7 @@ import { Element, ShadowRoot } from "./dom.ts";
 // rules alongside the compiled ones (see the cascade in style.ts).
 
 import * as P from "../shared/props.ts";
+import { LayerRegistry } from "../shared/css/layers.ts";
 import { parseDeclarationBlock, skipString } from "../shared/css/declarations.ts";
 import { parseSelector, splitTopLevel } from "../shared/css/selectors.ts";
 import { COMB_ADJACENT, COMB_GENERAL } from "../shared/css/types.ts";
@@ -16,6 +17,35 @@ import { decodeCounterStyle, encodeCounterStyle, parseCounterStyle } from "../sh
 import type { CounterStyleSpec } from "../shared/css/counter-styles.ts";
 
 /** One style rule of a runtime sheet: its selectors, declarations and @media condition. */
+/**
+ * The cascade layers the runtime sheets declare, in the order the document meets them: a sheet a
+ * script writes puts its rules where its @layer blocks say, as a compiled sheet's do.
+ */
+let runtimeLayers = new LayerRegistry();
+let runtimeLayerOrder: { key: number[]; count: number } | null = null;
+
+function layerOrderOf(): { key: number[]; count: number } {
+  if (runtimeLayerOrder === null) runtimeLayerOrder = runtimeLayers.order();
+  return runtimeLayerOrder;
+}
+
+/** The rank of a layer id for normal declarations; -1 (unlayered) outranks every layer. */
+export function sheetLayerRank(layer: number): number {
+  const order = layerOrderOf();
+  return layer < 0 ? order.count : order.key[layer];
+}
+
+/** The number of layer positions, which reverses them for important declarations. */
+export function sheetLayerTotal(): number {
+  return layerOrderOf().count;
+}
+
+/** Forgets the layers a page declared, as the next page starts without them. */
+export function resetRuntimeLayers(): void {
+  runtimeLayers = new LayerRegistry();
+  runtimeLayerOrder = null;
+}
+
 export interface SheetRule {
   selectors: Selector[];
   decls: Decl[];
@@ -27,6 +57,8 @@ export interface SheetRule {
   cssText: string;
   /** Where the rule sits in its sheet's text, so the CSSOM list keeps the text's order. */
   pos: number;
+  /** The cascade layer the rule is inside (-1 outside every layer). */
+  layer: number;
 }
 
 /** An `@counter-style` rule of a runtime sheet, as the CSSOM's CSSCounterStyleRule shows it. */
@@ -1074,7 +1106,7 @@ export function parseRulesText(src: string, media: string, keepEmpty: boolean = 
   src = src.replace(/<!\[CDATA\[/g, (m) => " ".repeat(m.length)).replace(/\]\]>/g, (m) => " ".repeat(m.length));
   const rules: SheetRule[] = [];
   const counters: CounterRule[] = [];
-  parseBlock(src, media, "", rules, counters, keepEmpty);
+  parseBlock(src, media, "", rules, counters, -1, keepEmpty);
   return { rules, counters };
 }
 
@@ -1130,7 +1162,7 @@ function registerKeyframes(name: string, body: string): void {
 }
 
 function parseBlock(src: string, media: string, container: string, out: SheetRule[],
-  counters: CounterRule[], keepEmpty: boolean = false): void {
+  counters: CounterRule[], layer: number = -1, keepEmpty: boolean = false): void {
   let i = 0;
   while (i < src.length) {
     while (i < src.length && /\s/.test(src[i])) i++;
@@ -1156,16 +1188,39 @@ function parseBlock(src: string, media: string, container: string, out: SheetRul
       if (name === "media" && open < src.length) {
         const close = findClose(src, open);
         const query = queryText(m === null ? "" : src.slice(i + m[0].length, open));
-        parseBlock(src.slice(open + 1, close), media === "" ? query : media + " and " + query, container, out, counters);
+        parseBlock(src.slice(open + 1, close), media === "" ? query : media + " and " + query, container, out, counters, layer);
         i = close + 1;
         continue;
+      }
+      if (name === "layer") {
+        // `@layer name { … }` puts its rules in that layer (nested names allowed), and a bare
+        // `@layer { … }` opens an anonymous one; `@layer a, b;` only fixes the order.
+        const before = m === null ? "" : src.slice(i + m[0].length, open < src.length && (semi < 0 || open < semi) ? open : (semi < 0 ? src.length : semi));
+        const prelude = before.trim();
+        if (open < src.length && (semi < 0 || open < semi)) {
+          const close = findClose(src, open);
+          const inner = prelude === "" ? runtimeLayers.anonymous(layer) : runtimeLayers.declare(layer, prelude);
+          runtimeLayerOrder = null;
+          parseBlock(src.slice(open + 1, close), media, container, out, counters, inner);
+          i = close + 1;
+          continue;
+        }
+        if (semi >= 0) {
+          for (const part of prelude.split(",")) {
+            const nm = part.trim();
+            if (nm !== "") runtimeLayers.declare(layer, nm);
+          }
+          runtimeLayerOrder = null;
+          i = semi + 1;
+          continue;
+        }
       }
       if (name === "container" && open < src.length) {
         const close = findClose(src, open);
         // The build reads a condition's spacing the same way, and a container query can't nest
         // inside another one, so there is nowhere for a nested condition to go.
         const query = (m === null ? "" : src.slice(i + m[0].length, open)).trim().replace(/\s+/g, " ");
-        if (container === "") parseBlock(src.slice(open + 1, close), media, query, out, counters);
+        if (container === "") parseBlock(src.slice(open + 1, close), media, query, out, counters, layer);
         i = close + 1;
         continue;
       }
@@ -1220,6 +1275,6 @@ function parseBlock(src: string, media: string, container: string, out: SheetRul
       for (const x of d.decls) decls.push(x);
     }
     if (decls.length === 0 && !keepEmpty) continue;
-    out.push({ selectors, decls, media, container, selectorText, cssText: selectorText + " { " + body.trim() + " }", pos: i });
+    out.push({ selectors, decls, media, container, selectorText, cssText: selectorText + " { " + body.trim() + " }", pos: i, layer });
   }
 }

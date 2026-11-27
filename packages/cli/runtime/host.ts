@@ -101,6 +101,8 @@ export declare function hostEventPhase(): number;
 export declare function hostRefreshInterval(): number;
 /** How long until the display's next refresh in milliseconds; 0 when the host has no clock. */
 export declare function hostUntilRefresh(): number;
+/** Whether a canvas in the window presents through GL, whose swap waits for the display. */
+export declare function hostGlWindow(): number;
 export declare function hostEventX(): number;
 export declare function hostEventY(): number;
 export declare function hostViewWidth(): number;
@@ -438,6 +440,14 @@ export declare function hostCanvasSetFont(id: number, size: number, weight: numb
  * hue-rotate, invert, opacity.
  */
 export declare function hostCanvasSetFilter(id: number, def: string): void;
+/**
+ * Runs an inline SVG filter chain over a rect of the canvas bitmap, in device pixels: the filter
+ * region (x, y, w, h) the region's pixels are the source graphic, and the result replaces them.
+ * `def` is the definition runtime/svg-filters.ts compiles, with lengths already in device pixels;
+ * `linear` is 1 when color-interpolation-filters asks for linear RGB.
+ */
+export declare function hostCanvasSvgFilter(id: number, def: string, linear: number,
+  x: number, y: number, w: number, h: number): void;
 export declare function hostCanvasBeginPath(id: number): void;
 export declare function hostCanvasMoveTo(id: number, x: number, y: number): void;
 export declare function hostCanvasLineTo(id: number, x: number, y: number): void;
@@ -471,6 +481,9 @@ export declare function hostCanvasDrawPart(id: number, x: number, y: number, w: 
 
 /** The window's backing scale factor (2 on a retina display), 1 headless. */
 export declare function hostBackingScale(): number;
+/** The display's own scale factor (2 on a retina display), with or without a window on it: the
+ *  screen a first window opens on. */
+export declare function hostDisplayScale(): number;
 /** 1 when the system asks apps to reduce motion. */
 export declare function hostReducedMotion(): number;
 /** The system's appearance: 1 for dark, 0 for light. */

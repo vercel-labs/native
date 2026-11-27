@@ -20,10 +20,13 @@
 // inside it taking their own x/y/dx/dy, font and paint, and `text-anchor` moving a run of text to
 // its anchor point. Its glyphs are filled and stroked with the same paint properties a shape is.
 //
-// Not drawn yet: patterns, masks, filters, markers, `textPath`, and glyph positioning
-// (`textLength`, `letter-spacing`). An `opacity` on a group is multiplied into each shape below it
-// rather than compositing the group as one layer, so overlapping shapes show more of what is
-// behind them than a browser would.
+// An element naming a `filter` paints as a group: it is drawn into a layer the size of the root
+// bitmap, the filter runs over the region in device pixels, and the result is composited once
+// (see runtime/svg-filters.ts for the primitives).
+//
+// Not drawn yet: masks, markers, `textPath`, glyph positioning (`textLength`, `letter-spacing`),
+// and the filter primitives runtime/svg-filters.ts names as pass-throughs (feTile, feImage,
+// feMorphology, feConvolveMatrix, feComponentTransfer, the lighting and displacement ones).
 
 import * as P from "../shared/props.ts";
 import { rasterScale } from "./device.ts";
@@ -36,6 +39,7 @@ import {
   hostCanvasSetFillColor, hostCanvasSetStrokeColor, hostCanvasSetLineWidth, hostCanvasSetLineCap,
   hostCanvasSetLineJoin, hostCanvasSetLineDash, hostCanvasSave, hostCanvasRestore, hostCanvasClip,
   hostCanvasDraw, hostMeasureText, hostCanvasSetFont, hostCanvasFillText, hostCanvasStrokeText,
+  hostCanvasSetAlpha, hostCanvasSetComposite, hostCanvasDrawCanvas, hostCanvasSvgFilter,
 } from "./host.ts";
 import type { Element, Node } from "./dom.ts";
 import {
@@ -47,7 +51,7 @@ import {
 } from "../shared/css/transforms.ts";
 import type { Matrix4, TransformContext } from "../shared/css/transforms.ts";
 import { bboxOf, isPaintUrl, paintUrlIndex, type GradientLookup } from "../shared/svg-paint.ts";
-import { anchorOf, layoutText, type TextPiece } from "../shared/svg-text.ts";
+import { anchorOf, layoutText, ANCHOR_START, type TextPiece } from "../shared/svg-text.ts";
 import { dashRows } from "../shared/css/dasharray.ts";
 import {
   clipPathRows, REF_BORDER_BOX, REF_STROKE_BOX, REF_VIEW_BOX, SH_CIRCLE, SH_ELLIPSE, SH_INSET,
@@ -58,6 +62,8 @@ import { evalExpr } from "../shared/css/length-exprs.ts";
 import { compileValue } from "../shared/css/declarations.ts";
 import type { Decl } from "../shared/css/types.ts";
 import { drawGradient, paintUrlAt, resolveGradient } from "./svg-paint.ts";
+import { compileSvgFilter } from "./svg-filters.ts";
+import { elementFilter } from "./filters.ts";
 import { containerBasis, declaresProperty, fontKey } from "./style.ts";
 import { viewport } from "./viewport.ts";
 
@@ -468,6 +474,119 @@ function clipRef(el: Element): string {
   return ref.startsWith("#") ? ref.slice(1) : "";
 }
 
+
+/** The <filter> named by a url(#id) reference, or null when the id isn't a filter. */
+function filterById(ref: string): Element | null {
+  const id = ref.trim().replace(/^#/, "");
+  if (id === "" || ids === null) return null;
+  const target = ids.get(id);
+  return target !== undefined && svgName(target) === "filter" ? target : null;
+}
+
+/**
+ * The <filter> an element's filter names, or null. The cascade's filter list holds the reference
+ * when a rule (or a style="" read at runtime) set one — `filter: url(#f)` — and the presentation
+ * attribute is read when no declaration did, as it stands in for a zero-specificity one.
+ */
+function filterTarget(el: Element): Element | null {
+  if (el.sv[P.P_FILTER] >= 0) {
+    for (const op of elementFilter(el)) {
+      if (op.kind !== P.FK_URL) continue;
+      const ref = paintUrlAt(op.a);
+      const target = ref === null ? null : filterById(ref);
+      if (target !== null) return target;
+    }
+    return null;
+  }
+  const value = attrOrStyle(el, "filter");
+  if (value === "") return null;
+  const text = value.trim();
+  if (!/^url\(/i.test(text)) return null;
+  const close = text.indexOf(")");
+  if (close < 0) return null;
+  const ref = text.slice(4, close).trim();
+  return ref.startsWith("#") ? filterById(ref) : null;
+}
+
+/** An element's bounds in its own user space, the box a filter region measures in. */
+function filterBBox(node: Element, name: string, vw: number, vh: number): number[] {
+  if (name === "text") return textBBox(node, vw, vh);
+  if (name === "g" || name === "a" || name === "svg" || name === "use") {
+    const box = contentPaintBBox(node, vw, vh);
+    // A group whose drawn bounds the walk can't see (a <use> naming an icon, say) still has a
+    // region: the viewport stands in, so the filter paints something rather than nothing.
+    return box[2] > 0 && box[3] > 0 ? box : [0, 0, vw, vh];
+  }
+  return bboxOf(shapePath(name, (attr) => node.getAttribute(attr), vw, vh));
+}
+
+/** A user-space rect after a transform, as the box that holds every corner. */
+function transformBoxRect(box: number[], m: number[]): number[] {
+  const xs = [box[0], box[0] + box[2]], ys = [box[1], box[1] + box[3]];
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const x of xs) {
+    for (const y of ys) {
+      const X = m[0] * x + m[2] * y + m[4];
+      const Y = m[1] * x + m[3] * y + m[5];
+      if (X < x0) x0 = X;
+      if (Y < y0) y0 = Y;
+      if (X > x1) x1 = X;
+      if (Y > y1) y1 = Y;
+    }
+  }
+  return [x0, y0, x1 - x0, y1 - y0];
+}
+
+/**
+ * The bounds a group's contents paint in its own user space: the shapes contentBBox walks, and
+ * the text it leaves out. A filter region on a group of text needs the runs' boxes.
+ */
+function contentPaintBBox(el: Node, vw: number, vh: number): number[] {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (box: number[]): void => {
+    if (box[0] < x0) x0 = box[0];
+    if (box[1] < y0) y0 = box[1];
+    if (box[0] + box[2] > x1) x1 = box[0] + box[2];
+    if (box[1] + box[3] > y1) y1 = box[1] + box[3];
+  };
+  const walk = (node: Node, m: number[]): void => {
+    if (!node.isElementNode) return;
+    const e = node as Element;
+    if (e.sv[P.P_DISPLAY] === P.D_NONE) return;
+    const name = svgName(e);
+    if (skips(name)) return;
+    const m2 = mul(m, svgMatrix(e, vw, vh));
+    if (name === "g" || name === "a" || name === "svg") {
+      for (const kid of e.kids) walk(kid, m2);
+      return;
+    }
+    if (name === "text") {
+      add(transformBoxRect(textBBox(e, vw, vh), m2));
+      return;
+    }
+    const ops = shapePath(name, (attr) => e.getAttribute(attr), vw, vh);
+    if (ops.length > 0) add(bboxOf(transformOps(ops, m2)));
+  };
+  for (const kid of el.kids) walk(kid, [1, 0, 0, 1, 0, 0]);
+  if (!(x1 >= x0) || !(y1 >= y0)) return [0, 0, 0, 0];
+  return [x0, y0, x1 - x0, y1 - y0];
+}
+
+/** The bounds of a text's runs, with the font's ascent and descent around each baseline. */
+function textBBox(node: Element, vw: number, vh: number): number[] {
+  const runs = layoutText(textPieces(node, vw, vh, null), ANCHOR_START,
+    (text, size, font) => hostMeasureText(text, size, font, 0, 0));
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const r of runs) {
+    const w = hostMeasureText(r.text, r.size, r.font, 0, 0);
+    if (r.x < x0) x0 = r.x;
+    if (r.x + w > x1) x1 = r.x + w;
+    if (r.y - r.size * 0.8 < y0) y0 = r.y - r.size * 0.8;
+    if (r.y + r.size * 0.2 > y1) y1 = r.y + r.size * 0.2;
+  }
+  if (!(x1 >= x0) || !(y1 >= y0)) return [0, 0, 0, 0];
+  return [x0, y0, x1 - x0, y1 - y0];
+}
 
 /**
  * The user-space matrix a node draws with: its CSS `transform` and individual `translate`,
@@ -1043,9 +1162,81 @@ function drawChildren(el: Node, id: number, m: number[], vw: number, vh: number,
   for (const kid of el.kids) drawNode(kid, id, m, vw, vh, alpha, inh, depth, clips);
 }
 
+// ---------------------------------------------------------------------------
+// Layers
+
+// A filtered element is drawn into a bitmap of its own the size of the root SVG's bitmap, then
+// composited over its parent. The bitmaps are kept between paints and reused by nesting depth,
+// so an animating filter allocates nothing after its first frame.
+let layerCanvases: number[] = [];
+/** Each layer bitmap's size as of its last use, so only a resized root costs a resize. */
+let layerSizes: number[] = [];
+let layerDepth = 0;
+/** The root bitmap's size in device pixels, set by paintSvg for the layers drawn into it. */
+let svgPixelW = 0, svgPixelH = 0;
+
+/** A bitmap's size as one key: the host clamps a canvas to 16384 pixels on a side. */
+function layerSizeKey(): number {
+  return svgPixelW * 16384 + svgPixelH;
+}
+
+function layerCanvas(at: number): number {
+  let id = layerCanvases[at];
+  if (id === undefined) {
+    id = hostCanvasCreate(svgPixelW, svgPixelH);
+    layerCanvases[at] = id;
+    layerSizes[at] = layerSizeKey();
+  } else if (layerSizes[at] !== layerSizeKey()) {
+    hostCanvasResize(id, svgPixelW, svgPixelH);
+    layerSizes[at] = layerSizeKey();
+  }
+  return id;
+}
+
+function acquireLayer(): number {
+  const id = layerCanvas(layerDepth++);
+  hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
+  hostCanvasSetAlpha(id, 1);
+  hostCanvasSetComposite(id, 0);
+  hostCanvasClearRect(id, 0, 0, svgPixelW, svgPixelH);
+  return id;
+}
+
+function releaseLayer(): void {
+  if (layerDepth > 0) layerDepth--;
+}
+
+/**
+ * Draws a layer over its paint target, in device pixels: the whole bitmap, or the rect a filter
+ * wrote, with the opacity the element's group carries.
+ */
+function compositeLayer(id: number, layer: number, x: number, y: number, w: number, h: number,
+  alpha: number, clips: Clip[] = []): void {
+  if (!(w > 0) || !(h > 0) || !(alpha > 0)) return;
+  hostCanvasSave(id);
+  hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
+  // A filter runs on the element before its clip takes effect (Filter Effects orders filter,
+  // then clip-path), so the paint the filter read was unclipped and the clip is applied here,
+  // to the filtered result.
+  for (const clip of clips) clipTo(id, clip);
+  hostCanvasSetAlpha(id, alpha);
+  hostCanvasSetComposite(id, 0);
+  // A 1:1 blit of bitmap pixels: nearest sampling keeps the layer exactly as it was drawn.
+  hostCanvasDrawCanvas(id, layer, x, y, w, h, x, y, w, h, 0);
+  hostCanvasRestore(id);
+  // The host keeps global alpha and the blend mode beside its saved state, not in it: a Windows
+  // or Linux canvas comes back with the composite's alpha still set. The painter always draws at
+  // full alpha and source-over, so put both back.
+  hostCanvasSetAlpha(id, 1);
+  hostCanvasSetComposite(id, 0);
+}
+
 /**
  * Draws one element and its subtree. `inh` is the style of the <use> the element is referenced
  * through, which fills in the properties the element doesn't declare itself.
+ *
+ * An element naming a filter paints as a group: its own drawing goes into a layer, the filter
+ * runs over the region in device pixels, and that layer is composited once.
  */
 function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alpha: number,
   inh: UseStyle | null, depth: number, clips: Clip[]): void {
@@ -1054,10 +1245,31 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
   const node = el as Element;
   const name = svgName(node);
   if (skips(name)) return;
-  const m2 = mul(m, svgMatrix(node, vw, vh));
   const a = alpha * el.sv[P.P_OPACITY];
   if (!(a > 0)) return;
+  const m2 = mul(m, svgMatrix(node, vw, vh));
   const inner = withClips(node, m2, vw, vh, clips);
+  const filter = filterTarget(node);
+  if (filter === null) {
+    drawElement(node, name, id, m2, vw, vh, a, inh, depth, inner);
+    return;
+  }
+  // The filter reads the element unclipped, so the clip applies to its result (see below).
+  const layer = acquireLayer();
+  drawElement(node, name, layer, m2, vw, vh, 1, inh, depth, []);
+  // The filtered result replaces the paint within the filter region and nowhere else.
+  const row = compileSvgFilter(filter, node, filterBBox(node, name, vw, vh), m2, vw, vh,
+    svgPixelW, svgPixelH, (ref) => (ids === null ? undefined : ids.get(ref)));
+  if (row !== null) {
+    hostCanvasSvgFilter(layer, row.def, row.linear ? 1 : 0, row.x, row.y, row.w, row.h);
+    compositeLayer(id, layer, row.x, row.y, row.w, row.h, a, inner);
+  }
+  releaseLayer();
+}
+
+/** One element's own paint, with no layer of its own: the shapes, text, reference or children. */
+function drawElement(node: Element, name: string, id: number, m2: number[], vw: number, vh: number,
+  a: number, inh: UseStyle | null, depth: number, inner: Clip[]): void {
   if (name === "use") {
     drawUse(node, id, m2, vw, vh, a, inh, depth, inner);
     return;
@@ -1100,13 +1312,13 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
     fill = paintOf(node, P.P_FILL);
     stroke = paintOf(node, P.P_STROKE);
     width = strokeWidth(node.sv[P.P_STROKE_WIDTH], node.su[P.P_STROKE_WIDTH], vw, vh);
-    rule = el.sv[P.P_FILL_RULE] === P.FR_EVENODD ? 1 : 0;
-    fillOpacity = el.sv[P.P_FILL_OPACITY];
-    strokeOpacity = el.sv[P.P_STROKE_OPACITY];
-    cap = el.sv[P.P_STROKE_LINECAP];
-    join = el.sv[P.P_STROKE_LINEJOIN];
-    dash = dashOf(el.sv[P.P_STROKE_DASHARRAY], el.su[P.P_STROKE_DASHARRAY],
-      el.sv[P.P_STROKE_DASHOFFSET], el.su[P.P_STROKE_DASHOFFSET], vw, vh);
+    rule = node.sv[P.P_FILL_RULE] === P.FR_EVENODD ? 1 : 0;
+    fillOpacity = node.sv[P.P_FILL_OPACITY];
+    strokeOpacity = node.sv[P.P_STROKE_OPACITY];
+    cap = node.sv[P.P_STROKE_LINECAP];
+    join = node.sv[P.P_STROKE_LINEJOIN];
+    dash = dashOf(node.sv[P.P_STROKE_DASHARRAY], node.su[P.P_STROKE_DASHARRAY],
+      node.sv[P.P_STROKE_DASHOFFSET], node.su[P.P_STROKE_DASHOFFSET], vw, vh);
   } else {
     const color = styleOf(node, P.P_COLOR, inh);
     fill = resolveColor(styleOf(node, P.P_FILL, inh), color);
@@ -1222,6 +1434,10 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   el.svgPixelsW = pw;
   el.svgPixelsH = ph;
   const id = el.svgCanvas;
+  // A paint pass draws one SVG at a time, and its group layers nest within it.
+  svgPixelW = pw;
+  svgPixelH = ph;
+  layerDepth = 0;
   // The clear is in canvas space, so the identity transform restores it after the last pass's
   // per-shape transforms.
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);

@@ -3,8 +3,9 @@
 // can share them; the DOM reaches the window object through document.defaultView.
 
 import type { Element, EventListener, EventListenerOrEventListenerObject, ListenerOptions, ScrollToOptions, Selection, WindowEventMap } from "./dom.ts";
-import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
+import { Event, MediaQueryListEvent, MutationObserver, ResizeObserver, currentEvent, customElements, dispatch, document, dirty, getComputedStyle, hasTransientActivation, consumeUserActivation, setCurrentEvent, setDefaultView, setWindowEventHost, trusted } from "./dom.ts";
 import { CSS } from "./cssom.ts";
+import { rasterScale } from "./device.ts";
 import * as domIface from "./dom.ts";
 import * as highlightIface from "./highlights.ts";
 import * as intersectIface from "./intersection.ts";
@@ -20,7 +21,7 @@ import { localStorage, sessionStorage } from "./storage.ts";
 import { ServiceWorkerContainer } from "./updates.ts";
 import { invalidatePaint, invalidateStyle, layoutEpoch, markFullPaint } from "./invalidation.ts";
 import { viewport } from "./viewport.ts";
-import { hostBackingScale, hostQuit, hostPostMessage, hostWindowBlur, hostWindowClose, hostWindowFocus, hostWindowFrame, hostWindowId, hostWindowOpen, hostWindowSetFrame } from "./host.ts";
+import { hostQuit, hostPostMessage, hostWindowBlur, hostWindowClose, hostWindowFocus, hostWindowFrame, hostWindowId, hostWindowOpen, hostWindowSetFrame } from "./host.ts";
 import { mediaMatches, refreshSystemSettings } from "./media.ts";
 import { setTargetText } from "./target-text.ts";
 import { Clipboard } from "./clipboard.ts";
@@ -482,7 +483,10 @@ export class Window {
     return viewport.h;
   }
   get devicePixelRatio(): number {
-    const scale = hostBackingScale();
+    // The scale the picture is drawn at, not just the window's: a headless run rasterises its
+    // snapshot at 2x, and a canvas sized from a devicePixelRatio of 1 would be drawn at half that
+    // resolution and enlarged — soft, where the browser's own canvas is crisp.
+    const scale = rasterScale();
     return scale >= 1 ? scale : 1;
   }
 
@@ -566,9 +570,30 @@ export class Window {
       if (href !== "") this.location.href = href;
       return proxyFor(hostWindowId(), this.name);
     }
+    // A window this page already has open under that name is focused and handed back: reusing a
+    // named context is not a popup, so it needs no gesture, as in a browser.
+    if (target !== "" && target !== "_blank") {
+      const existing = namedWindows.get(target);
+      if (existing !== undefined) {
+        const proxy = proxies.get(existing);
+        if (proxy !== undefined && !proxy.closed) {
+          hostWindowFocus(existing);
+          return proxy;
+        }
+        namedWindows.delete(target);
+      }
+    }
+    // A page opens a new window only while a user gesture counts, as a browser's popup blocker
+    // has it: outside one the call does nothing and answers null.
+    if (!hasTransientActivation()) return null;
     const id = hostWindowOpen(route, target === "_blank" ? "" : target, features === undefined ? "" : features);
     if (id < 0) return null;
-    return proxyFor(id, target === "_blank" ? "" : target);
+    // The gesture that opened this window is spent, as a browser spends a transient activation on
+    // one popup.
+    consumeUserActivation();
+    const openedName = target === "_blank" ? "" : target;
+    if (openedName !== "") namedWindows.set(openedName, id);
+    return proxyFor(id, openedName);
   }
 
   /**
@@ -678,7 +703,10 @@ export class Window {
     if (listener === null) return;
     const capture = typeof options === "boolean" ? options : options !== undefined && options.capture === true;
     const once = typeof options === "object" && options !== null && options.once === true;
-    const passive = typeof options === "object" && options !== null && options.passive === true;
+    // A wheel or touch listener on the window is passive unless the options say otherwise.
+    const passive = typeof options === "object" && options !== null && options.passive !== undefined
+      ? options.passive === true
+      : type === "touchstart" || type === "touchmove" || type === "wheel" || type === "mousewheel";
     let list = this.listeners.get(type);
     if (list === undefined) {
       list = [];
@@ -743,11 +771,36 @@ export class Window {
 
   /** Dispatches an event at the window's listeners, without the document hearing it. */
   dispatchEvent(event: Event): boolean {
+    if (!(event instanceof Event)) throw new TypeError("Failed to execute 'dispatchEvent': parameter 1 is not of type 'Event'.");
+    // The same state checks EventTarget.dispatchEvent makes: an event already dispatching, or one
+    // document.createEvent() made and never initialized, is an error.
+    if (event.dispatchFlag) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event is already being dispatched.");
+    if (!event.initialized) throw new Error("InvalidStateError: Failed to execute 'dispatchEvent' on 'EventTarget': The event's initialized flag is not set.");
     // This is a dispatch of its own, even for an event that travelled through the page before:
     // its listeners hear it again, as EventTarget.dispatchEvent has it.
+    event.dispatchFlag = true;
     event.windowCaptureRan = false;
     event.windowBubbleRan = false;
-    dispatchWindow(event);
+    event.propagationStopped = false;
+    event.immediateStopped = false;
+    event.target = this as any;
+    event.currentTarget = this as any;
+    event.eventPhase = Event.AT_TARGET;
+    const outer = setCurrentEvent(event);
+    try {
+      dispatchWindow(event);
+    } finally {
+      // A listener that throws must not leave the dispatch's state behind: the outer event, the
+      // dispatch flag and the passive flag are put back whatever happened.
+      setCurrentEvent(outer);
+      event.eventPhase = Event.NONE;
+      event.currentTarget = null;
+      event.dispatchFlag = false;
+      event.passiveListener = false;
+      // Dispatch ends with the propagation flags clear, as the DOM's dispatch step has it.
+      event.propagationStopped = false;
+      event.immediateStopped = false;
+    }
     return !event.defaultPrevented;
   }
 
@@ -843,6 +896,8 @@ setWindowEventHost(window);
 
 /** The handles this page has on other windows, by id: the ones it opened, and its opener. */
 const proxies: Map<number, WindowProxy> = new Map();
+/** The windows this page has open by name, so a named open reuses one instead of opening again. */
+const namedWindows: Map<string, number> = new Map();
 
 /** The handle for a window id, made once and shared: two handles on one window are the same. */
 function proxyFor(id: number, name: string): WindowProxy {
@@ -1105,8 +1160,10 @@ export function dispatchWindow(event: Event): void {
       // dispatch() runs the window's listeners for an event that travelled through the page;
       // a caller that sends that event on afterwards reaches only the phase dispatch left.
       if (entry.capture ? event.windowCaptureRan : event.windowBubbleRan) continue;
+      event.passiveListener = entry.passive;
       if (entry.fn !== null) entry.fn.call(window, event);
       else if (entry.object !== null) (entry.object as { handleEvent(event: Event): void }).handleEvent(event);
+      event.passiveListener = false;
       if (event.immediateStopped) return;
     }
   }
@@ -1130,6 +1187,8 @@ export function dispatchTestRendered(): void {
   event.target = document;
   document.dispatchEvent(event);
 }
+
+export function resetLoadGate(): void { loadFired = false; }
 
 export function dispatchLoad(): void {
   if (loadFired) return;

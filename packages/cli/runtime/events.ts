@@ -46,8 +46,9 @@ export class Event {
   /** Whether the host generated the event: real input is trusted, script-made events are not. */
   isTrusted = false;
   readonly timeStamp: number;
-  /** The node the event is being dispatched to; null before dispatch. */
-  target: Node | EventTarget | null = null;
+  /** The node, window or plain event target the event is being dispatched to; null before
+   *  dispatch. */
+  target: Node | Window | EventTarget | null = null;
   /** The node, window or plain event target whose listeners are running; null outside one. */
   currentTarget: Node | Window | EventTarget | null = null;
   /** The legacy `srcElement`: the target, null before dispatch. */
@@ -66,6 +67,9 @@ export class Event {
   relatedNow: Node | null = null;
   /** True once the event has been dispatched: initEvent() refuses from then on. */
   dispatchFlag = false;
+  /** False for an event document.createEvent() made until initEvent() initializes it; a
+   *  constructed event starts initialized. Dispatching an uninitialized event is an error. */
+  initialized = true;
   /** Whether dispatch() has already run the window's capture listeners for this dispatch. A
    *  caller that sends the event on to the window afterwards must not run them a second time. */
   windowCaptureRan = false;
@@ -80,7 +84,10 @@ export class Event {
     this.bubbles = dictBool(init, "bubbles", false);
     this.cancelable = dictBool(init, "cancelable", false);
     this.composed = dictBool(init, "composed", false);
-    this.timeStamp = Date.now();
+    // A DOMHighResTimeStamp on the same clock as performance.now(), as browsers report it.
+    // An event timestamp is a clock a page can read, so it is coarsened as Chrome coarsens it:
+    // WPTs Event-timestamp-safe-resolution requires a resolution no better than 5 microseconds.
+    this.timeStamp = Math.floor(performance.now() * 200) / 200;
   }
   stopPropagation(): void {
     this.propagationStopped = true;
@@ -103,6 +110,7 @@ export class Event {
     this.type = String(type);
     this.bubbles = bubbles === true;
     this.cancelable = cancelable === true;
+    this.initialized = true;
     this.defaultPrevented = false;
     this.propagationStopped = false;
     this.immediateStopped = false;

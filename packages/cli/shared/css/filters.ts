@@ -163,10 +163,26 @@ export function filterList(prop: string, value: string, out: Decl[], p: number, 
   }
   if (text === "") return `invalid value '${value}' for '${prop}'`;
   const row: number[] = [];
-  for (const fn of splitFunctions(text.toLowerCase())) {
+  let note: string | null = null;
+  for (const fn of splitFunctions(text)) {
+    // A reference filter keeps its id: an id is case-sensitive, unlike a function's name.
+    const ref = /^url\(\s*(?:"([^"]*)"|'([^']*)'|([^)\s]*))\s*\)$/i.exec(fn);
+    if (ref !== null) {
+      const url = (ref[1] ?? ref[2] ?? ref[3] ?? "").trim();
+      if (!url.startsWith("#") || url.length < 2) return `unsupported filter reference '${fn}' in '${prop}'`;
+      if (prop === "backdrop-filter") return `unsupported filter function 'url()' in '${prop}'`;
+      if (fonts === undefined) {
+        out.push({ p, v: -1, u: P.U_NONE });
+        return null;
+      }
+      row.push(...fields(P.FK_URL, fonts.paint(url.slice(1)), P.U_NONE));
+      // The SVG painter runs the chain; a reference filter on an HTML box is not drawn yet.
+      if (note === null) note = "note: filter: url() renders on an element inside an inline <svg>; an HTML box ignores it for now";
+      continue;
+    }
     // Lower-casing the whole function would break a colour keyword's case only in ways CSS
     // ignores, and filter function names are case-insensitive: parse the lower-cased text.
-    const f = filterFunction(fn, prop);
+    const f = filterFunction(fn.toLowerCase(), prop);
     if (typeof f === "string") return f;
     for (const n of f) row.push(n);
   }
@@ -176,5 +192,5 @@ export function filterList(prop: string, value: string, out: Decl[], p: number, 
     return null;
   }
   out.push({ p, v: fonts.filter(row), u: P.U_LIST });
-  return null;
+  return note;
 }

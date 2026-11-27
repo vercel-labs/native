@@ -44,6 +44,7 @@
 #include <uiautomation.h>
 #include <uiautomationcoreapi.h>
 #include "windows_gl.h"
+#include "svg-filter.h"
 // SQLite: the Windows host calls the system's winsqlite3.dll, the SQLite Windows 10 and later
 // ship, through the import library a build makes from vendor/winsqlite3.def. The API is declared
 // here rather than included, since winsqlite3 brings no header and the host uses only these calls.
@@ -3636,11 +3637,40 @@ static void paint_shadow(const Cmd *c, int inset) {
   if (!g_d2d || !(c->w > 0) || !(c->h > 0)) return;
   double spread = c->line_width;
   double pad = fabs(c->dx) + fabs(c->dy) + c->blur * 3 + fabs(spread) + 2;
-  D2D1_RECT_F bounds;
-  if (!rect_bounds(D2D1::RectF((FLOAT)(c->x - pad), (FLOAT)(c->y - pad), (FLOAT)(c->x + c->w + pad),
-                               (FLOAT)(c->y + c->h + pad)),
-                   &bounds))
-    return;
+  // The box the shadow covers, in the page's own space, cut to the page. A shadow is the same
+  // picture wherever its element sits and however it is turned, so it is rastered and blurred
+  // here and laid down under the transform in effect: a shadow that moves or turns keeps the
+  // bitmap it was made with, and a turned one draws that silhouette turned.
+  D2D1_RECT_F bounds = D2D1::RectF((FLOAT)(c->x - pad), (FLOAT)(c->y - pad),
+                                   (FLOAT)(c->x + c->w + pad), (FLOAT)(c->y + c->h + pad));
+  // Cut to what the frame can see, in the page's own space: the view is the transform's inverse
+  // of the viewport. Clamping to 0..view drops a shadow whose page coordinates are outside that
+  // box because the page is scrolled, or because a transform brings them into view.
+  D2D1_MATRIX_3X2_F to_page = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+  g_d2d->GetTransform(&to_page);
+  {
+    D2D1::Matrix3x2F inv = *D2D1::Matrix3x2F::ReinterpretBaseType(&to_page);
+    if (!inv.Invert()) return;
+    double vx[4], vy[4];
+    double cx[4] = {0.0, g_view_w, 0.0, g_view_w};
+    double cy[4] = {0.0, 0.0, g_view_h, g_view_h};
+    for (int k = 0; k < 4; k++) {
+      vx[k] = cx[k] * inv._11 + cy[k] * inv._21 + inv._31;
+      vy[k] = cx[k] * inv._12 + cy[k] * inv._22 + inv._32;
+    }
+    double vx0 = vx[0], vx1 = vx[0], vy0 = vy[0], vy1 = vy[0];
+    for (int k = 1; k < 4; k++) {
+      if (vx[k] < vx0) vx0 = vx[k];
+      if (vx[k] > vx1) vx1 = vx[k];
+      if (vy[k] < vy0) vy0 = vy[k];
+      if (vy[k] > vy1) vy1 = vy[k];
+    }
+    if (bounds.left < (FLOAT)vx0) bounds.left = (FLOAT)vx0;
+    if (bounds.top < (FLOAT)vy0) bounds.top = (FLOAT)vy0;
+    if (bounds.right > (FLOAT)vx1) bounds.right = (FLOAT)vx1;
+    if (bounds.bottom > (FLOAT)vy1) bounds.bottom = (FLOAT)vy1;
+  }
+  if (!(bounds.right > bounds.left) || !(bounds.bottom > bounds.top)) return;
   int pw = (int)ceil((bounds.right - bounds.left) * g_scale);
   int ph = (int)ceil((bounds.bottom - bounds.top) * g_scale);
   if (pw < 1 || ph < 1 || (double)pw * ph > 64.0 * 1024 * 1024) return;
@@ -3666,10 +3696,9 @@ static void paint_shadow(const Cmd *c, int inset) {
   }
   // The silhouette: the border box grown by the spread for an outer shadow, and the ring the
   // offset leaves inside the box for an inset one.
-  D2D1_MATRIX_3X2_F m = shadow_page_transform();
   dc->BeginDraw();
   dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-  dc->SetTransform(matrix_product(D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top), m));
+  dc->SetTransform(D2D1::Matrix3x2F::Translation(-bounds.left, -bounds.top));
   ID2D1SolidColorBrush *white = solid_brush_on(dc, 0xffffffffu, 1);
   if (white) {
     if (!inset) {
@@ -4588,6 +4617,16 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
                            GetModuleHandleW(NULL), NULL);
   free(wide);
   if (!g_hwnd) return;
+  // The executable's icon resource (id 1, compiled from the page's PNG by windows-icon.ts): the
+  // titlebar, Alt-Tab and the taskbar read the window's icons. A build with no page icon has no
+  // resource, and LoadImage answers NULL, leaving the shell's default.
+  HMODULE module = GetModuleHandleW(NULL);
+  HICON icon_big = (HICON)LoadImageW(module, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0,
+                                     LR_DEFAULTSIZE | LR_SHARED);
+  if (icon_big) SendMessageW(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)icon_big);
+  HICON icon_small = (HICON)LoadImageW(module, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
+  if (icon_small) SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icon_small);
   // A machine with no input method installed gives a window no IME context, which leaves nothing
   // for a test to drive; NATIVE_IME_TEST gives the window a default one.
   if (getenv("NATIVE_IME_TEST") != NULL) {
@@ -5642,6 +5681,9 @@ double host_refresh_interval(void) {
  *  to read, so the loop paces itself by the period alone. */
 double host_until_refresh(void) { return 0; }
 
+/** No display link here: the runtime's timer paces frames. */
+int32_t host_gl_window(void) { return 0; }
+
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
@@ -6274,6 +6316,10 @@ int32_t host_snapshot_composited(const uint8_t *path, size_t path_len, double wi
 }
 
 double host_backing_scale(void) { return g_scale; }
+
+/** The display's scale, with or without a window on it: the default device scale, which a window
+ *  replaces with its own monitor's. */
+double host_display_scale(void) { return g_scale; }
 
 }  // extern "C"
 
@@ -8260,6 +8306,82 @@ void host_canvas_put_image_data(int32_t id, double dx, double dy, double w, doub
     src->Release();
   }
   free(bgra);
+}
+
+// An inline SVG filter: the region's pixels are copied out of the target bitmap, the chain runs
+// over them (the portable engine in svg-filter.c), and the result is drawn back at the region.
+// The region is in bitmap pixels, already clamped to the bitmap by the runtime.
+void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t linear,
+                            double x, double y, double w, double h) {
+  Canvas *c = canvas_at(id);
+  if (!c || !c->bitmap || !(w > 0) || !(h > 0)) return;
+  int x0 = (int)floor(x), y0 = (int)floor(y);
+  int x1 = (int)ceil(x + w), y1 = (int)ceil(y + h);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)c->w) x1 = (int)c->w;
+  if (y1 > (int)c->h) y1 = (int)c->h;
+  int iw = x1 - x0, ih = y1 - y0;
+  if (iw <= 0 || ih <= 0) return;
+  canvas_flush(c);
+  D2D1_BITMAP_PROPERTIES1 read_props = D2D1::BitmapProperties1(
+      (D2D1_BITMAP_OPTIONS)(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+  ID2D1Bitmap1 *read = NULL;
+  if (FAILED(c->dc->CreateBitmap(D2D1::SizeU((UINT32)iw, (UINT32)ih), NULL, 0, &read_props, &read)) || !read)
+    return;
+  D2D1_RECT_U region = {(UINT32)x0, (UINT32)y0, (UINT32)x1, (UINT32)y1};
+  D2D1_MAPPED_RECT mapped = {0};
+  uint8_t *buf = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+  if (buf && SUCCEEDED(read->CopyFromBitmap(NULL, c->bitmap, &region)) &&
+      SUCCEEDED(read->Map(D2D1_MAP_OPTIONS_READ, &mapped))) {
+    // The target holds premultiplied BGRA; the engine takes premultiplied RGBA.
+    for (int row = 0; row < ih; row++) {
+      const uint8_t *src = mapped.bits + (size_t)row * (size_t)mapped.pitch;
+      uint8_t *dst = buf + (size_t)row * (size_t)iw * 4;
+      for (int col = 0; col < iw; col++) {
+        dst[col * 4 + 0] = src[col * 4 + 2];
+        dst[col * 4 + 1] = src[col * 4 + 1];
+        dst[col * 4 + 2] = src[col * 4 + 0];
+        dst[col * 4 + 3] = src[col * 4 + 3];
+      }
+    }
+    read->Unmap();
+    svg_filter_apply(buf, iw, ih, (const char *)def, n, linear != 0);
+    uint8_t *bgra = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+    if (bgra) {
+      for (int row = 0; row < ih; row++) {
+        const uint8_t *src = buf + (size_t)row * (size_t)iw * 4;
+        uint8_t *dst = bgra + (size_t)row * (size_t)iw * 4;
+        for (int col = 0; col < iw; col++) {
+          dst[col * 4 + 0] = src[col * 4 + 2];
+          dst[col * 4 + 1] = src[col * 4 + 1];
+          dst[col * 4 + 2] = src[col * 4 + 0];
+          dst[col * 4 + 3] = src[col * 4 + 3];
+        }
+      }
+      D2D1_BITMAP_PROPERTIES1 write_props = D2D1::BitmapProperties1(
+          D2D1_BITMAP_OPTIONS_NONE,
+          D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+      ID2D1Bitmap1 *src = NULL;
+      ID2D1DeviceContext *dc = canvas_begin(c);
+      if (dc && SUCCEEDED(dc->CreateBitmap(D2D1::SizeU((UINT32)iw, (UINT32)ih), bgra,
+                                           (UINT32)iw * 4, &write_props, &src)) && src) {
+        D2D1_MATRIX_3X2_F saved;
+        dc->GetTransform(&saved);
+        dc->SetTransform(D2D1::IdentityMatrix());
+        dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+        D2D1_RECT_F dest = D2D1::RectF((FLOAT)x0, (FLOAT)y0, (FLOAT)x1, (FLOAT)y1);
+        dc->DrawBitmap(src, &dest, 1.0f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
+        dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+        dc->SetTransform(saved);
+        src->Release();
+      }
+      free(bgra);
+    }
+  }
+  free(buf);
+  read->Release();
 }
 
 // ---------------------------------------------------------------------------
