@@ -13107,8 +13107,9 @@ export class HTMLInputElement extends HTMLElement {
     return this.val;
   }
   set value(v: any) {
-    // A script may hand the field a number or null: a browser reads it as the field's text.
-    const given = v === null || v === undefined ? "" : typeof v === "string" ? v : String(v);
+    // A script may hand the field anything: the IDL attribute converts with ToString, with null
+    // as the one exception ({ [LegacyNullToEmptyString] }), so undefined reads as "undefined".
+    const given = v === null ? "" : typeof v === "string" ? v : String(v);
     // A date or time field holds a canonical value, or nothing when the text names none.
     const kind = dateKindOf(this.type);
     if (kind !== null) {
