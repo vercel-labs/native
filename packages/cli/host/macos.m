@@ -10721,6 +10721,14 @@ int32_t host_damage_can_merge(const uint8_t *serials, size_t n, const uint8_t *r
   (void)serials; // the boxes are named; the picture is patched over their rectangles
   (void)rects;
   if (!window_compositing() || g_pic_cur < 0 || n == 0 || m == 0) return 0;
+  // The picture holds the last frame at the size it was drawn: a window that changed size has
+  // none of this frame's size to patch, and a damaged list painted as a whole frame would show
+  // the rest of the page empty. The frame paints the page whole instead.
+  double scale = g_view != nil && g_view.window != nil ? (double)g_view.window.backingScaleFactor
+                                                       : host_backing_scale();
+  int pw = (int)lround(host_view_width() * scale);
+  int ph = (int)lround(host_view_height() * scale);
+  if (pw <= 0 || ph <= 0 || g_pic_w != pw || g_pic_h != ph) return 0;
   return 1;
 }
 
@@ -11378,6 +11386,9 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
     if (g_pic_cur >= 0 && g_pic_w == pw && g_pic_h == ph) {
       return composite_damaged_into(b, target, scale, pw, ph);
     }
+    // A damaged list is only part of the page: drawing it as a whole frame would show the rest
+    // empty. With no picture of this size to patch, leave the window showing what it has.
+    return 0;
   }
   if (g_win_scale != scale) {
     win_drop_all(); // the tiles were rastered for another scale
