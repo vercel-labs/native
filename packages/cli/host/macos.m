@@ -5819,10 +5819,15 @@ static size_t replay_range(CGContextRef ctx, size_t i, ReplayState *st) {
         continue;
       }
       CmdList *saved = g_list;
+      size_t saved_limit = g_replay_limit;
       if (c->layer >= 0 && c->layer < g_layer_count) {
         g_list = &g_layers[c->layer].list;
+        // The limit is an index into the list being replayed, so a layer reached from a chunk
+        // paints its own commands to their end rather than to the end of the chunk's range.
+        g_replay_limit = (size_t)-1;
         replay_range(ctx, 0, st);
       }
+      g_replay_limit = saved_limit;
       g_list = saved;
       continue;
     }
@@ -10167,9 +10172,12 @@ void host_present_region(const uint8_t *rects, size_t n, double width, double he
     host_present(width, height);
     return;
   }
-  if (window_compositing() && g_pic_chunked) {
+  if (window_compositing()) {
     // A transform-only frame is the compositor's own work: the tiles stay and are drawn again
     // under the new matrices, and the frame becomes the picture a damaged frame patches next.
+    // A picture the compositor couldn't chunk is not patchable: the window shows that picture,
+    // not the view's backing, so the frame is presented whole instead of over a backing that
+    // never held it.
     host_present(width, height);
     return;
   }
@@ -10446,14 +10454,27 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
       out->kind = COMP_CMD_LAYER_REF;
       out->layer = c->layer;
       return 1;
+    // The one kind carries how it opens, splits and closes: the walk needs to know which mask
+    // command closes the state the push opened.
     case CMD_MASK_PUSH:
+      out->kind = COMP_CMD_MASK;
+      out->op = 0;
+      return 1;
     case CMD_MASK_SPLIT:
+      out->kind = COMP_CMD_MASK;
+      out->op = 1;
+      return 1;
     case CMD_MASK_POP:
       out->kind = COMP_CMD_MASK;
+      out->op = 2;
       return 1;
     case CMD_PERSPECTIVE_PUSH:
+      out->kind = COMP_CMD_PERSPECTIVE;
+      out->op = 0;
+      return 1;
     case CMD_PERSPECTIVE_POP:
       out->kind = COMP_CMD_PERSPECTIVE;
+      out->op = 2;
       return 1;
     default: {
       out->kind = COMP_CMD_DRAW;
