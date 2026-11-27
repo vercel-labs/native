@@ -32,6 +32,12 @@ static double num(const char **pp) {
   return v;
 }
 
+/** A parsed number for an operation: inf and NaN (a hostile definition) become 0. */
+static double snum(const char **pp) {
+  double v = num(pp);
+  return isfinite(v) ? v : 0;
+}
+
 /** Whether the cursor is at the end of the operation. */
 static void skip_to_end(const char **pp) {
   const char *p = *pp;
@@ -114,16 +120,26 @@ static void buf_free(Buf *b) {
 /** Empties the pixels outside a primitive's subregion, in region-relative pixels. */
 static void clip_subregion(Buf *b, double x, double y, double w, double h) {
   if (!b->px) return;
-  if (!(w > 0) || !(h > 0)) {
+  // A subregion that isn't a finite rect, or one whose far edge overflows, paints nothing.
+  double x1 = x + w, y1 = y + h;
+  if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h) ||
+      !isfinite(x1) || !isfinite(y1) || !(w > 0) || !(h > 0)) {
     memset(b->px, 0, (size_t)b->w * (size_t)b->h * 4);
     return;
   }
-  int ix0 = (int)floor(x), iy0 = (int)floor(y);
-  int ix1 = (int)ceil(x + w), iy1 = (int)ceil(y + h);
-  if (ix0 < 0) ix0 = 0;
-  if (iy0 < 0) iy0 = 0;
-  if (ix1 > b->w) ix1 = b->w;
-  if (iy1 > b->h) iy1 = b->h;
+  // Intersect all four sides with the buffer before converting to integers: a primitive placed
+  // past either edge must not put ix0 above the width or ix1 below zero, or the memset below
+  // writes outside the row and the heap allocation. An empty intersection paints nothing.
+  double cx0 = x < 0 ? 0 : (x > b->w ? b->w : x);
+  double cy0 = y < 0 ? 0 : (y > b->h ? b->h : y);
+  double cx1 = x1 < 0 ? 0 : (x1 > b->w ? b->w : x1);
+  double cy1 = y1 < 0 ? 0 : (y1 > b->h ? b->h : y1);
+  int ix0 = (int)floor(cx0), iy0 = (int)floor(cy0);
+  int ix1 = (int)ceil(cx1), iy1 = (int)ceil(cy1);
+  if (!(ix1 > ix0) || !(iy1 > iy0)) {
+    memset(b->px, 0, (size_t)b->w * (size_t)b->h * 4);
+    return;
+  }
   for (int yy = 0; yy < b->h; yy++) {
     uint8_t *row = b->px + (size_t)yy * (size_t)b->w * 4;
     if (yy < iy0 || yy >= iy1) {
@@ -195,7 +211,8 @@ static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius,
  * Gaussian's deviation (the same sizes the CSS blur uses), so an SVG blur matches Chrome's.
  */
 static void blur_axis(uint8_t *px, int w, int h, double sigma, int horizontal) {
-  if (!(sigma > 0.3) || w < 1 || h < 1) return;
+  if (!(sigma > 0.3) || !isfinite(sigma) || w < 1 || h < 1) return;
+  if (sigma > 10000) sigma = 10000;
   double ideal = sqrt((12.0 * sigma * sigma / 3.0) + 1.0);
   int wl = (int)floor(ideal);
   if (wl % 2 == 0) wl--;
@@ -259,6 +276,7 @@ static void colour_matrix(Buf *b, const double *m) {
 // --- Compositing -------------------------------------------------------------
 
 static void offset_buf(const Buf *in, Buf *out, double dx, double dy) {
+  if (!isfinite(dx) || !isfinite(dy) || dx < -1e9 || dx > 1e9 || dy < -1e9 || dy > 1e9) return;
   int ix = (int)lround(dx), iy = (int)lround(dy);
   if (!in->px || !out->px) return;
   for (int y = 0; y < out->h; y++) {
@@ -448,51 +466,51 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
     if (!ok) break;
 
     if (kind == 't') { // pass-through
-      int idx = (int)num(&p);
+      int idx = (int)snum(&p);
       in1 = idx == -1 ? &source : idx == -2 ? &alpha : idx == -3 ? &clear
         : (idx >= 0 && idx < count ? &results[idx] : &clear);
       memcpy(out.px, in1->px, (size_t)w * (size_t)h * 4);
     } else if (kind == 'b') {
-      double sx = num(&p), sy = num(&p);
-      int idx = (int)num(&p);
+      double sx = snum(&p), sy = snum(&p);
+      int idx = (int)snum(&p);
       in1 = idx == -1 ? &source : idx == -2 ? &alpha : idx == -3 ? &clear
         : (idx >= 0 && idx < count ? &results[idx] : &clear);
       memcpy(out.px, in1->px, (size_t)w * (size_t)h * 4);
       blur_buf(&out, sx, sy);
     } else if (kind == 'o') {
-      double dx = num(&p), dy = num(&p);
-      int idx = (int)num(&p);
+      double dx = snum(&p), dy = snum(&p);
+      int idx = (int)snum(&p);
       in1 = idx == -1 ? &source : idx == -2 ? &alpha : idx == -3 ? &clear
         : (idx >= 0 && idx < count ? &results[idx] : &clear);
       offset_buf(in1, &out, dx, dy);
     } else if (kind == 'm') {
-      int idx = (int)num(&p);
+      int idx = (int)snum(&p);
       in1 = idx == -1 ? &source : idx == -2 ? &alpha : idx == -3 ? &clear
         : (idx >= 0 && idx < count ? &results[idx] : &clear);
       memcpy(out.px, in1->px, (size_t)w * (size_t)h * 4);
       double m[20];
-      for (int i = 0; i < 20; i++) m[i] = num(&p);
+      for (int i = 0; i < 20; i++) m[i] = snum(&p);
       colour_matrix(&out, m);
     } else if (kind == 'l') {
-      int mode = (int)num(&p);
-      int i1 = (int)num(&p), i2 = (int)num(&p);
+      int mode = (int)snum(&p);
+      int i1 = (int)snum(&p), i2 = (int)snum(&p);
       in1 = i1 == -1 ? &source : i1 == -2 ? &alpha : i1 == -3 ? &clear
         : (i1 >= 0 && i1 < count ? &results[i1] : &clear);
       in2 = i2 == -1 ? &source : i2 == -2 ? &alpha : i2 == -3 ? &clear
         : (i2 >= 0 && i2 < count ? &results[i2] : &clear);
       blend_buf(mode, in1, in2, &out);
     } else if (kind == 'e') {
-      int m = (int)num(&p);
+      int m = (int)snum(&p);
       if (m > SF_MAX_OPS) m = SF_MAX_OPS;
       const Buf *ins[SF_MAX_OPS];
       for (int i = 0; i < m; i++) {
-        int idx = (int)num(&p);
+        int idx = (int)snum(&p);
         ins[i] = idx == -1 ? &source : idx == -2 ? &alpha : idx == -3 ? &clear
           : (idx >= 0 && idx < count ? &results[idx] : &clear);
       }
       merge_buf(ins, m, &out);
     } else if (kind == 'f') {
-      double r = num(&p), g = num(&p), b = num(&p), a = num(&p);
+      double r = snum(&p), g = snum(&p), b = snum(&p), a = snum(&p);
       for (size_t i = 0; i < px; i++) {
         uint8_t *o = out.px + i * 4;
         o[0] = clamp_byte(r * a / 255.0);
@@ -501,18 +519,18 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
         o[3] = clamp_byte(a);
       }
     } else if (kind == 'c') {
-      int op = (int)num(&p);
-      double k1 = num(&p), k2 = num(&p), k3 = num(&p), k4 = num(&p);
-      int i1 = (int)num(&p), i2 = (int)num(&p);
+      int op = (int)snum(&p);
+      double k1 = snum(&p), k2 = snum(&p), k3 = snum(&p), k4 = snum(&p);
+      int i1 = (int)snum(&p), i2 = (int)snum(&p);
       in1 = i1 == -1 ? &source : i1 == -2 ? &alpha : i1 == -3 ? &clear
         : (i1 >= 0 && i1 < count ? &results[i1] : &clear);
       in2 = i2 == -1 ? &source : i2 == -2 ? &alpha : i2 == -3 ? &clear
         : (i2 >= 0 && i2 < count ? &results[i2] : &clear);
       composite_op(op, in1, in2, &out, k1, k2, k3, k4);
     } else if (kind == 'd') {
-      double dx = num(&p), dy = num(&p), sx = num(&p), sy = num(&p);
-      double c[4] = {num(&p), num(&p), num(&p), num(&p)};
-      int idx = (int)num(&p);
+      double dx = snum(&p), dy = snum(&p), sx = snum(&p), sy = snum(&p);
+      double c[4] = {snum(&p), snum(&p), snum(&p), snum(&p)};
+      int idx = (int)snum(&p);
       in1 = idx == -1 ? &source : idx == -2 ? &alpha : idx == -3 ? &clear
         : (idx >= 0 && idx < count ? &results[idx] : &clear);
       drop_shadow(in1, &out, dx, dy, sx, sy, c);
@@ -522,7 +540,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
     }
 
     // The primitive's subregion, in region-relative pixels, clips its output.
-    double sx = num(&p), sy = num(&p), sw = num(&p), sh = num(&p);
+    double sx = snum(&p), sy = snum(&p), sw = snum(&p), sh = snum(&p);
     clip_subregion(&out, sx, sy, sw, sh);
     skip_to_end(&p);
 

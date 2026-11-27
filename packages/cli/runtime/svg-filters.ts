@@ -130,7 +130,12 @@ function withOpacity(color: number, opacity: number): number {
   return (color & 0xffffff00) + Math.round(a);
 }
 
+/** A number as the host's definition takes it: a non-finite length (an overflowing attribute)
+ *  becomes 0 and a huge one is clamped, so no field can drive the host's index arithmetic. */
 function f(v: number): string {
+  if (!Number.isFinite(v)) return "0";
+  if (v > 1e9) v = 1e9;
+  else if (v < -1e9) v = -1e9;
   return String(round(v));
 }
 
