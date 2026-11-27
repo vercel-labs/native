@@ -14,6 +14,7 @@ import { installedPackage, nodeModulesDirs } from "./installed.ts";
 import { Diagnostics } from "./diagnostics.ts";
 import { domGlobalsModule } from "./dom-globals.ts";
 import { applyHostLink, buildTarget, buildingWindows, hostCommonCompileCommand, hostCompileCommand, hostCompositorCompileCommand, hostSources, hostSourceDigest, isCompositorBackend, prepareMetalShaders, windowsSqliteImportLibrary, MACOS } from "./native-host.ts";
+import { windowsIconObject } from "./windows-icon.ts";
 import { compileApp, type CompiledApp, type HandlerAttribute, type ScriptFile } from "./compile.ts";
 import { AssetBundle, copyBundle, publicDirOf, type BundleCopy, type BundleFile } from "./bundle.ts";
 import { workerEntries } from "./worker-entries.ts";
@@ -1957,8 +1958,9 @@ export function hostBuildKey(buildDir: string): string {
 }
 
 /** Compiles the host objects into `buildDir` when the keyed ones aren't there, and writes the
- *  host's ffi.json beside them. Answers the objects. */
-export function buildHostObjects(buildDir: string): string[] {
+ *  host's ffi.json beside them. `extraLibrary` is another object the link takes (the Windows app
+ *  icon's resource). Answers the objects. */
+export function buildHostObjects(buildDir: string, extraLibrary: string | null = null): string[] {
   const { sources, objects, builds, key, note } = hostObjectsPlan(buildDir);
   if (note !== "") {
     process.stderr.write(`native: ${note}; the app will compile the shaders when it starts\n`);
@@ -1987,6 +1989,7 @@ export function buildHostObjects(buildDir: string): string[] {
   }
   const manifest = JSON.parse(readFileSync(join(HOST, "ffi.json"), "utf8"));
   manifest.libraries = objects;
+  if (extraLibrary !== null) manifest.libraries.push(extraLibrary);
   // A Windows build links the import library for the system's winsqlite3.dll beside the host's
   // own objects; there is no sqlite3 to link the way Linux and macOS link theirs.
   if (buildingWindows()) manifest.libraries.push(windowsSqliteImportLibrary(HOST, buildDir));
@@ -2158,9 +2161,13 @@ export async function emitApp(built: AppBuild, out: string | null, dev: boolean 
     "",
   ].join("\n"));
 
-  // Native host: the objects cached per build directory, and the ffi manifest beside them.
+  // Native host: the objects cached per build directory, and the ffi manifest beside them. A
+  // Windows app's icon is a resource of the executable, so it is compiled into an object first
+  // and linked with the host's objects.
   progress?.phase("host");
-  buildHostObjects(buildDir);
+  const iconObject = buildingWindows() && info !== null && info.icon !== null && info.icon.type === "image/png"
+    ? windowsIconObject(buildDir, info.icon.source) : null;
+  buildHostObjects(buildDir, iconObject);
 
   // The program is written; only the page's tables are missing from it, since a release build
   // carries them as data. A build whose program is byte for byte the one the executable at this
