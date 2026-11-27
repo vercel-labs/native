@@ -88,5 +88,16 @@ check("16-bit samples use their high byte",
   pixels(png(1, 1, 2, 16, [Buffer.from([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc])])).join() ===
     "18,86,154,255");
 
+// A 16-bit tRNS key is compared at its full width: a pixel whose high byte matches but whose low
+// byte doesn't is a different colour, and stays opaque.
+check("a 16-bit grey tRNS key matches its whole sample",
+  pixels(png(2, 1, 0, 16, [Buffer.from([0x12, 0x34, 0x12, 0xff])], Buffer.from([0x12, 0x34]))).join() ===
+    "18,18,18,0,18,18,18,255");
+check("a 16-bit RGB tRNS key matches its whole sample",
+  pixels(png(2, 1, 2, 16,
+    [Buffer.from([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0x12, 0xff, 0x56, 0x78, 0x9a, 0xbc])],
+    Buffer.from([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]))).join() ===
+    "18,86,154,0,18,86,154,255");
+
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

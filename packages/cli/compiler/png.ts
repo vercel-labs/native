@@ -108,11 +108,15 @@ export function readPng(file: string): Raster | null {
     }
   }
   // A tRNS chunk names one transparent colour for the grey and RGB types; the value is a 16-bit
-  // sample per channel (an 8-bit image's value is its low byte). Palette alpha is handled above.
+  // sample per channel (an 8-bit image's value is its low byte). A 16-bit image's key is compared
+  // at its full width: two samples that share a high byte are not the same colour. Palette alpha
+  // is handled above.
   const transparentGray = color === 0 && alpha !== null && alpha.length >= 2
-    ? (depth === 16 ? alpha[0] : alpha[1]) : -1;
+    ? (depth === 16 ? (alpha[0] << 8) | alpha[1] : alpha[1]) : -1;
   const transparentRgb = color === 2 && alpha !== null && alpha.length >= 6
-    ? depth === 16 ? [alpha[0], alpha[2], alpha[4]] : [alpha[1], alpha[3], alpha[5]]
+    ? depth === 16
+      ? [(alpha[0] << 8) | alpha[1], (alpha[2] << 8) | alpha[3], (alpha[4] << 8) | alpha[5]]
+      : [alpha[1], alpha[3], alpha[5]]
     : null;
   const out = new Uint8Array(width * height * 4);
   const pixelBytes = channels * bytes;
@@ -130,7 +134,8 @@ export function readPng(file: string): Raster | null {
       } else if (color === 0) {
         const g = pixels[p];
         out[o] = out[o + 1] = out[o + 2] = g;
-        out[o + 3] = g === transparentGray ? 0 : 255;
+        const sample = depth === 16 ? (pixels[p] << 8) | pixels[p + 1] : g;
+        out[o + 3] = sample === transparentGray ? 0 : 255;
       } else if (color === 4) {
         const g = pixels[p];
         out[o] = out[o + 1] = out[o + 2] = g;
@@ -139,8 +144,18 @@ export function readPng(file: string): Raster | null {
         out[o] = pixels[p];
         out[o + 1] = pixels[p + bytes];
         out[o + 2] = pixels[p + 2 * bytes];
-        out[o + 3] = transparentRgb !== null && out[o] === transparentRgb[0] &&
-          out[o + 1] === transparentRgb[1] && out[o + 2] === transparentRgb[2] ? 0 : 255;
+        if (transparentRgb === null) {
+          out[o + 3] = 255;
+        } else if (depth === 16) {
+          const r = (pixels[p] << 8) | pixels[p + 1];
+          const g = (pixels[p + bytes] << 8) | pixels[p + bytes + 1];
+          const b = (pixels[p + 2 * bytes] << 8) | pixels[p + 2 * bytes + 1];
+          out[o + 3] = r === transparentRgb[0] && g === transparentRgb[1] &&
+            b === transparentRgb[2] ? 0 : 255;
+        } else {
+          out[o + 3] = out[o] === transparentRgb[0] && out[o + 1] === transparentRgb[1] &&
+            out[o + 2] === transparentRgb[2] ? 0 : 255;
+        }
       } else {
         out[o] = pixels[p];
         out[o + 1] = pixels[p + bytes];
