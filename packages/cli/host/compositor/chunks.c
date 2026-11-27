@@ -140,6 +140,11 @@ static int g_mask_seq = 0; // the mask ids handed out by the walk in progress
 
 void comp_walk_set_mask_split(int on) { g_mask_split = on ? 1 : 0; }
 
+/** How many masks one walk may split; the host's group table is the limit that matters. */
+static int g_mask_max = 8;
+
+void comp_walk_set_mask_max(int n) { g_mask_max = n > 0 ? n : 1; }
+
 int comp_walk_mask_split(void) {
   if (g_mask_split < 0) {
     const char *env = getenv("NATIVE_MASK_SPLIT");
@@ -221,7 +226,8 @@ static int mask_split_at(const CompCmdSource *src, void *ctx, int list_id, int a
 /** Whether everything a split mask paints can be drawn as chunks: a backdrop filter shows the
  *  frame behind it, a canvas changes its pixels without a new command, and a mask or projection
  *  inside the span orders its own pixels against the content's. */
-static int mask_span_ok(const CompCmdSource *src, void *ctx, int list_id, int first, int last) {
+static int mask_span_ok_depth(const CompCmdSource *src, void *ctx, int list_id, int first, int last,
+                              int depth) {
   for (int i = first; i < last; i++) {
     CompCmdView v;
     memset(&v, 0, sizeof(v));
@@ -229,8 +235,19 @@ static int mask_span_ok(const CompCmdSource *src, void *ctx, int list_id, int fi
     if (v.kind == COMP_CMD_EFFECT && v.backdrop) return 0;
     if (v.kind == COMP_CMD_DRAW && v.external) return 0;
     if ((v.kind == COMP_CMD_MASK || v.kind == COMP_CMD_PERSPECTIVE) && v.op == 0) return 0;
+    // A layer a chunk replay paints can hold a canvas or a video of its own, which the chunks
+    // would freeze at one frame of, so the refs are followed for it.
+    if (v.kind == COMP_CMD_LAYER_REF && depth < 8) {
+      int n = src->count(ctx, v.layer);
+      if (n < 0 || !mask_span_ok_depth(src, ctx, v.layer, 0, n, depth + 1)) return 0;
+    }
   }
   return 1;
+}
+
+/** Whether everything a split mask paints can be drawn as chunks (see mask_span_ok_depth). */
+static int mask_span_ok(const CompCmdSource *src, void *ctx, int list_id, int first, int last) {
+  return mask_span_ok_depth(src, ctx, list_id, first, last, 0);
 }
 
 /** Whether every clip open around a mask is a plain device rect, which a host can scissor by. */
@@ -522,7 +539,8 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         continue;
       }
     }
-    if (!grouped && c.kind == COMP_CMD_MASK && c.op == 0 && comp_walk_mask_split()) {
+    if (!grouped && c.kind == COMP_CMD_MASK && c.op == 0 && comp_walk_mask_split() &&
+        g_mask_seq < g_mask_max) {
       int plain = plain_clips_only(s);
       int axis = fabs(s->m.m[1]) < 1e-6 && fabs(s->m.m[4]) < 1e-6;
       // An opacity group above the mask fades the composed picture, which the chunks' own alphas

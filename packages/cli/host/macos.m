@@ -11456,6 +11456,9 @@ static void mask_surfaces_drop(void) {
     if (s->content_tex >= 0 && g_window_backend != NULL) {
       g_window_backend->vt->tex_destroy(g_window_backend, s->content_tex);
     }
+    if (s->composed_tex >= 0 && g_window_backend != NULL) {
+      g_window_backend->vt->tex_destroy(g_window_backend, s->composed_tex);
+    }
     s->alpha_tex = -1;
     s->content_tex = -1;
     s->composed_tex = -1;
@@ -11579,6 +11582,16 @@ static uint64_t mask_alpha_key(const MaskGroup *g, const CompWalk *walk) {
     if (walk->chunks[i].mask_role != COMP_MASK_ALPHA) continue;
     if (i >= g_win_count || g_win_chunks[i].pending || g_win_keys[i] == 0) return 0;
     h = key_mix(h, g_win_keys[i]);
+    // The chunk key leaves a plain clip out (it is the scissor the tiles are drawn under), so the
+    // clips go into the surface's key here: a clip that moves redraws the image.
+    for (int k = 0; k < walk->chunks[i].clip_count; k++) {
+      const CompWalkClip *cl = &walk->chunks[i].clips[k];
+      h = key_double(h, cl->x);
+      h = key_double(h, cl->y);
+      h = key_double(h, cl->w);
+      h = key_double(h, cl->h);
+      h = key_double(h, cl->r);
+    }
   }
   return h;
 }
@@ -11662,6 +11675,7 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
   CompWalk *walk = (CompWalk *)malloc(sizeof(CompWalk));
   // A mask is split into its image and its content only when this backend can composite them.
   comp_walk_set_mask_split(mask_split_wanted(b));
+  comp_walk_set_mask_max(MAX_MASK_GROUPS);
   int chunked = walk != NULL && comp_walk_nested(&METAL_CHUNK_SOURCE, NULL, scale, walk);
   if (chunked) mask_groups_collect(walk);
   else g_mask_group_count = 0;

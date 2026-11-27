@@ -131,6 +131,10 @@ int comp_walk_nested(const CompCmdSource *src, void *ctx, double scale, CompWalk
 void comp_walk_set_mask_split(int on);
 int comp_walk_mask_split(void);
 
+/** How many masks one walk may split: past it a mask stays one chunk, which a host whose group
+ *  table is smaller can still draw. 8 by default. */
+void comp_walk_set_mask_max(int n);
+
 /**
  * The same walk, for a host that rasters a chunk by replaying its range of commands with every
  * state in it: where comp_walk would hand the whole frame to the flat replay, the state that
