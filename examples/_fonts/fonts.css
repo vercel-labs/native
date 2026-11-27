@@ -1,0 +1,45 @@
+/* Geist Sans and Geist Mono, bundled locally for every example that wants them.
+ *
+ * Link this file from an example (`<link rel="stylesheet" href="../_fonts/fonts.css">`) and ask
+ * for the families by name. The files are the static 400, 500 and 600 faces from the `geist` npm
+ * package (SIL OFL 1.1, see LICENSE.txt), not the variable font: the Linux host reads a font
+ * file's own tables for its metrics, and the build skips remote `@font-face` URLs. A variable
+ * font also defaults to weight 400 unless its rule spells out a range, so three static faces are
+ * the smallest thing that renders 400, 500 and 600 as distinct weights everywhere.
+ */
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 400;
+  src: url("Geist-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 500;
+  src: url("Geist-Medium.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Geist Sans";
+  font-style: normal;
+  font-weight: 600;
+  src: url("Geist-SemiBold.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
+  src: url("GeistMono-Regular.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 500;
+  src: url("GeistMono-Medium.ttf") format("truetype");
+}
+@font-face {
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 600;
+  src: url("GeistMono-SemiBold.ttf") format("truetype");
+}
