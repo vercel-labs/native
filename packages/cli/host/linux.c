@@ -222,6 +222,10 @@ typedef struct {
   int ft_failed;
 } Face;
 
+// A family id at FF_CUSTOM and above is one the page's own tables declare (see props.ts); its
+// face index is the id minus FF_CUSTOM.
+#define FF_CUSTOM 7
+
 #define MAX_FACES 4096
 static Face g_faces[MAX_FACES];
 static int g_face_count = 0;
@@ -381,7 +385,7 @@ static Model model_for(double weight) {
 // The face a family gives a weight and style, as CSS's font matching picks it: a face of the
 // style the text asks for comes before any other, and among those the nearest weight range.
 static Face *face_for_family(int family_id, double w, int italic) {
-  int family = family_id - 6; // a face's index in the page's own tables
+  int family = family_id - FF_CUSTOM; // a face's index in the page's own tables
   Face *best = NULL;
   double best_dist = 0;
   for (int i = 0; i < g_face_count; i++) {
@@ -673,7 +677,7 @@ static Face *resolve_face(double weight) {
   if (run != NULL) {
     for (unsigned i = 0; i < run->cascade_count; i++) {
       int id = run->cascade[i];
-      Face *next = id < 6 ? system_face(id, w, italic) : face_for_family(id, w, italic);
+      Face *next = id < FF_CUSTOM ? system_face(id, w, italic) : face_for_family(id, w, italic);
       if (next != NULL && next->loaded) return next;
     }
   }
@@ -738,7 +742,7 @@ static FT_Face face_for_char(FT_Face primary, uint32_t cp, FeatureRun *run, doub
     split_weight(weight, &family_id, &w, &italic);
     for (unsigned i = 0; i < run->cascade_count; i++) {
       int id = run->cascade[i];
-      Face *next = id < 6 ? system_face(id, w, italic) : face_for_family(id, w, italic);
+      Face *next = id < FF_CUSTOM ? system_face(id, w, italic) : face_for_family(id, w, italic);
       if (next == NULL || !next->loaded) continue;
       FT_Face ft = face_ft(next);
       if (ft != NULL && FT_Get_Char_Index(ft, cp) != 0) return ft;
