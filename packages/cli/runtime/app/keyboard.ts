@@ -4,6 +4,7 @@ import * as P from "../../shared/props.ts";
 import { Node, Element, HTMLButtonElement, HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, InputEvent, KeyboardEvent, document, dispatch, trusted, implicitSubmit, markPaintDirty, invalidatePaint, focusState, setFocus, noteInput, noteUserActivation, dismissPopover, openSelectMenu, controlKind, rangeSpec, setRangeValue, CONTROL_NONE, CONTROL_RANGE, inDisabledFormControl, dateKind, dateSegments, dateTypeText, dateStepActive, dateMoveActive, dateClearActive, dateSetActive, editingHostFor } from "../dom.ts";
 import { deleteTextIn, insertTextInto, moveCaretIn, selectHost } from "../editable.ts";
 import { datePickerKey, closeDatePicker } from "../date-picker.ts";
+import { focusgroupBehavior, moveInSegment, rememberSegmentItem, segmentFor, segmentStop } from "./focusgroup.ts";
 import { caret, textAreaLineStarts } from "../paint.ts";
 import { textWidth } from "../layout.ts";
 import { padV } from "../layout/box-model.ts";
@@ -105,10 +106,36 @@ function sequentialFocus(): Element[] {
   return positive.concat(rest);
 }
 
+/** The page's tab stops: a focusgroup segment counts once, at the item Tab enters it at. */
+function tabStops(list: Element[]): Element[] {
+  const stops: Element[] = [];
+  for (const el of list) {
+    const seg = segmentFor(el);
+    if (seg === null || seg === el) {
+      stops.push(el);
+      continue;
+    }
+    if (segmentStop(seg) === el) stops.push(el);
+  }
+  return stops;
+}
+
 function cycleFocus(step: number): void {
-  const list = sequentialFocus();
+  const focused = focusState.el;
+  // Leaving a segment remembers the item it held, so Tab or Shift+Tab comes back to it.
+  if (focused !== null && focused instanceof Element) {
+    const seg = segmentFor(focused);
+    if (seg !== null && seg !== focused) rememberSegmentItem(seg, focused);
+  }
+  const list = tabStops(sequentialFocus());
   if (list.length === 0) return;
-  const i = focusState.el !== null ? list.indexOf(focusState.el) : -1;
+  let i = focused !== null ? list.indexOf(focused) : -1;
+  if (i < 0 && focused !== null && focused instanceof Element) {
+    // Focus was on an item that is not the segment's stop: leave from the segment's own place.
+    const seg = segmentFor(focused);
+    const stop = seg === null ? null : segmentStop(seg);
+    if (stop !== null) i = list.indexOf(stop);
+  }
   const next = list[(i + step + list.length) % list.length];
   setFocus(next, true);
   if (next instanceof HTMLInputElement) next.select();
@@ -423,6 +450,24 @@ export function keyDown(code: number, mods: number, text: string, repeat: boolea
     closeDatePicker();
     cycleFocus(ev.shiftKey ? -1 : 1);
     return;
+  }
+  // A focusgroup segment takes the arrow keys along its axis and Home/End to its ends, as Chrome
+  // does; a field or an editing host keeps them for its own caret.
+  if (code === KEY_LEFT || code === KEY_RIGHT || code === KEY_UP || code === KEY_DOWN || code === KEY_HOME || code === KEY_END) {
+    const plain = (mods & (MOD_META | MOD_CTRL | MOD_ALT | MOD_SHIFT)) === 0;
+    if (plain && target instanceof Element && !(target instanceof HTMLInputElement) &&
+      !(target instanceof HTMLTextAreaElement) && !(target instanceof HTMLSelectElement) && editingHostFor(target) === null) {
+      const seg = segmentFor(target);
+      if (seg !== null && seg !== target && focusgroupBehavior(seg) !== null) {
+        const key = code === KEY_LEFT ? "left" : code === KEY_RIGHT ? "right" : code === KEY_UP ? "up"
+          : code === KEY_DOWN ? "down" : code === KEY_HOME ? "home" : "end";
+        const to = moveInSegment(seg, target, key);
+        if (to !== null) {
+          setFocus(to, true);
+          return;
+        }
+      }
+    }
   }
   // Escape is the open auto popover's light dismiss; a cancelled keydown never gets here.
   if (code === KEY_ESCAPE) {
