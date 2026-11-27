@@ -7,6 +7,7 @@ import * as P from "../../shared/props.ts";
 import { setEnvironmentVariable } from "../../shared/css/vars.ts";
 import { Element, Node } from "../dom.ts";
 import { hostTitlebarArea, hostWindowDrag } from "../host.ts";
+import { windowControlsOverlay } from "../window-controls.ts";
 
 /** What the macOS titlebar leaves for the page with no window to ask (a headless run): the
  *  traffic lights take the first 78px of a 28px bar, or 86px of a 52px one with hidden-inset. */
@@ -19,6 +20,9 @@ function headlessArea(options: string, width: number): number[] {
 /** Publishes the titlebar area for env(); call after the window opens and when it resizes. */
 export function publishTitlebarArea(options: string, width: number, windowed: boolean): void {
   const area = windowed ? [hostTitlebarArea(0), hostTitlebarArea(1), hostTitlebarArea(2), hostTitlebarArea(3)] : headlessArea(options, width);
+  // The overlay API and env() read the same area: the navigator reports it even before the first
+  // frame, and geometrychange fires if a resize moves it.
+  windowControlsOverlay.set(area[2] > 0 && area[3] > 0, area);
   if (area[2] <= 0 && area[3] <= 0) return; // a default titlebar: env() takes its fallbacks
   setEnvironmentVariable("titlebar-area-x", `${area[0]}px`);
   setEnvironmentVariable("titlebar-area-y", `${area[1]}px`);

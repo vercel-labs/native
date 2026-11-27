@@ -26,6 +26,7 @@ import { mediaMatches, refreshSystemSettings } from "./media.ts";
 import { setTargetText } from "./target-text.ts";
 import { Clipboard } from "./clipboard.ts";
 import { setFollowLinkHook } from "./link-hook.ts";
+import { WindowControlsOverlay, WindowControlsOverlayGeometryChangeEvent, windowControlsOverlay } from "./window-controls.ts";
 
 // The audio element's engine registers here as the window loads, before any page markup is built.
 mediaElementIface.installMediaElement();
@@ -166,6 +167,9 @@ export class Navigator {
   /** The app's update check: an app whose web app manifest names `update_url` gets a
    *  registration here, with the browser's update()/updatefound shape. */
   readonly serviceWorker: ServiceWorkerContainer = new ServiceWorkerContainer();
+  /** The Window Controls Overlay: the titlebar region a page that draws under the titlebar can
+   *  lay out into, as env(titlebar-area-*) names it in CSS. */
+  readonly windowControlsOverlay = windowControlsOverlay;
 }
 
 export const navigator: Navigator = new Navigator();
@@ -462,6 +466,8 @@ export class Window {
   readonly ValidityState = domIface.ValidityState;
   readonly WebGL2RenderingContext = domIface.WebGL2RenderingContext;
   readonly WheelEvent = domIface.WheelEvent;
+  readonly WindowControlsOverlay = WindowControlsOverlay;
+  readonly WindowControlsOverlayGeometryChangeEvent = WindowControlsOverlayGeometryChangeEvent;
   readonly XMLDocument = domIface.XMLDocument;
   readonly implementation = domIface.implementation;
   readonly Highlight = highlightIface.Highlight;
