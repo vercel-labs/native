@@ -6024,6 +6024,7 @@ fn externalCoreFixtureModule(
     // The compile stage: author sources + staged SDK + static surface +
     // generated entry/profile, one scratch tree.
     const stage_run = b.addSystemCommand(&.{node});
+    stage_run.addFileArg(b.path("build/ts_run.mjs"));
     stage_run.addFileArg(b.path("packages/core/scripts/stage_external_core.mjs"));
     app_build.addViewFrontendInputs(b, b, stage_run);
     stage_run.addArg("--src");
