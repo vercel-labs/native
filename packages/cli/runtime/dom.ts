@@ -5391,11 +5391,11 @@ export class Element extends Node {
     return markupOfChildren(this);
   }
   set innerHTML(html: string) {
-    this.replaceChildren(...parseFragment(html));
+    this.replaceChildren(...parseFragment(html, this));
   }
   /** Parses markup that may hold declarative shadow roots, replacing this element's children. */
   setHTMLUnsafe(html: string): void {
-    const nodes = parseFragment(String(html));
+    const nodes = parseFragment(String(html), this);
     const keep: Node[] = [];
     for (const n of nodes) {
       if (n instanceof HTMLTemplateElement && adoptDeclarative(this, n)) continue;
@@ -5420,7 +5420,7 @@ export class Element extends Node {
   set outerHTML(html: string) {
     const parent = this.parentNode;
     if (parent === null) throw new Error("NoModificationAllowedError: the element has no parent");
-    const nodes = parseFragment(html);
+    const nodes = parseFragment(html, parent instanceof Element ? parent : null);
     const at = parent.kids.indexOf(this);
     parent.removeChild(this);
     for (let i = 0; i < nodes.length; i++) {
@@ -5433,7 +5433,7 @@ export class Element extends Node {
   }
 
   insertAdjacentHTML(where: string, html: string): void {
-    this.insertAdjacent(where, parseFragment(html), true);
+    this.insertAdjacent(where, parseFragment(html, this), true);
   }
   insertAdjacentElement(where: string, element: Element): Element | null {
     return this.insertAdjacent(where, [element], false) === null ? null : element;
@@ -16683,8 +16683,12 @@ function parseTarget(el: Element): Node {
   return el instanceof HTMLTemplateElement ? (el as HTMLTemplateElement).content : el;
 }
 
-/** Parses HTML text into detached nodes, as an innerHTML assignment does. */
-function parseFragment(html: string): Node[] {
+/**
+ * Parses HTML text into detached nodes, as an innerHTML assignment does. The context element is
+ * whose innerHTML is being set: its namespace (and an <svg>'s, its subtree's) is the namespace
+ * the top-level nodes get, so markup assigned into an <svg> makes SVG elements, not HTML ones.
+ */
+function parseFragment(html: string, context: Element | null = null): Node[] {
   const root = new DocumentFragment();
   const stack: Element[] = [];
   const top = (): Node => stack.length === 0 ? root : parseTarget(stack[stack.length - 1]);
@@ -16805,7 +16809,7 @@ function parseFragment(html: string): Node[] {
       else if (tag === "option") closeInScope(["option"], null);
       else if (tag === "optgroup") closeInScope(["option", "optgroup"], null);
       const el = document.createElement(tag);
-      const parent = stack.length === 0 ? null : stack[stack.length - 1];
+      const parent = stack.length === 0 ? context : stack[stack.length - 1];
       // An <svg> enters the SVG namespace, and so does its subtree — except inside foreignObject,
       // whose children are HTML again. Everything else keeps its parent's namespace.
       const SVG_NS = "http://www.w3.org/2000/svg";
