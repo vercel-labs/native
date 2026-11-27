@@ -351,6 +351,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/cli
 
+  examples/interval:
+    devDependencies:
+      '@native-sdk/cli':
+        specifier: workspace:*
+        version: link:../../packages/cli
+
   examples/kanban:
     dependencies:
       '@types/react':

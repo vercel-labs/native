@@ -7,15 +7,15 @@ body {
 }
 /* hidden-inset: the page draws under a transparent titlebar, so this bar is the drag region. */
 .bar {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center;
   height: env(titlebar-area-height, 40px);
-  padding: 0 18px 0 calc(env(titlebar-area-x, 0px) + 14px);
+  /* The same inset on both sides, so the bar sits symmetrically beside the traffic lights. */
+  padding: 0 calc(env(titlebar-area-x, 0px) + 14px);
   app-region: drag;
   font-family: "Geist Mono", monospace; font-size: 11px; font-weight: 500;
   letter-spacing: 0.08em; text-transform: uppercase;
 }
 .name { color: oklch(0.68 0 0); }
-.state { color: oklch(0.42 0 0); }
 main {
   flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
   gap: 28px; padding-bottom: 10px; app-region: no-drag;

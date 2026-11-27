@@ -1,7 +1,7 @@
 // A focus timer: pick a length, press Space, and the ring drains to a two-note chime.
 const STORE = "interval", R = 146, C = 2 * Math.PI * R;
 const $ = (id: string): HTMLElement => document.getElementById(id)!;
-const arc = $("arc"), timeEl = $("time"), labelEl = $("label"), stateEl = $("state");
+const arc = $("arc"), timeEl = $("time"), labelEl = $("label");
 const presets = document.querySelectorAll(".preset");
 
 // 60 hairline ticks around the ring, every fifth one longer and brighter.
@@ -23,10 +23,8 @@ function show(): void {
   const whole = Math.max(0, Math.ceil(remaining));
   const text = String(Math.floor(whole / 60)).padStart(2, "0") + ":" + String(whole % 60).padStart(2, "0");
   const state = running ? "Running" : remaining <= 0 ? "Done" : "Paused";
-  const label = running ? "Focus" : state;
   if (timeEl.textContent !== text) timeEl.textContent = text;
-  if (stateEl.textContent !== state) stateEl.textContent = state;
-  if (labelEl.textContent !== label) labelEl.textContent = label;
+  if (labelEl.textContent !== state) labelEl.textContent = state;
   arc.setAttribute("stroke-dashoffset", String(C * (1 - remaining / (minutes * 60))));
 }
 
@@ -100,7 +98,8 @@ for (let i = 0; i < presets.length; i++) {
 $("menu-reset").addEventListener("click", () => select(minutes));
 $("menu-25").addEventListener("click", () => select(25));
 document.addEventListener("keydown", (event: KeyboardEvent) => {
-  if (event.code === "Space") { event.preventDefault(); toggle(); }
+  // A held Space repeats keydown; one press is one toggle.
+  if (event.code === "Space") { event.preventDefault(); if (!event.repeat) toggle(); }
 });
 
 // Restore the last length and time left; a timer that was running comes back paused.
