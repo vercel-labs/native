@@ -249,6 +249,11 @@ __hActions.prototype.__tickFor = function (slot) {
   }
   return cur;
 };
+__hActions.prototype.addPointer = function (pointerType) {
+  // The runtime has one pointer stream; a named pointer joins it rather than starting a second.
+  void pointerType;
+  return this;
+};
 __hActions.prototype.addTick = function () {
   this.tick++;
   if (this.ticks[this.tick] === undefined) this.ticks[this.tick] = {};
@@ -314,6 +319,70 @@ __hActions.prototype.send = function () {
   return test_driver.action_sequence(this.serialize());
 };
 
+// The harness helpers WPT pages use for event sequences: on_event registers a plain listener,
+// and EventWatcher asserts that the events that arrive are the ones a test waits for, in order.
+function on_event(object, event, callback) {
+  object.addEventListener(event, callback, false);
+}
+
+function EventWatcher(test, watchedNode, eventTypes, timeoutPromise) {
+  if (typeof eventTypes === "string") eventTypes = [eventTypes];
+  var waitingFor = null;
+  var recordedEvents = null;
+  var eventHandler = test.step_func(function (evt) {
+    assert_true(!!waitingFor, "Not expecting event, but got " + evt.type + " event");
+    assert_equals(evt.type, waitingFor.types[0],
+      "Expected " + waitingFor.types[0] + " event, but got " + evt.type + " event instead");
+    if (Array.isArray(recordedEvents)) recordedEvents.push(evt);
+    if (waitingFor.types.length > 1) {
+      waitingFor.types.shift();
+      return;
+    }
+    var resolveFunc = waitingFor.resolve;
+    waitingFor = null;
+    var result = recordedEvents || evt;
+    recordedEvents = null;
+    resolveFunc(result);
+  });
+  for (var i = 0; i < eventTypes.length; i++) watchedNode.addEventListener(eventTypes[i], eventHandler, false);
+  function stopWatching() {
+    for (var j = 0; j < eventTypes.length; j++) watchedNode.removeEventListener(eventTypes[j], eventHandler, false);
+  }
+  this.stop_watching = stopWatching;
+  // The listeners belong to the test that made the watcher: remove them when it finishes, so a
+  // later event on a shared target cannot fail a test that had passed.
+  if (typeof test.add_cleanup === "function") test.add_cleanup(stopWatching);
+  this.wait_for = function (types, options) {
+    if (waitingFor !== null) return Promise.reject(new Error("Already waiting for an event"));
+    if (typeof types === "string") types = [types];
+    recordedEvents = options !== undefined && options !== null && options.record === "all" ? [] : null;
+    return new Promise(function (resolve) {
+      var mine = { types: types.slice(), resolve: resolve };
+      waitingFor = mine;
+      // A timeoutPromise handed to the watcher bounds the wait: when it settles first, the events
+      // never came, which is a failure unless none were expected.
+      if (typeof timeoutPromise === "function") {
+        timeoutPromise().then(function () {
+          if (waitingFor === null || waitingFor !== mine) return;
+          var missing = mine.types.slice();
+          var result = recordedEvents;
+          recordedEvents = null;
+          waitingFor = null;
+          // The wait settles whether the events came or not, so the test that made the watcher is
+          // never left pending; a timeout fails that test — the one the watcher was made for —
+          // rather than an implicit one, even though this runs outside any of its steps.
+          if (missing.length > 0) {
+            var report = function () { assert_true(false, "Timed out waiting for " + missing.join(", ")); };
+            if (test !== undefined && test !== null) __hRun(test, report);
+            else report();
+          }
+          resolve(result);
+        });
+      }
+    });
+  };
+}
+
 var test_driver = {
   get_computed_role: function (element) {
     return Promise.resolve(accessibleNode(element).role);
@@ -348,6 +417,34 @@ var test_driver = {
   },
   send_keys: function (element, keys) {
     __nativeSendKeys(element, keys);
+    return Promise.resolve();
+  },
+  // A user gesture without a real input: the click makes the transient activation that popups and
+  // other gated APIs need, and a callback handed with it runs while the gesture still counts.
+  bless: function (message, callback) {
+    void message;
+    var button = document.createElement("button");
+    button.style.position = "absolute";
+    button.style.left = "0px";
+    button.style.top = "0px";
+    button.style.width = "1px";
+    button.style.height = "1px";
+    if (document.body !== null) document.body.appendChild(button);
+    button.click();
+    if (button.parentNode !== null) button.parentNode.removeChild(button);
+    if (typeof callback === "function") return Promise.resolve().then(callback);
+    return Promise.resolve();
+  },
+  // Permission overrides are a browser-driver feature; this environment grants nothing, so the
+  // call is accepted and answered without changing what the page may do.
+  set_permission: function (descriptor, state, origin) {
+    void descriptor;
+    void state;
+    void origin;
+    return Promise.resolve();
+  },
+  set_permissions: function (descriptors) {
+    void descriptors;
     return Promise.resolve();
   },
   action_sequence: function (actions) { return __hRunActions(actions === undefined ? [] : actions); },
