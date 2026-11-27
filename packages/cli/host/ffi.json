@@ -440,5 +440,5 @@
   ],
   "libraries": ["./host.o"],
   "system_libraries": ["sqlite3"],
-  "frameworks": ["AppKit", "CoreText", "CoreGraphics", "ImageIO", "Foundation", "OpenGL", "IOSurface", "CoreImage", "Metal", "QuartzCore", "AudioToolbox", "AudioUnit", "CoreAudio", "AVFoundation", "CoreVideo", "CoreMedia"]
+  "frameworks": ["AppKit", "CoreText", "CoreGraphics", "ImageIO", "Foundation", "OpenGL", "IOSurface", "CoreImage", "Metal", "QuartzCore", "Accelerate", "AudioToolbox", "AudioUnit", "CoreAudio", "AVFoundation", "CoreVideo", "CoreMedia"]
 }

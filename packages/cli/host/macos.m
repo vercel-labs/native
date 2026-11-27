@@ -32,6 +32,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sqlite3.h>
+#include <Accelerate/Accelerate.h>
 #include "svg-filter.h"
 #include <mach-o/dyld.h>
 #include <pthread.h>
@@ -6483,6 +6484,8 @@ static void box_blur(const unsigned char *src, unsigned char *dst, size_t w, siz
  * widths are chosen so their repeated convolution matches the Gaussian (Kutskir's sizes). Blurring
  * premultiplied pixels is what makes a blurred shape's edge fade rather than darken.
  */
+static int blur_vimage_ok(void);
+
 static void gauss_blur(unsigned char *px, size_t w, size_t h, size_t stride, double sigma) {
   if (!(sigma > 0) || w == 0 || h == 0) return;
   double ideal = sqrt((12.0 * sigma * sigma / 3.0) + 1.0);
@@ -6496,6 +6499,42 @@ static void gauss_blur(unsigned char *px, size_t w, size_t h, size_t stride, dou
   for (int i = 0; i < 3; i++) sizes[i] = i < m ? wl : wu;
   unsigned char *tmp = malloc(h * stride);
   if (!tmp) return;
+  if (blur_vimage_ok()) {
+    // vImage's box convolve is this same blur with the vector unit doing the sums: on a lyric
+    // line's bitmap at 2x it measured 2.4x (radius 4) to 4.7x (radius 12) faster than the scalar
+    // passes, within one step of them. The background is transparent, so out-of-range samples
+    // count as zero against the full kernel width, as the scalar passes do.
+    int in_px = 1;
+    for (int i = 0; i < 3; i++) {
+      int radius = (sizes[i] - 1) / 2;
+      if (radius < 1) continue;
+      unsigned char *from = in_px ? px : tmp;
+      unsigned char *to = in_px ? tmp : px;
+      vImage_Buffer vb = { from, h, w, stride };
+      vImage_Buffer vd = { to, h, w, stride };
+      unsigned char bg[4] = { 0, 0, 0, 0 };
+      vImage_Error err = vImageBoxConvolve_ARGB8888(&vb, &vd, NULL, 0, 0,
+          (vImagePixelCount)(2 * radius + 1), (vImagePixelCount)(2 * radius + 1), bg,
+          kvImageBackgroundColorFill);
+      if (err != kvImageNoError) {
+        // A pass the vector path refused: finish the chain scalar from what is already blurred,
+        // so the picture is whole even if a step ends up softer or harder than it should be.
+        if (from != px) memcpy(px, from, h * stride);
+        for (int j = i; j < 3; j++) {
+          int r = (sizes[j] - 1) / 2;
+          if (r < 1) continue;
+          box_blur(px, tmp, w, h, stride, r, 1);
+          box_blur(tmp, px, w, h, stride, r, 0);
+        }
+        free(tmp);
+        return;
+      }
+      in_px = !in_px;
+    }
+    if (!in_px) memcpy(px, tmp, h * stride);
+    free(tmp);
+    return;
+  }
   for (int i = 0; i < 3; i++) {
     int radius = (sizes[i] - 1) / 2;
     if (radius < 1) continue;
@@ -6503,6 +6542,20 @@ static void gauss_blur(unsigned char *px, size_t w, size_t h, size_t stride, dou
     box_blur(tmp, px, w, h, stride, radius, 0);
   }
   free(tmp);
+}
+
+/** Whether the vector box convolve works here; probed once, on two by two pixels. */
+static int blur_vimage_ok(void) {
+  static int ok = -1;
+  if (ok < 0) {
+    unsigned char a[16] = { 0 };
+    unsigned char b[16] = { 0 };
+    vImage_Buffer va = { a, 2, 2, 8 };
+    vImage_Buffer vb = { b, 2, 2, 8 };
+    unsigned char bg[4] = { 0, 0, 0, 0 };
+    ok = vImageBoxConvolve_ARGB8888(&va, &vb, NULL, 0, 0, 3, 3, bg, kvImageBackgroundColorFill) == kvImageNoError;
+  }
+  return ok;
 }
 
 /** A 5x4 colour matrix, rows R, G, B, A, with its last column an offset (both scaled to 0..255). */
@@ -6878,6 +6931,140 @@ static size_t skip_layer(size_t i) {
   return g_list->count;
 }
 
+/** The box a recorded polygon's points make (defined with the compositor's command view). */
+static int poly_box(const char *s, double *x, double *y, double *w, double *h);
+
+/** A box a run of commands paints, in the user space the run starts in. */
+typedef struct { double x0, y0, x1, y1; int any; int full; } InkBox;
+
+static void ink_add(InkBox *b, double x, double y, double w, double h) {
+  if (!(w > 0 && h > 0)) return;
+  if (!b->any) { b->x0 = x; b->y0 = y; b->x1 = x + w; b->y1 = y + h; b->any = 1; return; }
+  if (x < b->x0) b->x0 = x;
+  if (y < b->y0) b->y0 = y;
+  if (x + w > b->x1) b->x1 = x + w;
+  if (y + h > b->y1) b->y1 = y + h;
+}
+
+/** A rect mapped through a matrix, as the box its four corners make. */
+static void ink_map(const CGAffineTransform *m, double x, double y, double w, double h,
+                    double *ox, double *oy, double *ow, double *oh) {
+  CGPoint p[4] = {CGPointMake(x, y), CGPointMake(x + w, y), CGPointMake(x + w, y + h), CGPointMake(x, y + h)};
+  double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  for (int i = 0; i < 4; i++) {
+    CGPoint q = CGPointApplyAffineTransform(p[i], *m);
+    if (i == 0 || q.x < x0) x0 = q.x;
+    if (i == 0 || q.y < y0) y0 = q.y;
+    if (i == 0 || q.x > x1) x1 = q.x;
+    if (i == 0 || q.y > y1) y1 = q.y;
+  }
+  *ox = x0; *oy = y0; *ow = x1 - x0; *oh = y1 - y0;
+}
+
+/**
+ * The ink a run of commands paints, in the user space it starts in: every box it draws, grown the
+ * way the chunk walk grows one (a shadow's reach, a text run's estimate, a filter's region) and
+ * mapped through the transforms inside the run, with layer refs followed into their lists. What an
+ * opacity group's transparency layer has to cover is this, not the group's border box: children
+ * that overflow it, a box-shadow, an outline and a filtered child all paint outside the border.
+ */
+static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGAffineTransform m, int depth) {
+  CGAffineTransform stack[64];
+  int states = 0;
+  for (size_t i = first; i < last && i < list->count; i++) {
+    Cmd *c = &list->cmds[i];
+    switch (c->kind) {
+      case CMD_TRANSFORM:
+        if (states >= 64) return;
+        stack[states++] = m;
+        m = CGAffineTransformConcat(CGAffineTransformMake(c->p0, c->p1, c->p2, c->p3, c->r[0], c->r[1]), m);
+        break;
+      case CMD_CLIP: case CMD_CLIP_ROUND: case CMD_CLIP_POLY: case CMD_CLIP_ELLIPSE: case CMD_CLIP_SHAPE:
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      case CMD_UNCLIP: case CMD_EFFECT_POP: case CMD_MASK_POP: case CMD_PERSPECTIVE_POP:
+        if (states > 0) m = stack[--states];
+        break;
+      case CMD_MASK_SPLIT:
+        // A mask's split closes the mask image and opens its content inside the same state: it is
+        // no pop of its own, or the transform the mask sat in would be dropped twice.
+        break;
+      case CMD_EFFECT_PUSH: {
+        // The filter region: the border box grown by 10% on every side.
+        double gx = c->w * 0.1 + 12, gy = c->h * 0.1 + 12;
+        double x, y, w, h;
+        ink_map(&m, c->x - gx, c->y - gy, c->w + 2 * gx, c->h + 2 * gy, &x, &y, &w, &h);
+        ink_add(box, x, y, w, h);
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      }
+      case CMD_MASK_PUSH: {
+        // Masked content paints within the mask's box, whatever the mask itself draws there.
+        double x, y, w, h;
+        ink_map(&m, c->x, c->y, c->w, c->h, &x, &y, &w, &h);
+        ink_add(box, x, y, w, h);
+        if (states >= 64) return;
+        stack[states++] = m;
+        break;
+      }
+      case CMD_PERSPECTIVE_PUSH: {
+        // The box is warped onto the projected quad: whatever the box holds lands there.
+        double x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        for (int k = 0; k < 4; k++) {
+          CGPoint p = CGPointApplyAffineTransform(CGPointMake(c->q[k * 2], c->q[k * 2 + 1]), m);
+          if (k == 0 || p.x < x0) x0 = p.x;
+          if (k == 0 || p.y < y0) y0 = p.y;
+          if (k == 0 || p.x > x1) x1 = p.x;
+          if (k == 0 || p.y > y1) y1 = p.y;
+        }
+        ink_add(box, x0, y0, x1 - x0, y1 - y0);
+        if (states >= 64) { box->full = 1; return; }
+        stack[states++] = m;
+        break;
+      }
+      case CMD_LAYER_REF:
+        if (c->layer >= 0 && c->layer < g_layer_count) {
+          if (depth >= 6) { box->full = 1; break; }
+          CmdList *inner = &g_layers[c->layer].list;
+          ink_range(box, inner, 0, inner->count, m, depth + 1);
+        }
+        break;
+      default: {
+        double pad = 2;
+        if (c->kind == CMD_SHADOW || c->kind == CMD_SHADOW_INSET || c->kind == CMD_TEXT_SHADOW)
+          pad += fabs(c->dx) + fabs(c->dy) + 2 * fabs(c->blur) + fabs(c->line_width);
+        if (c->emphasis != 0) pad += 12;
+        double x = c->x, y = c->y, w = c->w, h = c->h;
+        if (c->kind == CMD_POLY) {
+          // A polygon carries its points in its text; the box fields are not its geometry.
+          if (!poly_box(c->text, &x, &y, &w, &h)) break;
+        } else if (c->kind == CMD_TEXT || c->kind == CMD_TEXT_SHADOW) {
+          w = (double)c->len * (c->size + fabs(c->letter) + fabs(c->word));
+          h = (c->line_height > c->size * 1.4 ? c->line_height : c->size * 1.4) + c->size * 0.5;
+          pad += c->size * 0.25;
+        }
+        double mx, my, mw, mh;
+        ink_map(&m, x - pad, y - pad, w + 2 * pad, h + 2 * pad, &mx, &my, &mw, &mh);
+        ink_add(box, mx, my, mw, mh);
+        break;
+      }
+    }
+  }
+}
+
+/** The cache of a filtered layer's result: what it shows, the chain that filters it and the
+ *  device place it was made at. A frame that repaints a mask or a group around a layer rasters the
+ *  layer again even though it shows the same thing, and the cache hands back the image it made the
+ *  last time nothing the layer shows had changed. */
+static int effect_cache_take(uint64_t key, CGImageRef *image);
+static void effect_cache_put(uint64_t key, CGImageRef image);
+static uint64_t effect_cache_key(const Cmd *c, const EffectSpec *spec, size_t first, size_t last,
+                                 const CGAffineTransform *m, double dx, double dy, double dw, double dh);
+static uint64_t key_mix(uint64_t h, uint64_t v);
+static uint64_t key_cmd(uint64_t h, const Cmd *c);
+
 /**
  * Replays one layer: the commands from `i` (a CMD_EFFECT_PUSH) to its CMD_EFFECT_POP are drawn
  * into a bitmap covering the layer's filter region in device pixels, the filter chain runs on that
@@ -6894,7 +7081,26 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
   if (spec.alpha < 1 && spec.count == 0 && spec.bcount == 0 && spec.blend == 0) {
     CGContextSaveGState(ctx);
     CGContextSetAlpha(ctx, spec.alpha);
-    CGContextBeginTransparencyLayer(ctx, NULL);
+    // The layer covers the ink the group paints — children that overflow its border box, shadows,
+    // outlines, filtered children — not the whole context: a fading word inside a masked column
+    // used to make a layer the size of the frame on every frame. It is bounded, at least, by the
+    // border box with the slack the filter path allows, so a group that paints nothing still has
+    // a layer to fade.
+    size_t group_pop = skip_layer(i);
+    InkBox ink;
+    ink.any = 0;
+    ink.full = 0;
+    ink_range(&ink, g_list, i + 1, group_pop, CGAffineTransformIdentity, 0);
+    double gx = c->w * 0.1 + 12, gy = c->h * 0.1 + 12;
+    double bx = c->x - gx, by = c->y - gy, bw = c->w + 2 * gx, bh = c->h + 2 * gy;
+    if (ink.any) {
+      if (ink.x0 < bx) bx = ink.x0;
+      if (ink.y0 < by) by = ink.y0;
+      if (ink.x1 > bx + bw) bw = ink.x1 - bx;
+      if (ink.y1 > by + bh) bh = ink.y1 - by;
+    }
+    if (ink.full) CGContextBeginTransparencyLayer(ctx, NULL);
+    else CGContextBeginTransparencyLayerWithRect(ctx, CGRectMake(bx, by, bw, bh), NULL);
     ReplayState plain;
     plain.depth = 0;
     plain.transforms = 0;
@@ -6931,6 +7137,24 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
     plain.transforms = 0;
     return replay_range(ctx, i + 1, &plain);
   }
+  // A layer filtered the same way, showing the same commands at the same device place, is the
+  // picture the cache holds: the frame draws it back instead of filtering the layer again.
+  size_t pop = skip_layer(i);
+  uint64_t cache_key = spec.bcount == 0
+      ? effect_cache_key(c, &spec, i + 1, pop, &m, dx, dy, dw, dh) : 0;
+  if (cache_key != 0) {
+    CGImageRef cached = NULL;
+    if (effect_cache_take(cache_key, &cached)) {
+      CGContextSaveGState(ctx);
+      CGContextConcatCTM(ctx, CGAffineTransformInvert(CGContextGetCTM(ctx)));
+      CGContextSetBlendMode(ctx, blend_mode(spec.blend));
+      CGContextSetAlpha(ctx, spec.alpha);
+      CGContextDrawImage(ctx, CGRectMake(dx, dy, dw, dh), cached);
+      CGContextRestoreGState(ctx);
+      CGImageRelease(cached);
+      return pop;
+    }
+  }
   CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
   CGContextRef bctx = CGBitmapContextCreate(NULL, (size_t)dw, (size_t)dh, 8, 0, cs,
                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
@@ -6945,7 +7169,7 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
   ReplayState sub;
   sub.depth = 0;
   sub.transforms = 0;
-  size_t pop = replay_range(bctx, i + 1, &sub);
+  pop = replay_range(bctx, i + 1, &sub);
   LayerBitmap b;
   b.px = CGBitmapContextGetData(bctx);
   b.w = (size_t)dw;
@@ -6956,6 +7180,7 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
   if (spec.bcount != 0) apply_backdrop(ctx, c, &spec, scale);
   CGImageRef img = CGBitmapContextCreateImage(bctx);
   CGContextRelease(bctx);
+  if (img && cache_key != 0) effect_cache_put(cache_key, img);
   if (img) {
     CGContextSaveGState(ctx);
     // Device pixels, so the bitmap lands exactly where it was cut from whatever the page's
@@ -11243,6 +11468,113 @@ static int key_range(uint64_t *out, CmdList *l, size_t first, size_t count, int 
   return 1;
 }
 
+#define EFFECT_CACHE_ENTRIES 12
+#define EFFECT_CACHE_BYTES (16u * 1024u * 1024u)
+
+typedef struct {
+  uint64_t key;
+  CGImageRef image;
+  unsigned long used;
+  size_t bytes;
+} EffectCacheEntry;
+
+static EffectCacheEntry g_effect_cache[EFFECT_CACHE_ENTRIES];
+static unsigned long g_effect_cache_tick = 1;
+static size_t g_effect_cache_bytes = 0;
+static unsigned long g_effect_cache_hits = 0;
+static unsigned long g_effect_cache_misses = 0;
+static pthread_mutex_t g_effect_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/** The image this key made, retained for the caller; 0 when it isn't held. */
+static int effect_cache_take(uint64_t key, CGImageRef *image) {
+  if (key == 0) return 0;
+  int hit = 0;
+  pthread_mutex_lock(&g_effect_cache_lock);
+  for (int i = 0; i < EFFECT_CACHE_ENTRIES; i++) {
+    if (g_effect_cache[i].image != NULL && g_effect_cache[i].key == key) {
+      g_effect_cache[i].used = ++g_effect_cache_tick;
+      *image = (CGImageRef)CGImageRetain(g_effect_cache[i].image);
+      hit = 1;
+      break;
+    }
+  }
+  g_effect_cache_hits += hit;
+  g_effect_cache_misses += !hit;
+  pthread_mutex_unlock(&g_effect_cache_lock);
+  return hit;
+}
+
+/** Holds a layer's filtered image under its key, dropping the least recently used ones. */
+static void effect_cache_put(uint64_t key, CGImageRef image) {
+  if (key == 0 || image == NULL) return;
+  size_t bytes = (size_t)CGImageGetBytesPerRow(image) * (size_t)CGImageGetHeight(image);
+  // One layer big enough to crowd everything else out is rastered again as before.
+  if (bytes == 0 || bytes > EFFECT_CACHE_BYTES / 4) return;
+  pthread_mutex_lock(&g_effect_cache_lock);
+  int slot = -1;
+  unsigned long oldest = ~0ul;
+  for (int i = 0; i < EFFECT_CACHE_ENTRIES; i++) {
+    if (g_effect_cache[i].image == NULL || g_effect_cache[i].key == key) { slot = i; break; }
+    if (g_effect_cache[i].used < oldest) { oldest = g_effect_cache[i].used; slot = i; }
+  }
+  EffectCacheEntry *e = &g_effect_cache[slot];
+  if (e->image != NULL) {
+    g_effect_cache_bytes -= e->bytes;
+    CGImageRelease(e->image);
+  }
+  e->key = key;
+  e->image = (CGImageRef)CGImageRetain(image);
+  e->used = ++g_effect_cache_tick;
+  e->bytes = bytes;
+  g_effect_cache_bytes += bytes;
+  while (g_effect_cache_bytes > EFFECT_CACHE_BYTES) {
+    int victim = -1;
+    unsigned long v = ~0ul;
+    for (int i = 0; i < EFFECT_CACHE_ENTRIES; i++) {
+      if (g_effect_cache[i].image != NULL && &g_effect_cache[i] != e && g_effect_cache[i].used < v) {
+        v = g_effect_cache[i].used;
+        victim = i;
+      }
+    }
+    if (victim < 0) break;
+    g_effect_cache_bytes -= g_effect_cache[victim].bytes;
+    CGImageRelease(g_effect_cache[victim].image);
+    memset(&g_effect_cache[victim], 0, sizeof(EffectCacheEntry));
+  }
+  pthread_mutex_unlock(&g_effect_cache_lock);
+}
+
+/** The key of a filtered layer's image: the chain that filters it, every command it shows, and
+ *  the transform and device place the image was made at. 0 when a canvas, a video or another
+ *  layer stands in it, or when it carries a backdrop filter, which shows the pixels behind it. */
+static uint64_t effect_cache_key(const Cmd *c, const EffectSpec *spec, size_t first, size_t last,
+                                 const CGAffineTransform *m, double dx, double dy, double dw,
+                                 double dh) {
+  uint64_t h = 0xd1b54a32d192ed03ull;
+  h = key_mix(h, (uint64_t)g_raster_epoch);
+  h = key_double(h, (double)spec->alpha);
+  h = key_mix(h, (uint64_t)(uint32_t)spec->blend);
+  h = key_mix(h, (uint64_t)c->len);
+  if (c->text != NULL) {
+    size_t i = 0;
+    for (; i + 8 <= c->len; i += 8) {
+      uint64_t v;
+      memcpy(&v, c->text + i, 8);
+      h = key_mix(h, v);
+    }
+    uint64_t tail = 0;
+    memcpy(&tail, c->text + i, c->len - i);
+    h = key_mix(h, tail);
+  }
+  const double t[10] = {m->a, m->b, m->c, m->d, m->tx, m->ty, dx, dy, dw, dh};
+  for (size_t i = 0; i < 10; i++) h = key_double(h, t[i]);
+  if (last < first) return 0;
+  // What the layer shows, following the layer refs inside it the way the chunk key does: a
+  // filtered line's own will-change layer is one, and its commands are what the picture is of.
+  if (!key_range(&h, g_list, (size_t)first, (size_t)(last - first), 0)) return 0;
+  return h == 0 ? 1 : h;
+}
+
 /** The key of a chunk rastered under `raster_m` (with its clips baked in when it isn't `own`)
  *  into a frame of `pw` x `ph`; 0 when its commands don't pin its pixels down: a canvas draws
  *  pixels its script changes without a new command. */
@@ -11618,12 +11950,13 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
     for (int i = 0; chunked && i < walk->count; i++) if (g_win_keys[i] == 0) keyless++;
     fprintf(stderr, "native: composite chunks=%d tiles=%d kept=%d rastered=%d keyless=%d "
                     "external=%d rasterms=%g flat=%d fail=%d@%d info=%d full=%d flatms=%g replayms=%g "
-                    "workers=%d\n",
+                    "workers=%d effectcache=%lu/%lu\n",
             chunked ? (walk != NULL ? walk->count : 0) : 0, g_win_tiles, kept, rastered, keyless,
             external,
             raster_ms, chunked ? 0 : 1, chunked ? 0 : comp_walk_failure(),
             chunked ? -1 : comp_walk_failure_at(), chunked ? -1 : comp_walk_failure_kind(),
-            full_chunks, flat_ms, chunked ? 0.0 : g_flat_replay_ms, g_pool_threads);
+            full_chunks, flat_ms, chunked ? 0.0 : g_flat_replay_ms, g_pool_threads,
+            g_effect_cache_hits, g_effect_cache_misses);
   }
   free(walk);
   return 1;
