@@ -13514,13 +13514,13 @@ export class HTMLInputElement extends HTMLElement {
         if (nextType === "radio") uncheckRadioGroup(this);
         noteControlChange(this);
       }
+      // A field that becomes a text field while focused starts showing the ring a text field
+      // has, and one that stops being one loses it: :focus-visible follows the type change.
+      if (focusState.el === this) refreshFocusVisible();
     } else if (name === "form") {
       super.setAttribute(name, value);
       // Joining a form puts a checked radio in that form's group.
       uncheckRadioGroup(this);
-      // A field that becomes a text field while focused starts showing the ring a text field
-      // has, and one that stops being one loses it: :focus-visible follows the type change.
-      if (focusState.el === this) refreshFocusVisible();
     } else if (name === "multiple") {
       super.setAttribute(name, value);
       if (this.type.toLowerCase() === "email") {
