@@ -5,14 +5,31 @@
 // units as env(titlebar-area-x/-y/-width/-height). The runtime publishes both from the host's
 // window (see app/titlebar.ts); geometrychange fires when a resize moves the region.
 
-import type { EventListenerOrEventListenerObject } from "./dom.ts";
-import { DOMRect, Event } from "./dom.ts";
+import { DOMRect, Event, EventTarget } from "./dom.ts";
 
-export class WindowControlsOverlay {
+export interface WindowControlsOverlayGeometryChangeEventInit extends EventInit {
+  visible: boolean;
+  titlebarAreaRect: DOMRect;
+}
+
+/** The event geometrychange delivers: the region and whether the page draws there, as the spec's
+ *  WindowControlsOverlayGeometryChangeEvent has them. */
+export class WindowControlsOverlayGeometryChangeEvent extends Event {
+  get [Symbol.toStringTag](): string { return "WindowControlsOverlayGeometryChangeEvent"; }
+  readonly visible: boolean;
+  readonly titlebarAreaRect: DOMRect;
+
+  constructor(type: string, init: WindowControlsOverlayGeometryChangeEventInit) {
+    super(type);
+    this.visible = init.visible;
+    this.titlebarAreaRect = init.titlebarAreaRect;
+  }
+}
+
+export class WindowControlsOverlay extends EventTarget {
   get [Symbol.toStringTag](): string { return "WindowControlsOverlay"; }
   private visibleValue = false;
   private area: number[] = [0, 0, 0, 0];
-  private listeners: EventListenerOrEventListenerObject[] = [];
 
   /** Whether the page draws under the titlebar, i.e. the window hides the system titlebar. */
   get visible(): boolean {
@@ -24,29 +41,6 @@ export class WindowControlsOverlay {
     return new DOMRect(this.area[0], this.area[1], this.area[2], this.area[3]);
   }
 
-  addEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
-    if (type !== "geometrychange" || listener === null) return;
-    for (const held of this.listeners) if (held === listener) return;
-    this.listeners.push(listener);
-  }
-
-  removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null): void {
-    if (type !== "geometrychange" || listener === null) return;
-    for (let i = this.listeners.length - 1; i >= 0; i--) {
-      if (this.listeners[i] === listener) { this.listeners.splice(i, 1); return; }
-    }
-  }
-
-  /** Runs the geometrychange listeners the way an event target does. */
-  dispatchEvent(event: Event): boolean {
-    const snapshot = this.listeners.slice();
-    for (const listener of snapshot) {
-      if (typeof listener === "function") listener(event);
-      else listener.handleEvent(event);
-    }
-    return true;
-  }
-
   /** Publishes the area the page can use; fires geometrychange when it moved or appeared. */
   set(visible: boolean, area: number[]): void {
     const changed = visible !== this.visibleValue ||
@@ -55,7 +49,12 @@ export class WindowControlsOverlay {
     this.visibleValue = visible;
     this.area = [area[0], area[1], area[2], area[3]];
     if (!changed) return;
-    this.dispatchEvent(new Event("geometrychange"));
+    // A real event target: the event carries target and currentTarget, and a listener registered
+    // with `once` runs once, as every other event on this runtime does.
+    this.dispatchEvent(new WindowControlsOverlayGeometryChangeEvent("geometrychange", {
+      visible: this.visibleValue,
+      titlebarAreaRect: this.getTitlebarAreaRect(),
+    }));
   }
 }
 

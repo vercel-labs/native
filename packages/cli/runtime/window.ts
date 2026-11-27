@@ -26,7 +26,7 @@ import { mediaMatches, refreshSystemSettings } from "./media.ts";
 import { setTargetText } from "./target-text.ts";
 import { Clipboard } from "./clipboard.ts";
 import { setFollowLinkHook } from "./link-hook.ts";
-import { windowControlsOverlay } from "./window-controls.ts";
+import { WindowControlsOverlay, WindowControlsOverlayGeometryChangeEvent, windowControlsOverlay } from "./window-controls.ts";
 
 // The audio element's engine registers here as the window loads, before any page markup is built.
 mediaElementIface.installMediaElement();
@@ -452,6 +452,8 @@ export class Window {
   readonly ValidityState = domIface.ValidityState;
   readonly WebGL2RenderingContext = domIface.WebGL2RenderingContext;
   readonly WheelEvent = domIface.WheelEvent;
+  readonly WindowControlsOverlay = WindowControlsOverlay;
+  readonly WindowControlsOverlayGeometryChangeEvent = WindowControlsOverlayGeometryChangeEvent;
   readonly XMLDocument = domIface.XMLDocument;
   readonly implementation = domIface.implementation;
   readonly Highlight = highlightIface.Highlight;

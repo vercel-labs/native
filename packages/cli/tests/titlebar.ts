@@ -30,6 +30,16 @@ body { margin: 0; }
 const APP = `const log = document.getElementById("log")!;
 const bar = document.getElementById("bar")!;
 const wco = navigator.windowControlsOverlay;
+let onceRuns = 0, manyRuns = 0;
+const describe = (e: any) => {
+  const r = e.titlebarAreaRect;
+  return [e.type, e instanceof WindowControlsOverlayGeometryChangeEvent, e.visible,
+    Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height),
+    e.target === wco, e.currentTarget === wco, onceRuns, manyRuns].join(" ");
+};
+// Registered first, so a later listener sees that the once listener has already run.
+wco.addEventListener("geometrychange", () => { onceRuns++; }, { once: true });
+wco.addEventListener("geometrychange", (e: any) => { manyRuns++; log.textContent = describe(e); });
 requestAnimationFrame(() => {
 const s = getComputedStyle(bar);
 const r = wco.getTitlebarAreaRect();
@@ -56,6 +66,17 @@ ok("env(titlebar-area-height) and env(titlebar-area-x) fill the bar, and app-reg
 ok("navigator.windowControlsOverlay reports the same area as a DOMRect", first.endsWith(" true 86 0 314 52 86 400 52"), first);
 ok("a press in the drag area doesn't reach the page", run("frame 16 | click #bar | print #log")[0] === first);
 ok("a no-drag child inside it is clickable", run("frame 16 | click #btn | print #log")[0] === "button clicked");
+
+// The host republishes the real area after a step, so a run can see more than the change the step
+// made; the first event is the step's, and the counts are checked rather than the exact sequence.
+const changed = run("frame 16 | titlebar 1 90 0 300 40 | print #log")[0].split(" ");
+ok("geometrychange delivers a WindowControlsOverlayGeometryChangeEvent with the area, on the overlay",
+  changed[0] === "geometrychange" && changed[1] === "true" && changed[2] === "true" &&
+  changed[3] === "90" && changed[4] === "0" && changed[5] === "300" && changed[6] === "40" &&
+  changed[7] === "true" && changed[8] === "true" && changed[9] === "1", changed.join(" "));
+const again = run("frame 16 | titlebar 1 90 0 300 40 | frame 32 | titlebar 1 90 0 290 40 | print #log")[0].split(" ");
+ok("a listener registered with once runs for the first change only",
+  again[9] === "1" && Number(again[10]) >= 2, again.join(" "));
 
 writeFileSync(join(dir, "index.html"), PAGE.replace("titlebar=hidden-inset", "titlebar=sideways, colour=blue"));
 const w = spawnSync("node", ["compiler/cli.ts", "check", dir], { encoding: "utf8" });

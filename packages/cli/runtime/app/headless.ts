@@ -12,6 +12,7 @@ import { keyDown, keyUp } from "./keyboard.ts";
 import { compositionCancel, compositionEnd, compositionUpdate } from "../composition.ts";
 import { handleHostEvent, tick } from "./loop.ts";
 import { config, frame, paintPage } from "./mount.ts";
+import { windowControlsOverlay } from "../window-controls.ts";
 import { applicationMenuItemIndex, chooseApplicationMenuItem, installApplicationMenu } from "../menus.ts";
 import { publishTitlebarArea } from "./titlebar.ts";
 import { pointer, pointerContext, pointerDown, pointerMove, pointerUp, pressElement } from "./pointer.ts";
@@ -311,6 +312,11 @@ function runStep(step: string): void {
     dirty.layout = true;
     markFullPaint();
     windowResized();
+  } else if (verb === "titlebar") {
+    // titlebar <visible 0|1> <x> <y> <w> <h>: republishes the page's titlebar area as a resize of
+    // the window does, so a test can watch geometrychange without a window.
+    const parts = arg.split(" ").map(Number);
+    windowControlsOverlay.set(parts[0] !== 0, [parts[1], parts[2], parts[3], parts[4]]);
   } else if (verb === "layout") {
     // layout incremental|full|verify: turns incremental layout on, off, or on with every frame
     // checked against a full layout (see layout/incremental.ts).
