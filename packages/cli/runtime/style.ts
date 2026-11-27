@@ -38,6 +38,7 @@ import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesRe
 import type { CSSStyleSheet, SheetRule } from "./sheets.ts";
 import { registrationCount, registeredProperty, registrations } from "./registered.ts";
 import { viewport } from "./viewport.ts";
+import { isQuirks } from "./quirk.ts";
 import { frameTimes } from "./frame-times.ts";
 
 export class StyleTables {
@@ -402,10 +403,29 @@ function attrMatches(el: Element, enc: string): boolean {
  *  follows it, and what follows is not another "-" (the separator ends the prefix). */
 export function classPrefixFits(el: Element, prefix: string): boolean {
   const names = el.classList.tokens();
+  // A quirks document reads the class attribute ASCII-lowercased, while the prefix itself keeps
+  // the case it was written with.
+  const fold = isQuirks();
   for (let i = 0; i < names.length; i++) {
-    const n = names[i];
+    const n = fold ? names[i].toLowerCase() : names[i];
     if (n.length > prefix.length && n.startsWith(prefix) && n.charAt(prefix.length) !== "-") return true;
   }
+  return false;
+}
+
+/** Whether an id matches a selector's id: a quirks document reads ids case-insensitively. */
+function idFits(el: Element, want: string): boolean {
+  if (el.id === want) return true;
+  return isQuirks() && el.id.toLowerCase() === want.toLowerCase();
+}
+
+/** Whether the class list carries a class: a quirks document folds the name too. */
+function classFits(el: Element, want: string): boolean {
+  if (el.classList.contains(want)) return true;
+  if (!isQuirks()) return false;
+  const lower = want.toLowerCase();
+  const names = el.classList.tokens();
+  for (let i = 0; i < names.length; i++) if (names[i].toLowerCase() === lower) return true;
   return false;
 }
 
@@ -429,9 +449,9 @@ function encodedMatches(el: Element, enc: string): boolean {
     if (kind === "t") {
       if (el.localName !== v) return false;
     } else if (kind === "i") {
-      if (el.id !== v) return false;
+      if (!idFits(el, v)) return false;
     } else if (kind === "c") {
-      if (!el.classList.contains(v)) return false;
+      if (!classFits(el, v)) return false;
     } else if (kind === "p") {
       if (!classPrefixFits(el, v)) return false;
     } else if (kind === "s") {
@@ -645,7 +665,7 @@ function linkMatches(rule: number, k: number, el: Element): boolean {
   const tag = tables.chainTag[rule][k];
   if (tag !== "" && tag !== el.localName) return false;
   const id = tables.chainId[rule][k];
-  if (id !== "" && id !== el.id) return false;
+  if (id !== "" && !idFits(el, id)) return false;
   if (tables.chainRoot[rule][k] && el !== document.documentElement) return false;
   const states = tables.chainStates[rule][k];
   if ((states & P.S_FORM_STATES) !== 0) refreshFormState(el, states);
@@ -655,7 +675,7 @@ function linkMatches(rule: number, k: number, el: Element): boolean {
   const chainEndOf = rule < tables.chainNthEndOf.length && k < tables.chainNthEndOf[rule].length
     ? tables.chainNthEndOf[rule][k] : NO_OF;
   if (!nthApplies(el, tables.chainNthStart[rule][k], tables.chainNthEnd[rule][k], chainStartOf, chainEndOf)) return false;
-  for (const c of tables.chainClasses[rule][k]) if (!el.classList.contains(c)) return false;
+  for (const c of tables.chainClasses[rule][k]) if (!classFits(el, c)) return false;
   const chainPrefixes = rule < tables.chainClassPrefixes.length && k < tables.chainClassPrefixes[rule].length
     ? tables.chainClassPrefixes[rule][k] : undefined;
   if (chainPrefixes !== undefined) for (const p of chainPrefixes) if (!classPrefixFits(el, p)) return false;
@@ -703,6 +723,8 @@ function chainMatches(rule: number, k: number, el: Element): boolean {
  *  the rules its own classes name instead of the whole table. A page whose elements are built
  *  by script (a UI kit, a list rendered a few rows a frame) asks this for every element. */
 let dynIndexFor: number[] | null = null;
+/** The document mode the index was built for: a quirks document folds names. */
+let dynIndexQuirks = false;
 let dynByClass: Map<string, number[]> = new Map();
 let dynNoClass: number[] = [];
 let dynSeen: Int32Array = new Int32Array(0);
@@ -712,8 +734,12 @@ let dynCandidates: number[] = [];
 /** Builds the class index once per compiled rule table. */
 function dynIndex(): void {
   const dynRules = tables.dynRules;
-  if (dynIndexFor === dynRules) return;
+  // A quirks document reaches a rule through a class or id in any case, so the index it builds
+  // folds the names; a runner that shows pages of both kinds rebuilds it when the mode changes.
+  const fold = isQuirks();
+  if (dynIndexFor === dynRules && dynIndexQuirks === fold) return;
   dynIndexFor = dynRules;
+  dynIndexQuirks = fold;
   dynByClass = new Map();
   dynNoClass = [];
   dynSeen = new Int32Array(dynRules.length);
@@ -725,10 +751,11 @@ function dynIndex(): void {
       continue;
     }
     for (let c = 0; c < classes.length; c++) {
-      let list = dynByClass.get(classes[c]);
+      const key = fold ? classes[c].toLowerCase() : classes[c];
+      let list = dynByClass.get(key);
       if (list === undefined) {
         list = [];
-        dynByClass.set(classes[c], list);
+        dynByClass.set(key, list);
       }
       list.push(i);
     }
@@ -753,8 +780,9 @@ function resolveDynamicRules(el: Element): void {
   // reached through the classes the element actually has.
   for (let i = 0; i < dynNoClass.length; i++) addCandidate(dynNoClass[i]);
   const names = el.classList.tokens();
+  const fold = isQuirks();
   for (let k = 0; k < names.length; k++) {
-    const list = dynByClass.get(names[k]);
+    const list = dynByClass.get(fold ? names[k].toLowerCase() : names[k]);
     if (list === undefined) continue;
     for (let i = 0; i < list.length; i++) addCandidate(list[i]);
   }
@@ -773,7 +801,7 @@ function resolveDynamicRules(el: Element): void {
     const tag = tables.dynTags[i];
     const id = tables.dynIds[i];
     if (tag !== "" && tag !== el.localName) continue;
-    if (id !== "" && id !== el.id) continue;
+    if (id !== "" && !idFits(el, id)) continue;
     const r = tables.dynRules[i];
     if (inShadow && !tables.ruleUa[r]) continue;
     const pseudo = tables.dynPseudo[i];
@@ -1775,7 +1803,7 @@ function ruleApplies(el: Element, rule: number): boolean {
   const test = origin;
   // The subject's own tests come first: a rule that names a class this element doesn't have — the
   // common case — costs one lookup rather than the media, container and scope lookups below.
-  for (const c of tables.ruleClasses[rule]) if (!test.classList.contains(c)) return false;
+  for (const c of tables.ruleClasses[rule]) if (!classFits(test, c)) return false;
   const prefixes = rule < tables.ruleClassPrefixes.length ? tables.ruleClassPrefixes[rule] : undefined;
   if (prefixes !== undefined) for (const p of prefixes) if (!classPrefixFits(test, p)) return false;
   if (!ruleMediaHolds(rule)) return false;
@@ -1826,7 +1854,7 @@ function dynamicPseudoRules(el: Element, kind: number): number[] {
     const tag = tables.dynTags[i];
     const id = tables.dynIds[i];
     if (tag !== "" && tag !== el.localName) continue;
-    if (id !== "" && id !== el.id) continue;
+    if (id !== "" && !idFits(el, id)) continue;
     out.push(tables.dynRules[i]);
   }
   return out;
@@ -2305,7 +2333,7 @@ function syncCarriers(el: Element): void {
   carrierRuleIndex();
   const take = (i: number): void => {
     const id = tables.dynIds[i];
-    if (id !== "" && id !== el.id) return;
+    if (id !== "" && !idFits(el, id)) return;
     const r = tables.dynRules[i];
     // Only a rule that matches now gives the element a carrier: the class or state test is the
     // cascade's own, so a rule that matches later is picked up by a later pass.
@@ -4022,14 +4050,14 @@ function isEmptyElement(el: Element): boolean {
 
 function compoundFits(el: Element, c: Compound, scope: Element | null = null): boolean {
   if (!tagMatches(c, el.localName, el.namespaceURI)) return false;
-  if (c.id !== null && c.id !== el.id) return false;
+  if (c.id !== null && !idFits(el, c.id)) return false;
   if (c.root && el !== document.documentElement) return false;
   if (c.empty === true && !isEmptyElement(el)) return false;
   if (c.dir !== undefined && elementDirection(el) + 1 !== c.dir) return false;
   // :scope is the element a DOM API call was made on. A style sheet's selectors have none, where
   // parseSelector has already turned :scope into :root.
   if (c.scope === true && el !== (scope === null ? document.documentElement : scope)) return false;
-  for (const k of c.classes) if (!el.classList.contains(k)) return false;
+  for (const k of c.classes) if (!classFits(el, k)) return false;
   if (c.classPrefixes !== undefined) for (const p of c.classPrefixes) if (!classPrefixFits(el, p)) return false;
   if ((c.states & P.S_FORM_STATES) !== 0) refreshFormState(el, c.states);
   if ((c.states & el.state) !== c.states) return false;
