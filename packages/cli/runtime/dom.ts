@@ -3102,7 +3102,13 @@ export class Node extends EventTarget {
       this.insertBefore(n, child);
       return n;
     }
-    if (n.parentNode !== null) n.parentNode.removeChild(n);
+    if (n.parentNode !== null) {
+      // The node keeps its state through the move, the focus it holds included: the removal it
+      // takes in passing is not an element leaving the page.
+      const wasMoving = atomicMove;
+      atomicMove = true;
+      try { n.parentNode.removeChild(n); } finally { atomicMove = wasMoving; }
+    }
     this.insertBefore(n, child);
     return n;
   }
@@ -3162,8 +3168,8 @@ export class Node extends EventTarget {
     }
     noteChildList(this, [], [child], prev, next);
     // Focus doesn't survive the element leaving the page: a browser unfocuses it, and the page's
-    // active element falls back to the body.
-    if (wasConnected && focusState.el !== null && !focusState.el.isConnected) setFocus(null);
+    // active element falls back to the body. A move keeps it (see moveBefore).
+    if (!atomicMove && wasConnected && focusState.el !== null && !focusState.el.isConnected) setFocus(null);
     // A popover that leaves the document closes, going away from the screen it was on.
     if (wasConnected && openPopoverCount > 0) hidePopoversIn(child);
     if (wasConnected && CUSTOM_DEFS > 0) disconnectedSubtree(child);
@@ -4124,6 +4130,9 @@ let capturedElement: Element | null = null;
 let capturedPointerId = -1;
 
 /** Records a host press or release: a capture is only possible while the pointer is down. */
+/** True while an atomic move takes its node out of its old parent: the node keeps its state. */
+let atomicMove = false;
+
 export function notePointerActive(id: number, active: boolean): void {
   const i = activePointers.indexOf(id);
   if (active === (i >= 0)) return;
