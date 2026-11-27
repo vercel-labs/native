@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "svg-filter.h"
@@ -99,6 +100,24 @@ int main(void) {
     "f,255,0,0,255,0,0,8,8;c,5,1e308,1e308,1e308,1e308,0,0,0,0,8,8", 1);
   run("a subregion of huge size with a finite start paints",
     "t,-1,0,0,1e308,1e308", 1);
+
+  // The buffers a chain keeps share one budget: five results over a 2048x2048 surface are 80 MB,
+  // past the engine's 64 MiB, so the chain stops and the source is left exactly as it was.
+  {
+    enum { BW = 2048, BH = 2048 };
+    uint8_t *big = (uint8_t *)malloc((size_t)BW * BH * 4);
+    if (big != NULL) {
+      memset(big, 7, (size_t)BW * BH * 4);
+      const char *def =
+        "b,0.5,0.5,-1,0,0,2048,2048;b,0.5,0.5,0,0,0,2048,2048;"
+        "b,0.5,0.5,1,0,0,2048,2048;b,0.5,0.5,2,0,0,2048,2048";
+      svg_filter_apply(big, BW, BH, def, strlen(def), 0);
+      int same = 1;
+      for (size_t i = 0; i < (size_t)BW * BH * 4; i++) if (big[i] != 7) { same = 0; break; }
+      check("a chain past the buffer budget leaves the source as it was", same, "");
+      free(big);
+    }
+  }
 
   if (failed > 0) {
     printf("\n%d check%s failed\n", failed, failed == 1 ? "" : "s");
