@@ -4706,7 +4706,10 @@ export class Element extends Node {
     if (value !== "") this.recordSlotAttribute("id");
     if (this.dynamic) this.rulesStale = true;
     noteAttribute(this, "id", old);
-    invalidateStyle();
+    // A detached node's id can't be named by any rule of the page it isn't in yet: the insertion
+    // styles its subtree then. Parsing markup that carries ids (an <svg>'s <defs>, say) would
+    // otherwise restyle the whole page for each one.
+    if (this.isConnected) invalidateStyle();
   }
 
   /**
