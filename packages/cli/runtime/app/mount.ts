@@ -45,7 +45,7 @@ import { setPaintUrls } from "../svg-paint.ts";
 import * as P from "../../shared/props.ts";
 import { pointer } from "./pointer.ts";
 import { clearSmoothScrolls } from "./smooth.ts";
-import { clearAdopted, refreshSheet, setSheetLiveSink } from "../sheets.ts";
+import { clearAdopted, refreshSheet, setSheetLiveSink, resetRuntimeLayers } from "../sheets.ts";
 import { applyWindowEnvironment, clearAllTimers, resetLoadGate, window, reportUnhandledRejection } from "../window.ts";
 import { clearLiveCollections, clearLiveRanges, setValueRangeGeometryHook } from "../dom.ts";
 import { resetAccessibleProperties } from "../a11y.ts";
@@ -783,6 +783,7 @@ export function resetPage(): void {
   resetHighlights();
   resetTargetText();
   clearAdopted();
+  resetRuntimeLayers();
   clearLiveCollections();
   clearLiveRanges();
   clearRegistrations();

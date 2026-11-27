@@ -34,7 +34,7 @@ import { hostBackingScale, hostFontAscentDevice, hostFontDescentDevice, hostFont
 import { mediaMatches } from "./media.ts";
 import { containerMatches } from "./container.ts";
 import { hintDecls } from "./hints.ts";
-import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesReachBeyond, setCompiledSheetMediaSink, setCompiledSheetOffSink, setCounterStyleSink, setSheetContent } from "./sheets.ts";
+import { ADOPTED, getSheetFonts, refreshSheet, runtimeRulesExist, runtimeRulesReachBeyond, setCompiledSheetMediaSink, setCompiledSheetOffSink, setCounterStyleSink, setSheetContent, sheetLayerRank, sheetLayerTotal } from "./sheets.ts";
 import type { CSSStyleSheet, SheetRule } from "./sheets.ts";
 import { registrationCount, registeredProperty, registrations } from "./registered.ts";
 import { viewport } from "./viewport.ts";
@@ -1147,7 +1147,16 @@ function collectCustoms(el: Element, runtime: RuntimeMatch[], parent: Node | nul
         if (isCustom(prop)) setCustom(raw, prop, tables.textDeclValues[id], fromParent);
       }
     }
-    for (const m of runtime) {
+    // Important declarations reverse the layer order, as applyRuntime does for the properties it
+    // sets: the earliest layer's !important wins. Apart from the layers the matches stay in
+    // cascade order: ascending specificity, then source order.
+    let matches = runtime;
+    if (important && runtime.length > 1) {
+      const total = sheetLayerTotal();
+      matches = runtime.slice().sort((a, b) =>
+        (total - a.layer) - (total - b.layer) || a.spec - b.spec || a.order - b.order);
+    }
+    for (const m of matches) {
       for (const d of m.rule.decls) {
         if ((d.important === true) !== important) continue;
         if (d.prop !== undefined && isCustom(d.prop)) setCustom(raw, d.prop, d.value === undefined ? "" : d.value, fromParent);
@@ -3938,6 +3947,8 @@ interface RuntimeMatch {
   rule: SheetRule;
   spec: number;
   order: number;
+  /** The rule's cascade layer rank; unlayered rules sort above every layer. */
+  layer: number;
 }
 
 /**
@@ -4006,14 +4017,17 @@ function runtimeMatches(test: Element, pseudo: number): RuntimeMatch[] {
         if (!selectorFitsSheet(test, sel, root)) continue;
         if (sel.specificity > spec) spec = sel.specificity;
       }
-      if (spec >= 0) out.push({ rule, spec, order });
+      if (spec >= 0) out.push({ rule, spec, order, layer: sheetLayerRank(rule.layer) });
     }
   }
-  // Insertion sort by (specificity, source order): the cascade wants the last applied to win.
+  // Insertion sort by (layer, specificity, source order): the cascade wants the last applied to
+  // win, and a later layer outranks an earlier one.
   for (let i = 1; i < out.length; i++) {
     const m = out[i];
     let k = i - 1;
-    while (k >= 0 && (out[k].spec > m.spec || (out[k].spec === m.spec && out[k].order > m.order))) {
+    while (k >= 0 && (out[k].layer > m.layer ||
+      (out[k].layer === m.layer && (out[k].spec > m.spec ||
+        (out[k].spec === m.spec && out[k].order > m.order))))) {
       out[k + 1] = out[k];
       k--;
     }
@@ -4134,7 +4148,14 @@ function runtimeChainFits(chain: ChainLink[], k: number, el: Element, scope: Ele
 function applyRuntime(el: Element, matched: RuntimeMatch[], important: boolean, parent: Node | null): void {
   const sv = el.sv;
   const su = el.su;
-  for (const m of matched) {
+  // Important declarations reverse the layer order: an earlier layer's !important beats a
+  // later one's, and an unlayered !important is the weakest of them.
+  let list = matched;
+  if (important && matched.length > 1) {
+    const total = sheetLayerTotal();
+    list = matched.slice().sort((a, b) => (total - a.layer) - (total - b.layer) || a.spec - b.spec || a.order - b.order);
+  }
+  for (const m of list) {
     for (const d of m.rule.decls) {
       if ((d.important === true) !== important) continue;
       if (d.prop !== undefined) {
