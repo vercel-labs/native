@@ -38,19 +38,26 @@ jobs:
       - name: Check example coverage
         working-directory: packages/cli
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ -n "$BASE_SHA" ]; then
-            node scripts/example-coverage.ts --base "$BASE_SHA"
+          if [ "$EVENT" = "pull_request" ]; then
+            # The change's own files: the pull request head against its merge base with the
+            # current next tip. Examples that landed on next after the branch forked are not in
+            # this diff, so they are not treated as this pull request's new examples.
+            git fetch --no-tags origin next
+            if git rev-parse -q --verify HEAD^2 >/dev/null; then PR_HEAD=HEAD^2; else PR_HEAD=HEAD; fi
+            MERGE_BASE=$(git merge-base origin/next "$PR_HEAD")
+            git diff --name-only "$MERGE_BASE" "$PR_HEAD" > "$RUNNER_TEMP/changed.txt"
+            node scripts/example-coverage.ts --base "$MERGE_BASE" --changed "$RUNNER_TEMP/changed.txt"
           else
             node scripts/example-coverage.ts
           fi
       - run: pnpm turbo run lint
       - run: pnpm turbo run build --filter=@native-sdk/cli --filter=@native-sdk/docs
 
-  # A pull request runs the examples its changed files reach: a paint change runs the paint-heavy
-  # apps, a text change the text-heavy apps, and a change to shared ground (the compiler, the DOM
-  # core, the gate itself) runs the smoke set. At most two apps go to each shard, most relevant
+  # A pull request runs the examples its own changed files reach: a paint change runs the
+  # paint-heavy apps, a text change the text-heavy apps, and a change to shared ground (the
+  # compiler, the DOM core, the gate itself) runs the smoke set. At most two apps go to each shard, most relevant
   # first. A push to next runs the full suite, unchanged. The selection logic is
   # packages/cli/scripts/example-selection.ts and the per-app tags are examples/coverage.json.
   select-examples:
@@ -68,10 +75,15 @@ jobs:
       - name: Select the examples this change touches
         id: select
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ -n "$BASE_SHA" ]; then
-            git diff --name-only "$BASE_SHA...HEAD" > "$RUNNER_TEMP/changed.txt"
+          if [ "$EVENT" = "pull_request" ]; then
+            # The change's own files: the pull request head against its merge base with the
+            # current next tip, so base-branch changes since the fork are not selected.
+            git fetch --no-tags origin next
+            if git rev-parse -q --verify HEAD^2 >/dev/null; then PR_HEAD=HEAD^2; else PR_HEAD=HEAD; fi
+            MERGE_BASE=$(git merge-base origin/next "$PR_HEAD")
+            git diff --name-only "$MERGE_BASE" "$PR_HEAD" > "$RUNNER_TEMP/changed.txt"
             node packages/cli/scripts/example-selection.ts --changed "$RUNNER_TEMP/changed.txt" --shards 4 --github-output "$GITHUB_OUTPUT"
           else
             printf 'shards<<EXAMPLE_SHARDS\n\n\n\n\nEXAMPLE_SHARDS\n' >> "$GITHUB_OUTPUT"

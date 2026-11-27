@@ -4,6 +4,7 @@
 // duplicates; the error names the examples that already declare each of its tags.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import type { CoverageManifest } from "./example-selection.ts";
 import { exampleNames, loadManifest, repoRootFromScript } from "./example-selection.ts";
@@ -26,15 +27,36 @@ export function examplesAtRevision(root: string, ref: string): string[] {
 }
 
 /**
- * Checks the manifest and, when `baseExamples` is given, that every example absent from it adds a
- * tag the examples before it do not declare. `baseExamples` are the apps on the base branch;
- * examples added by the same change are checked in order against the base plus the new ones
- * accepted before them.
+ * The examples a change introduces: example directories in `changed` that are on disk and did not
+ * exist at `baseExamples`. An example added to the base branch after the branch forked is not in
+ * the change's own file list, so it is not counted as this change's new example.
+ */
+export function introducedByChange(
+  changed: readonly string[],
+  diskExamples: readonly string[],
+  baseExamples: readonly string[],
+): string[] {
+  const base = new Set(baseExamples);
+  const out = new Set<string>();
+  for (const path of changed) {
+    const match = /^examples\/([^/]+)\//.exec(path);
+    if (match === null) continue;
+    const name = match[1];
+    if (base.has(name)) continue;
+    if (diskExamples.indexOf(name) >= 0) out.add(name);
+  }
+  return Array.from(out).sort();
+}
+
+/**
+ * Checks the manifest and, when `newExamples` is given, that every listed example adds a tag the
+ * examples before it do not declare. `newExamples` are the examples this change introduces;
+ * examples introduced by the same change are checked in order against the examples before them.
  */
 export function checkCoverage(
   manifest: CoverageManifest,
   diskExamples: readonly string[],
-  baseExamples: readonly string[] | null,
+  newExamples: readonly string[] | null,
 ): CoverageReport {
   const errors: string[] = [];
   const introduced: { [name: string]: string[] } = {};
@@ -58,10 +80,11 @@ export function checkCoverage(
       errors.push(`examples/coverage.json names examples/${name}, which does not exist`);
     }
   }
-  if (baseExamples === null) return { errors, introduced };
+  if (newExamples === null) return { errors, introduced };
 
-  const existing = new Set(baseExamples.filter((name) => diskExamples.indexOf(name) >= 0));
-  const added = diskExamples.filter((name) => !existing.has(name)).sort();
+  const addedSet = new Set(newExamples.filter((name) => diskExamples.indexOf(name) >= 0));
+  const existing = new Set(diskExamples.filter((name) => !addedSet.has(name)));
+  const added = diskExamples.filter((name) => addedSet.has(name)).sort();
   for (const name of added) {
     const own = declared[name] ?? [];
     const fresh = own.filter((tag) => {
@@ -92,24 +115,32 @@ export function checkCoverage(
   return { errors, introduced };
 }
 
-export function coverageReport(root: string, baseRef: string | null): CoverageReport {
+export function coverageReport(root: string, baseRef: string | null, changed: readonly string[] | null): CoverageReport {
   const manifest = loadManifest(root);
   const disk = exampleNames(root);
-  const base = baseRef === null ? null : examplesAtRevision(root, baseRef);
-  return checkCoverage(manifest, disk, base);
+  let newExamples: string[] | null = null;
+  if (baseRef !== null && changed !== null) {
+    newExamples = introducedByChange(changed, disk, examplesAtRevision(root, baseRef));
+  }
+  return checkCoverage(manifest, disk, newExamples);
 }
 
 function main(argv: string[]): void {
   const root = repoRootFromScript();
   let base: string | null = null;
+  let changed: string[] | null = null;
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--base") base = argv[++i] ?? null;
-    else {
+    if (argv[i] === "--base") {
+      base = argv[++i] ?? null;
+    } else if (argv[i] === "--changed") {
+      const file = argv[++i] ?? "";
+      changed = readFileSync(file, "utf8").split("\n").map((line) => line.trim()).filter((line) => line !== "");
+    } else {
       console.error(`example-coverage: unknown argument ${argv[i]}`);
       process.exit(2);
     }
   }
-  const report = coverageReport(root, base);
+  const report = coverageReport(root, base, changed);
   if (report.errors.length > 0) {
     for (const error of report.errors) console.error("example coverage: " + error);
     process.exit(1);
@@ -118,7 +149,9 @@ function main(argv: string[]): void {
   console.log(
     `example coverage ok: ${exampleNames(root).length} examples, ` +
     `${Object.keys(manifest.tags).length} tags` +
-    (base === null ? "" : `, new examples checked against ${base}`),
+    (base === null ? "" : changed === null
+      ? `, new examples not checked (pass --changed with --base)`
+      : `, new examples checked against ${base}`),
   );
 }
 
