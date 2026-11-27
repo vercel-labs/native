@@ -1253,6 +1253,7 @@ fn tsCoreStage(
     // generated entry/profile, one scratch tree.
     const stage_run = b.addSystemCommand(&.{node});
     stage_run.setName("native stage TypeScript core");
+    stage_run.addFileArg(dep.path("build/ts_run.mjs"));
     stage_run.addFileArg(dep.path("packages/core/scripts/stage_external_core.mjs"));
     stage_run.addArg("--src");
     stage_run.addDirectoryArg(b.path(appPath(b, app_root, "src")));
