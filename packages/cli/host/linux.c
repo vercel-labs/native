@@ -34,6 +34,7 @@
 #include FT_FREETYPE_H
 #include FT_BBOX_H
 #include FT_OUTLINE_H
+#include FT_TRUETYPE_TABLES_H
 #include <hb.h>
 #include <hb-ft.h>
 #include <hb-ot.h>
@@ -294,6 +295,35 @@ static const uint8_t *find_table(const Face *f, const char tag[4], uint32_t *out
   return NULL;
 }
 
+/** Reads a face's metric tables through FreeType. A WOFF or WOFF2 file keeps its tables in a
+ *  compressed container this walk can't see into, and FreeType hands the same tables back from
+ *  it, so a face the page names from one is measured and drawn like a plain font file's. */
+static void load_face_via_ft(Face *f) {
+  FT_Library lib = ft_library();
+  if (lib == NULL) return;
+  FT_Face ft = NULL;
+  if (FT_New_Memory_Face(lib, f->data, (FT_Long)f->len, 0, &ft) != 0) return;
+  uint8_t head[54], hhea[36], maxp[6], os2[96];
+  FT_ULong head_len = sizeof(head), hhea_len = sizeof(hhea), maxp_len = sizeof(maxp);
+  FT_ULong os2_len = sizeof(os2);
+  int ok = FT_Load_Sfnt_Table(ft, FT_MAKE_TAG('h', 'e', 'a', 'd'), 0, head, &head_len) == 0 &&
+    FT_Load_Sfnt_Table(ft, FT_MAKE_TAG('h', 'h', 'e', 'a'), 0, hhea, &hhea_len) == 0 &&
+    FT_Load_Sfnt_Table(ft, FT_MAKE_TAG('m', 'a', 'x', 'p'), 0, maxp, &maxp_len) == 0 &&
+    head_len >= 20 && hhea_len >= 36 && maxp_len >= 6;
+  if (ok) {
+    f->upem = be16(head + 18);
+    f->ascent = be16s(hhea + 4);
+    f->descent = be16s(hhea + 6);
+    f->line_gap = be16s(hhea + 8);
+    f->num_hmetrics = be16(hhea + 34);
+    f->num_glyphs = be16(maxp + 4);
+    f->x_height = FT_Load_Sfnt_Table(ft, FT_MAKE_TAG('O', 'S', '/', '2'), 0, os2, &os2_len) == 0 &&
+      os2_len >= 88 && be16(os2) >= 2 ? be16s(os2 + 86) : f->ascent * 0.55;
+    if (f->upem != 0 && f->num_hmetrics != 0) f->loaded = 1;
+  }
+  FT_Done_Face(ft);
+}
+
 static void load_face(Face *f, const uint8_t *path, size_t n) {
   memset(f, 0, sizeof(*f));
   f->data = read_file(path, n, &f->len);
@@ -303,8 +333,10 @@ static void load_face(Face *f, const uint8_t *path, size_t n) {
   const uint8_t *hhea = find_table(f, "hhea", &hhea_len);
   const uint8_t *maxp = find_table(f, "maxp", &maxp_len);
   const uint8_t *hmtx = find_table(f, "hmtx", &f->hmtx_len);
-  if (!head || !hhea || !maxp || !hmtx) return;
-  if (head_len < 20 || hhea_len < 36 || maxp_len < 6) return;
+  if (!head || !hhea || !maxp || !hmtx || head_len < 20 || hhea_len < 36 || maxp_len < 6) {
+    load_face_via_ft(f);
+    return;
+  }
   f->upem = be16(head + 18);
   // These three are signed: a font's descender is negative.
   f->ascent = be16s(hhea + 4);
@@ -666,7 +698,7 @@ static Face *system_face(int family, double weight, int italic) {
  *  has one, else the system face fontconfig matches, else NULL for the built-in metrics. */
 static Face *resolve_face(double weight) {
   Face *f = face_for(weight);
-  if (f) return f->loaded ? f : NULL;
+  if (f != NULL && f->loaded) return f;
   int family = 0;
   double w = 400;
   int italic = 0;
