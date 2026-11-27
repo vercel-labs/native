@@ -187,6 +187,10 @@ class ContextState {
   join = 0;
   fontSize = 10;
   fontWeight = 400;
+  // How text is placed relative to its point: the drawing state's own, though the host never sees
+  // it (the painter offsets each run before the call).
+  textAlign = "start";
+  textBaseline = "alphabetic";
   /** The filter string as set, and the definition packed for the host. */
   filterText = "none";
   filter = "";
@@ -525,6 +529,8 @@ export class CanvasRenderingContext2D {
     s.join = this.join;
     s.fontSize = this.fontSize;
     s.fontWeight = this.fontWeight;
+    s.textAlign = this.textAlign;
+    s.textBaseline = this.textBaseline;
     s.filterText = this.filterText;
     s.filter = this.filterDef;
     this.stack.push(s);
@@ -569,6 +575,8 @@ export class CanvasRenderingContext2D {
     this.fontSize = s.fontSize;
     this.fontWeight = s.fontWeight;
     hostCanvasSetFont(this.hostId, s.fontSize, s.fontWeight);
+    this.textAlign = s.textAlign;
+    this.textBaseline = s.textBaseline;
     this.filterText = s.filterText;
     this.filterDef = s.filter;
     hostCanvasSetFilter(this.hostId, s.filter);
