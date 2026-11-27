@@ -44,6 +44,7 @@
 #include <uiautomation.h>
 #include <uiautomationcoreapi.h>
 #include "windows_gl.h"
+#include "svg-filter.h"
 // SQLite: the Windows host calls the system's winsqlite3.dll, the SQLite Windows 10 and later
 // ship, through the import library a build makes from vendor/winsqlite3.def. The API is declared
 // here rather than included, since winsqlite3 brings no header and the host uses only these calls.
@@ -6316,6 +6317,10 @@ int32_t host_snapshot_composited(const uint8_t *path, size_t path_len, double wi
 
 double host_backing_scale(void) { return g_scale; }
 
+/** The display's scale, with or without a window on it: the default device scale, which a window
+ *  replaces with its own monitor's. */
+double host_display_scale(void) { return g_scale; }
+
 }  // extern "C"
 
 // ---------------------------------------------------------------------------
@@ -8301,6 +8306,82 @@ void host_canvas_put_image_data(int32_t id, double dx, double dy, double w, doub
     src->Release();
   }
   free(bgra);
+}
+
+// An inline SVG filter: the region's pixels are copied out of the target bitmap, the chain runs
+// over them (the portable engine in svg-filter.c), and the result is drawn back at the region.
+// The region is in bitmap pixels, already clamped to the bitmap by the runtime.
+void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t linear,
+                            double x, double y, double w, double h) {
+  Canvas *c = canvas_at(id);
+  if (!c || !c->bitmap || !(w > 0) || !(h > 0)) return;
+  int x0 = (int)floor(x), y0 = (int)floor(y);
+  int x1 = (int)ceil(x + w), y1 = (int)ceil(y + h);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)c->w) x1 = (int)c->w;
+  if (y1 > (int)c->h) y1 = (int)c->h;
+  int iw = x1 - x0, ih = y1 - y0;
+  if (iw <= 0 || ih <= 0) return;
+  canvas_flush(c);
+  D2D1_BITMAP_PROPERTIES1 read_props = D2D1::BitmapProperties1(
+      (D2D1_BITMAP_OPTIONS)(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+      D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+  ID2D1Bitmap1 *read = NULL;
+  if (FAILED(c->dc->CreateBitmap(D2D1::SizeU((UINT32)iw, (UINT32)ih), NULL, 0, &read_props, &read)) || !read)
+    return;
+  D2D1_RECT_U region = {(UINT32)x0, (UINT32)y0, (UINT32)x1, (UINT32)y1};
+  D2D1_MAPPED_RECT mapped = {0};
+  uint8_t *buf = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+  if (buf && SUCCEEDED(read->CopyFromBitmap(NULL, c->bitmap, &region)) &&
+      SUCCEEDED(read->Map(D2D1_MAP_OPTIONS_READ, &mapped))) {
+    // The target holds premultiplied BGRA; the engine takes premultiplied RGBA.
+    for (int row = 0; row < ih; row++) {
+      const uint8_t *src = mapped.bits + (size_t)row * (size_t)mapped.pitch;
+      uint8_t *dst = buf + (size_t)row * (size_t)iw * 4;
+      for (int col = 0; col < iw; col++) {
+        dst[col * 4 + 0] = src[col * 4 + 2];
+        dst[col * 4 + 1] = src[col * 4 + 1];
+        dst[col * 4 + 2] = src[col * 4 + 0];
+        dst[col * 4 + 3] = src[col * 4 + 3];
+      }
+    }
+    read->Unmap();
+    svg_filter_apply(buf, iw, ih, (const char *)def, n, linear != 0);
+    uint8_t *bgra = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+    if (bgra) {
+      for (int row = 0; row < ih; row++) {
+        const uint8_t *src = buf + (size_t)row * (size_t)iw * 4;
+        uint8_t *dst = bgra + (size_t)row * (size_t)iw * 4;
+        for (int col = 0; col < iw; col++) {
+          dst[col * 4 + 0] = src[col * 4 + 2];
+          dst[col * 4 + 1] = src[col * 4 + 1];
+          dst[col * 4 + 2] = src[col * 4 + 0];
+          dst[col * 4 + 3] = src[col * 4 + 3];
+        }
+      }
+      D2D1_BITMAP_PROPERTIES1 write_props = D2D1::BitmapProperties1(
+          D2D1_BITMAP_OPTIONS_NONE,
+          D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+      ID2D1Bitmap1 *src = NULL;
+      ID2D1DeviceContext *dc = canvas_begin(c);
+      if (dc && SUCCEEDED(dc->CreateBitmap(D2D1::SizeU((UINT32)iw, (UINT32)ih), bgra,
+                                           (UINT32)iw * 4, &write_props, &src)) && src) {
+        D2D1_MATRIX_3X2_F saved;
+        dc->GetTransform(&saved);
+        dc->SetTransform(D2D1::IdentityMatrix());
+        dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
+        D2D1_RECT_F dest = D2D1::RectF((FLOAT)x0, (FLOAT)y0, (FLOAT)x1, (FLOAT)y1);
+        dc->DrawBitmap(src, &dest, 1.0f, D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, NULL);
+        dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+        dc->SetTransform(saved);
+        src->Release();
+      }
+      free(bgra);
+    }
+  }
+  free(buf);
+  read->Release();
 }
 
 // ---------------------------------------------------------------------------

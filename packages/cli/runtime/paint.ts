@@ -3642,9 +3642,10 @@ function paintTopLayer(): void {
   if (layer.length === 0) return;
   paintingTopLayer = true;
   for (const el of layer) {
-    // Only a modal dialog draws a ::backdrop: a popover on the top layer has none, and a dialog
-    // the page doesn't render draws neither itself nor its backdrop.
-    if (el instanceof HTMLDialogElement && el.isModal && display(el) !== P.D_NONE) paintBackdrop(el);
+    // Every element in the top layer draws its ::backdrop: a modal dialog, a popover, a
+    // fullscreen element (CSS Position 4, and the backdrop pseudo-element applies to all of
+    // them). An element the page doesn't render draws neither itself nor its backdrop.
+    if (display(el) !== P.D_NONE) paintBackdrop(el);
     paintContext(el, el.x, el.y, 1, false);
   }
   paintingTopLayer = false;

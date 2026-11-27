@@ -177,11 +177,14 @@ An exception that no script catches prints against the files the app's author wr
 ## Inspector
 
 `native dev --inspect` serves a browser-devtools-style inspector for the running app on
-`http://127.0.0.1:9229/`; `--inspect=PORT` chooses another port, and `--inspect=0` asks the system
-for one. It shows the page's DOM tree, the computed styles and box model of the selected node, the
-layers the renderer paints (each with the property that gives it a layer, and its z-index), the
-frame times of the last 240 frames, and everything the app prints. The console also evaluates
-read-only expressions against the last snapshot: `document.querySelector('.item').textContent`,
+`http://127.0.0.1:9229/<token>/`; `--inspect=PORT` chooses another port, `--inspect=0` asks the
+system for one, and the printed URL carries a random per-session token, so open the URL the dev
+command prints. Requests without the token, and WebSocket upgrades from another origin or with a
+Host that is not loopback, are refused. It shows the page's DOM tree, the computed styles and box
+model of the selected node, the layers the renderer paints (each with the property that gives it a
+layer, and its z-index), the frame times of the last 240 frames, and everything the app prints. The
+console also evaluates read-only expressions against the last snapshot:
+`document.querySelector('.item').textContent`,
 `getComputedStyle(document.body).getPropertyValue('font-size')`.
 
 The page and a Chrome DevTools Protocol subset come from the same server, so a DevTools client can
@@ -195,7 +198,10 @@ Selecting a node highlights its box in the app; a screenshot comes back as a PNG
 
 The app answers over `.native/.inspect`: a dev build polls that directory and writes the snapshot the
 server asked for. None of it is compiled into a release build, and the server binds to the loopback
-interface only.
+interface only. An evaluated expression runs in an empty `vm` context built from the snapshot's
+JSON; the DOM views, `getComputedStyle` and `console` it uses are created inside that context, so it
+never holds an object or function from the inspector's own realm and the usual constructor-chain
+escapes reach nothing.
 
 ## Build cache
 

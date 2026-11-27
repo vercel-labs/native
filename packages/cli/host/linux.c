@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include "svg-filter.h"
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -35,6 +36,7 @@
 #include FT_BBOX_H
 #include FT_OUTLINE_H
 #include FT_TRUETYPE_TABLES_H
+#include FT_MULTIPLE_MASTERS_H
 #include <hb.h>
 #include <hb-ft.h>
 #include <hb-ot.h>
@@ -825,6 +827,62 @@ static void shape_variations(hb_font_t *font, double size, double weight, Featur
   hb_font_set_variations(font, vars, n);
 }
 
+/**
+ * Sets on the FreeType face the same axes shape_variations sets on the font it shapes with, so
+ * the outlines painting loads are the instance the layout measured. A run without axes still
+ * follows font-weight, font-size and font-stretch, as Chrome's font-optical-sizing: auto does.
+ */
+static void apply_face_variations(FT_Face ft, double size, double weight, FeatureRun *run) {
+  if (!ft || !FT_HAS_MULTIPLE_MASTERS(ft)) return;
+  FT_MM_Var *mm = NULL;
+  if (FT_Get_MM_Var(ft, &mm) != 0 || !mm) return;
+  FT_Fixed *coords = (FT_Fixed *)malloc((size_t)mm->num_axis * sizeof(FT_Fixed));
+  if (coords) {
+    for (FT_UInt i = 0; i < mm->num_axis; i++) coords[i] = mm->axis[i].def;
+    int family = 0, italic = 0;
+    double w = 400;
+    split_weight(weight, &family, &w, &italic);
+    for (FT_UInt i = 0; i < mm->num_axis; i++) {
+      FT_ULong tag = mm->axis[i].tag;
+      int named = 0;
+      if (run) {
+        for (unsigned j = 0; j < run->variation_count; j++) {
+          if (run->variations[j].tag == tag) {
+            coords[i] = (FT_Fixed)(run->variations[j].value * 65536.0);
+            named = 1;
+            break;
+          }
+        }
+      }
+      if (named) continue;
+      if (tag == HB_TAG('w', 'g', 'h', 't')) coords[i] = (FT_Fixed)(w * 65536.0);
+      else if (tag == HB_TAG('o', 'p', 's', 'z')) coords[i] = (FT_Fixed)(size * 65536.0);
+      else if (tag == HB_TAG('w', 'd', 't', 'h') && run && run->stretch != 100) {
+        coords[i] = (FT_Fixed)(run->stretch * 65536.0);
+      }
+    }
+    FT_Set_Var_Design_Coordinates(ft, mm->num_axis, coords);
+    free(coords);
+  }
+  FT_Done_MM_Var(ft->glyph->library, mm);
+}
+
+/** How many faces one run may use (its own and the fallbacks it lands in) before the list stops
+ *  being tracked: every face painted must get the run's axes, and a run rarely uses more. */
+#define MAX_RUN_FACES 8
+
+/**
+ * Gives a face the run's variation axes unless it already has them this run. Painting walks the
+ * primary and every fallback face a glyph came from; each one has its own FreeType coordinates,
+ * so updating only the primary leaves fallback glyphs at whichever weight last touched them.
+ */
+static void ensure_face_variations(FT_Face *faces, int *count, FT_Face ft, double size,
+                                   double weight, FeatureRun *run) {
+  for (int i = 0; i < *count; i++) if (faces[i] == ft) return;
+  apply_face_variations(ft, size, weight, run);
+  if (*count < MAX_RUN_FACES) faces[(*count)++] = ft;
+}
+
 typedef void (*shape_cb)(void *ctx, Face *face, FT_Face ft, unsigned glyph,
                          double x, double baseline_offset, double advance);
 
@@ -1069,9 +1127,12 @@ typedef void (*metrics_cb)(const uint8_t *, size_t);
 typedef struct {
   FT_Face primary;
   double size;
+  double weight;
   double shear;
   double x_min, x_max, above, below;
   int ink;
+  FT_Face faces[MAX_RUN_FACES];
+  int face_count;
 } InkBox;
 
 static void ink_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, double x,
@@ -1079,6 +1140,8 @@ static void ink_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, double
   (void)face;
   (void)advance;
   InkBox *ink = data;
+  ensure_face_variations(ink->faces, &ink->face_count, ft, ink->size, ink->weight,
+    run_for_weight(ink->weight));
   FT_BBox box;
   if (FT_Load_Glyph(ft, glyph, FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP) != 0) return;
   if (ft->glyph->format != FT_GLYPH_FORMAT_OUTLINE || ft->glyph->outline.n_contours == 0) return;
@@ -1115,9 +1178,11 @@ void host_text_metrics(const uint8_t *s, size_t n, double size, double weight, d
     InkBox ink;
     ink.primary = ft;
     ink.size = size;
+    ink.weight = weight;
     ink.shear = italic && !face_is_italic(ft, weight) ? 0.25 : 0;
     ink.x_min = ink.x_max = ink.above = ink.below = 0;
     ink.ink = 0;
+    ink.face_count = 0;
     shape_text(s, n, size, weight, letter, word, 0, ink_glyph, &ink);
     if (ink.ink) {
       m[1] = -ink.x_min;
@@ -2141,6 +2206,8 @@ typedef struct {
   unsigned glyph;
   double size;
   double shear;
+  /** The packed weight, whose feature run and wght change the outline of a variable font. */
+  double weight;
   cairo_path_t *path;
   int used;
 } GlyphPath;
@@ -2158,12 +2225,14 @@ static void clear_glyph_paths(void) {
   }
 }
 
-static unsigned glyph_path_hash(FT_Face ft, unsigned glyph, double size, double shear) {
+static unsigned glyph_path_hash(FT_Face ft, unsigned glyph, double size, double shear, double weight) {
   uint64_t h = (uint64_t)(uintptr_t)ft * 31u + glyph;
   uint64_t bits = 0;
   memcpy(&bits, &size, sizeof(bits));
   h = h * 1099511628211ull ^ bits;
   memcpy(&bits, &shear, sizeof(bits));
+  h = h * 1099511628211ull ^ bits;
+  memcpy(&bits, &weight, sizeof(bits));
   h = h * 1099511628211ull ^ bits;
   return (unsigned)(h & (GLYPH_PATH_SLOTS - 1));
 }
@@ -2189,12 +2258,14 @@ static cairo_t *glyph_scratch(void) {
 
 /** The path for one glyph at this size and slant, built once. NULL when the glyph has no outline
  *  or the table is full, in which case the caller builds it directly. */
-static cairo_path_t *cached_glyph_path(FT_Face ft, unsigned glyph, double size, double shear) {
-  unsigned at = glyph_path_hash(ft, glyph, size, shear);
+static cairo_path_t *cached_glyph_path(FT_Face ft, unsigned glyph, double size, double shear,
+                                       double weight) {
+  unsigned at = glyph_path_hash(ft, glyph, size, shear, weight);
   for (int probe = 0; probe < 32; probe++, at = (at + 1) & (GLYPH_PATH_SLOTS - 1)) {
     GlyphPath *entry = &g_glyph_paths[at];
     if (entry->used) {
-      if (entry->ft == ft && entry->glyph == glyph && entry->size == size && entry->shear == shear) {
+      if (entry->ft == ft && entry->glyph == glyph && entry->size == size && entry->shear == shear &&
+          entry->weight == weight) {
         return entry->path;
       }
       continue;
@@ -2224,16 +2295,17 @@ static cairo_path_t *cached_glyph_path(FT_Face ft, unsigned glyph, double size, 
     entry->glyph = glyph;
     entry->size = size;
     entry->shear = shear;
+    entry->weight = weight;
     entry->used = 1;
     return entry->path;
   }
   return NULL;
 }
 
-static int glyph_path(cairo_t *cr, FT_Face ft, unsigned glyph, double size, double x, double baseline,
-                      double shear, double y_offset) {
+static int glyph_path(cairo_t *cr, FT_Face ft, unsigned glyph, double size, double weight, double x,
+                      double baseline, double shear, double y_offset) {
   if (glyph == 0) return 0;
-  cairo_path_t *path = cached_glyph_path(ft, glyph, size, shear);
+  cairo_path_t *path = cached_glyph_path(ft, glyph, size, shear, weight);
   if (path) {
     cairo_save(cr);
     cairo_translate(cr, x, baseline - y_offset);
@@ -2302,13 +2374,19 @@ typedef struct {
   Mark *marks;
   int count;
   int cap;
+  /** The faces this run has configured, primary first. */
+  FT_Face faces[MAX_RUN_FACES];
+  int face_count;
 } PaintRun;
 
 static void paint_glyph(void *data, Face *face, FT_Face ft, unsigned glyph, double x,
                         double y_offset, double advance) {
   (void)face;
   PaintRun *p = data;
-  glyph_path(p->cr, ft, glyph, p->size, x, p->baseline, ft == p->primary ? p->shear : 0, y_offset);
+  ensure_face_variations(p->faces, &p->face_count, ft, p->size, p->weight,
+    run_for_weight(p->weight));
+  glyph_path(p->cr, ft, glyph, p->size, p->weight, x, p->baseline,
+    ft == p->primary ? p->shear : 0, y_offset);
   if (p->emphasis > 0 && advance > 0 && p->marks && p->count < p->cap) {
     int below = (p->emphasis >> 8) & 1;
     p->marks[p->count].cy = below
@@ -2330,6 +2408,8 @@ static int paint_run(cairo_t *cr, const uint8_t *s, size_t n, double size, doubl
                      int cap) {
   FT_Face ft = paint_face(weight);
   if (!ft) return 0;
+  // Each face a glyph comes from (the primary and any fallback) is given the run's axes by
+  // paint_glyph before its outline is loaded, so the run draws the instance shaping measured.
   // A run that asks for an italic the face doesn't have is slanted by the host, as a browser
   // slants it.
   int family = 0;
@@ -2348,6 +2428,7 @@ static int paint_run(cairo_t *cr, const uint8_t *s, size_t n, double size, doubl
   p.marks = marks;
   p.count = 0;
   p.cap = cap;
+  p.face_count = 0;
   shape_text(s, n, size, weight, letter, word, x, paint_glyph, &p);
   return p.count;
 }
@@ -2747,6 +2828,9 @@ void host_bundle_dir(dir_cb cb) {
 }
 
 double host_backing_scale(void) { return 1; }
+
+/** The Linux host draws at one device pixel per CSS px, with or without a window. */
+double host_display_scale(void) { return 1; }
 
 int32_t host_reduced_motion(void) {
   const char *env = getenv("NATIVE_REDUCED_MOTION");
@@ -5444,10 +5528,15 @@ static size_t replay_range(Replay *r, size_t i) {
         continue;
       }
       CmdList *saved = g_list;
+      size_t saved_limit = g_replay_limit;
       if (c->layer >= 0 && c->layer < g_layer_count) {
         g_list = &g_layers[c->layer].list;
+        // The limit is an index into the list being replayed, so a layer reached from a chunk
+        // paints its own commands to their end rather than to the end of the chunk's range.
+        g_replay_limit = (size_t)-1;
         replay_range(r, 0);
       }
+      g_replay_limit = saved_limit;
       g_list = saved;
       continue;
     }
@@ -6347,6 +6436,56 @@ void host_canvas_set_filter(int32_t id, const uint8_t *def, size_t n) {
     c->filter[at].a = a;
     c->filter[at].b = c->filter[at].c = c->filter[at].d = 0;
   }
+}
+
+// An inline SVG filter: the region's pixels are read out of the Cairo image surface, the chain
+// runs over them (the portable engine in svg-filter.c), and the result replaces them. The region
+// is in bitmap pixels, already clamped to the bitmap by the runtime.
+void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t linear,
+                            double x, double y, double w, double h) {
+  Canvas *c = canvas_at(id);
+  if (!c || !c->ctx || !c->surface || !(w > 0) || !(h > 0)) return;
+  if (cairo_image_surface_get_format(c->surface) != CAIRO_FORMAT_ARGB32) return;
+  ensure_channels();
+  const int R = g_ch_r, G = g_ch_g, B = g_ch_b, A = g_ch_a;
+  int x0 = (int)floor(x), y0 = (int)floor(y);
+  int x1 = (int)ceil(x + w), y1 = (int)ceil(y + h);
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 > (int)c->w) x1 = (int)c->w;
+  if (y1 > (int)c->h) y1 = (int)c->h;
+  int iw = x1 - x0, ih = y1 - y0;
+  if (iw <= 0 || ih <= 0) return;
+  cairo_surface_flush(c->surface);
+  uint8_t *data = cairo_image_surface_get_data(c->surface);
+  if (!data) return;
+  size_t stride = (size_t)cairo_image_surface_get_stride(c->surface);
+  uint8_t *buf = (uint8_t *)malloc((size_t)iw * (size_t)ih * 4);
+  if (!buf) return;
+  // ARGB32 holds premultiplied pixels in the machine's channel order; the engine takes RGBA.
+  for (int row = 0; row < ih; row++) {
+    const uint8_t *src = data + (size_t)(y0 + row) * stride + (size_t)x0 * 4;
+    uint8_t *dst = buf + (size_t)row * (size_t)iw * 4;
+    for (int col = 0; col < iw; col++) {
+      dst[col * 4 + 0] = src[col * 4 + R];
+      dst[col * 4 + 1] = src[col * 4 + G];
+      dst[col * 4 + 2] = src[col * 4 + B];
+      dst[col * 4 + 3] = src[col * 4 + A];
+    }
+  }
+  svg_filter_apply(buf, iw, ih, (const char *)def, n, linear != 0);
+  for (int row = 0; row < ih; row++) {
+    uint8_t *dst = data + (size_t)(y0 + row) * stride + (size_t)x0 * 4;
+    const uint8_t *src = buf + (size_t)row * (size_t)iw * 4;
+    for (int col = 0; col < iw; col++) {
+      dst[col * 4 + R] = src[col * 4 + 0];
+      dst[col * 4 + G] = src[col * 4 + 1];
+      dst[col * 4 + B] = src[col * 4 + 2];
+      dst[col * 4 + A] = src[col * 4 + 3];
+    }
+  }
+  free(buf);
+  cairo_surface_mark_dirty_rectangle(c->surface, x0, y0, iw, ih);
 }
 
 // --- Paths ------------------------------------------------------------------

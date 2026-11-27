@@ -2,13 +2,13 @@
 // port, over data the running app answers for. `native dev --inspect` starts it; the app and the
 // server share the build's `.native/inspect` directory (see runtime/app/inspect.ts).
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { join } from "node:path";
-import { createContext, runInContext } from "node:vm";
+import { constants as vmConstants, createContext, runInContext } from "node:vm";
 import { INSPECT_HTML } from "./inspect-ui.ts";
 
 /** One console line the app printed, or an exception the runtime reported. */
@@ -265,100 +265,243 @@ function boxModel(node: SnapshotNode): { [key: string]: unknown } | null {
   };
 }
 
-/** Builds the read-only DOM a console expression runs against, from the snapshot's data. */
-function consoleDom(snapshot: Snapshot): { document: unknown; getComputedStyle: (el: unknown) => unknown; addLog: (level: string, text: string) => void } {
-  const byId = new Map<number, SnapshotNode>();
-  for (const node of snapshot.nodes) byId.set(node.id, node);
-  const mirror = new Map<number, Record<string, unknown>>();
-  const logs: { level: string; text: string }[] = [];
-  const textOf = (node: SnapshotNode): string => {
+/**
+ * The console's globals, built inside the evaluated context from the snapshot's JSON.
+ *
+ * Nothing from the host's realm is handed to the context: the snapshot arrives as a JSON string
+ * that is parsed inside the context, and every function the expression can reach (the DOM views,
+ * `getComputedStyle`, `console`, the result formatter) is created inside the context. Expressions
+ * therefore run with the context's own intrinsics, so `this.constructor.constructor('return
+ * process')()` builds a function in that empty realm and reaches nothing of the host's.
+ */
+const INSPECT_CONSOLE = String.raw`
+function (jsonText) {
+  "use strict";
+  var stringify = JSON.stringify;
+  var evaluateIndirectly = eval;
+  var data = JSON.parse(jsonText);
+  var byId = new Map();
+  for (var i = 0; i < data.nodes.length; i++) byId.set(data.nodes[i].id, data.nodes[i]);
+  var mirror = new Map();
+  var logs = [];
+  function attr(node, name) {
+    for (var i = 0; i < node.attrs.length; i++) if (node.attrs[i][0] === name) return node.attrs[i][1];
+    return null;
+  }
+  function textOf(node) {
     if (node.type === 3 || node.type === 8) return node.text;
-    let text = "";
-    for (const id of node.children) {
-      const child = byId.get(id);
+    var text = "";
+    for (var i = 0; i < node.children.length; i++) {
+      var child = byId.get(node.children[i]);
       if (child !== undefined) text += textOf(child);
     }
     return text;
-  };
-  const matches = (node: SnapshotNode, selector: string): boolean => {
-    const s = selector.trim();
-    if (s.startsWith("#")) return node.attrs.some(([name, value]) => name === "id" && value === s.slice(1));
-    if (s.startsWith(".")) return node.attrs.some(([name, value]) => name === "class" && value.split(/\s+/).includes(s.slice(1)));
+  }
+  function matches(node, selector) {
+    var s = selector.trim();
+    if (s.charAt(0) === "#") return attr(node, "id") === s.slice(1);
+    if (s.charAt(0) === ".") {
+      var cls = attr(node, "class");
+      return cls !== null && cls.split(/\s+/).indexOf(s.slice(1)) >= 0;
+    }
     return node.name === s.toLowerCase() || (s === "*" && node.type === 1);
-  };
-  const queryAll = (node: SnapshotNode, selector: string): Record<string, unknown>[] => {
-    const out: Record<string, unknown>[] = [];
-    const walk = (current: SnapshotNode): void => {
-      for (const id of current.children) {
-        const child = byId.get(id);
+  }
+  function collect(node, type) {
+    var out = [];
+    for (var i = 0; i < node.children.length; i++) {
+      var child = byId.get(node.children[i]);
+      if (child !== undefined && (type === undefined || child.type === type)) out.push(view(child));
+    }
+    return out;
+  }
+  function queryAll(node, selector) {
+    var out = [];
+    function walk(current) {
+      for (var i = 0; i < current.children.length; i++) {
+        var child = byId.get(current.children[i]);
         if (child === undefined) continue;
         if (child.type === 1 && matches(child, selector)) out.push(view(child));
         walk(child);
       }
-    };
+    }
     walk(node);
     return out;
-  };
-  const view = (node: SnapshotNode): Record<string, unknown> => {
-    const known = mirror.get(node.id);
+  }
+  function view(node) {
+    var known = mirror.get(node.id);
     if (known !== undefined) return known;
-    const el: Record<string, unknown> = {
+    var el = {
       nodeId: node.id,
       nodeType: node.type,
       nodeName: node.type === 1 ? node.name.toUpperCase() : node.name,
       localName: node.name,
-      id: (node.attrs.find(([name]) => name === "id") ?? ["", ""])[1],
-      className: (node.attrs.find(([name]) => name === "class") ?? ["", ""])[1],
-      children: node.children.map((id) => byId.get(id)).filter((n): n is SnapshotNode => n !== undefined).map(view),
-      getAttribute: (name: string): string | null => {
-        const found = node.attrs.find(([key]) => key === name);
-        return found === undefined ? null : found[1];
+      id: attr(node, "id") === null ? "" : attr(node, "id"),
+      className: attr(node, "class") === null ? "" : attr(node, "class"),
+      getAttribute: function (name) { return attr(node, name); },
+      getBoundingClientRect: function () {
+        var r = node.rect === null ? [0, 0, 0, 0] : node.rect;
+        return { x: r[0], y: r[1], left: r[0], top: r[1], width: r[2], height: r[3],
+          right: r[0] + r[2], bottom: r[1] + r[3] };
       },
-      getBoundingClientRect: () => {
-        const r = node.rect ?? [0, 0, 0, 0];
-        return { x: r[0], y: r[1], left: r[0], top: r[1], width: r[2], height: r[3], right: r[0] + r[2], bottom: r[1] + r[3] };
-      },
-      querySelector: (selector: string): unknown => queryAll(node, selector)[0] ?? null,
-      querySelectorAll: (selector: string): unknown[] => queryAll(node, selector),
-      matches: (selector: string): boolean => matches(node, selector),
+      querySelector: function (selector) { var found = queryAll(node, selector); return found.length === 0 ? null : found[0]; },
+      querySelectorAll: function (selector) { return queryAll(node, selector); },
+      matches: function (selector) { return matches(node, selector); }
     };
-    Object.defineProperty(el, "textContent", { get: () => textOf(node) });
-    Object.defineProperty(el, "childNodes", { get: () => node.children.map((id) => byId.get(id)).filter((n): n is SnapshotNode => n !== undefined).map(view) });
-    Object.defineProperty(el, "parentNode", { get: () => byId.get(node.parent) === undefined ? null : view(byId.get(node.parent)!) });
-    Object.defineProperty(el, "parentElement", { get: () => { const p = byId.get(node.parent); return p !== undefined && p.type === 1 ? view(p) : null; } });
-    Object.defineProperty(el, "children", { get: () => node.children.map((id) => byId.get(id)).filter((n): n is SnapshotNode => n !== undefined && n.type === 1).map(view) });
+    Object.defineProperty(el, "textContent", { get: function () { return textOf(node); } });
+    Object.defineProperty(el, "childNodes", { get: function () { return collect(node); } });
+    Object.defineProperty(el, "children", { get: function () { return collect(node, 1); } });
+    Object.defineProperty(el, "parentNode", { get: function () {
+      var p = byId.get(node.parent);
+      return p === undefined ? null : view(p);
+    } });
+    Object.defineProperty(el, "parentElement", { get: function () {
+      var p = byId.get(node.parent);
+      return p !== undefined && p.type === 1 ? view(p) : null;
+    } });
     mirror.set(node.id, el);
     return el;
+  }
+  var root = byId.get(data.root);
+  var documentView = root === undefined ? {} : view(root);
+  var html = undefined;
+  var body = undefined;
+  for (var i = 0; i < data.nodes.length; i++) {
+    if (root !== undefined && html === undefined && data.nodes[i].parent === root.id && data.nodes[i].type === 1) html = data.nodes[i];
+    if (body === undefined && data.nodes[i].name === "body") body = data.nodes[i];
+  }
+  documentView.title = data.title;
+  documentView.documentElement = html === undefined ? null : view(html);
+  documentView.body = body === undefined ? null : view(body);
+  documentView.getElementById = function (id) {
+    for (var i = 0; i < data.nodes.length; i++)
+      if (data.nodes[i].type === 1 && attr(data.nodes[i], "id") === id) return view(data.nodes[i]);
+    return null;
   };
-  const root = byId.get(snapshot.root);
-  const documentView = root === undefined ? {} : view(root);
-  const html = root === undefined ? undefined : snapshot.nodes.find((n) => n.parent === root.id && n.type === 1);
-  const body = snapshot.nodes.find((n) => n.name === "body");
-  Object.assign(documentView, {
-    title: snapshot.title,
-    documentElement: html === undefined ? null : view(html),
-    body: body === undefined ? null : view(body),
-    getElementById: (id: string): unknown => {
-      const found = snapshot.nodes.find((n) => n.type === 1 && n.attrs.some(([name, value]) => name === "id" && value === id));
-      return found === undefined ? null : view(found);
-    },
-    querySelector: (selector: string): unknown => {
-      const found = snapshot.nodes.find((n) => n.type === 1 && matches(n, selector));
-      return found === undefined ? null : view(found);
-    },
-    querySelectorAll: (selector: string): unknown[] => snapshot.nodes.filter((n) => n.type === 1 && matches(n, selector)).map(view),
-  });
-  return {
-    document: documentView,
-    getComputedStyle: (el: unknown): { getPropertyValue: (name: string) => string } => {
-      const id = typeof el === "object" && el !== null && "nodeId" in el ? Number((el as { nodeId: number }).nodeId) : -1;
-      const node = byId.get(id);
-      return { getPropertyValue: (name: string): string => node === undefined ? "" : node.styles[name] ?? "" };
-    },
-    addLog: (level: string, text: string): void => {
-      logs.push({ level, text });
-    },
+  documentView.querySelector = function (selector) {
+    for (var i = 0; i < data.nodes.length; i++)
+      if (data.nodes[i].type === 1 && matches(data.nodes[i], selector)) return view(data.nodes[i]);
+    return null;
   };
+  documentView.querySelectorAll = function (selector) {
+    var out = [];
+    for (var i = 0; i < data.nodes.length; i++)
+      if (data.nodes[i].type === 1 && matches(data.nodes[i], selector)) out.push(view(data.nodes[i]));
+    return out;
+  };
+  globalThis.document = documentView;
+  globalThis.getComputedStyle = function (el) {
+    var id = typeof el === "object" && el !== null && "nodeId" in el ? Number(el.nodeId) : -1;
+    var node = byId.get(id);
+    return { getPropertyValue: function (name) { return node === undefined ? "" : node.styles[name] ?? ""; } };
+  };
+  globalThis.console = {
+    log: function () { logs.push({ level: "log", text: Array.prototype.map.call(arguments, String).join(" ") }); },
+    warn: function () { logs.push({ level: "warn", text: Array.prototype.map.call(arguments, String).join(" ") }); },
+    error: function () { logs.push({ level: "error", text: Array.prototype.map.call(arguments, String).join(" ") }); }
+  };
+  function describe(value) {
+    if (value === null) return { type: "object", subtype: "null", value: null };
+    if (value === undefined) return { type: "undefined" };
+    var type = typeof value;
+    if (type === "string" || type === "number" || type === "boolean") return { type: type, value: value };
+    if (type === "function") return { type: "function", description: String(value) };
+    try {
+      var json = stringify(value);
+      return { type: "object", value: json === undefined ? String(value) : JSON.parse(json) };
+    } catch (e) {
+      return { type: "object", description: String(value) };
+    }
+  }
+  var lastThenable = null;
+  function errorText(reason) {
+    if (typeof reason === "object" && reason !== null) {
+      try {
+        if (reason.code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING" || reason.code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG") {
+          return "import() is not available in the inspector console";
+        }
+        if (typeof reason.message === "string") return reason.message;
+      } catch (e) {
+        // A reason whose getters throw falls through to String().
+      }
+    }
+    return String(reason);
+  }
+  globalThis.__inspectRun = function (source) {
+    var value;
+    lastThenable = null;
+    try {
+      value = (0, evaluateIndirectly)(source);
+    } catch (err) {
+      return stringify({ exception: errorText(err) });
+    }
+    if (value !== null && (typeof value === "object" || typeof value === "function")) {
+      var then = null;
+      try { then = value.then; } catch (e) { then = null; }
+      if (typeof then === "function") {
+        // A promise the expression leaves behind must not become an unhandled rejection: a
+        // handler keeps it off the dev process, and the console reports its rejection instead.
+        var state = { settled: false, error: null };
+        lastThenable = state;
+        try {
+          then.call(value, undefined, function (reason) {
+            state.settled = true;
+            state.error = errorText(reason);
+          });
+        } catch (e) {
+          state.settled = true;
+          state.error = errorText(e);
+        }
+      }
+    }
+    return stringify({ value: describe(value) });
+  };
+  globalThis.__inspectThenable = function () {
+    return lastThenable === null ? "null" : stringify(lastThenable);
+  };
+  globalThis.__inspectLogs = function () { return stringify(logs); };
+}`;
+
+/** Whether a Host header names the loopback interface the inspector listens on. */
+function isInspectorHost(host: string, port: number): boolean {
+  return host === `127.0.0.1:${port}` || host === `localhost:${port}` || host === `[::1]:${port}`;
+}
+
+/** Whether an Origin header is the inspector's own; a page it serves has one of these. */
+function isInspectorOrigin(origin: string, port: number): boolean {
+  return origin === `http://127.0.0.1:${port}` || origin === `http://localhost:${port}` ||
+    origin === `http://[::1]:${port}`;
+}
+
+/** Compares the token a request carries with the session's, without an early exit on a mismatch. */
+function isSameToken(given: string | undefined, token: string): boolean {
+  if (given === undefined || given.length === 0) return false;
+  const a = Buffer.from(given);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** A rejection reason as text; a dynamic import is named for what it is. */
+function rejectionMessage(reason: unknown): string {
+  if (typeof reason === "object" && reason !== null) {
+    try {
+      const code = (reason as { code?: unknown }).code;
+      if (code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING" || code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG") {
+        return "import() is not available in the inspector console";
+      }
+      const message = (reason as { message?: unknown }).message;
+      if (typeof message === "string") return message;
+    } catch {
+      // A reason whose getters throw falls back to String().
+    }
+  }
+  return String(reason);
+}
+
+/** The token segment of a request target and the path after it. */
+function splitRequestPath(target: string | undefined): { token: string; path: string } {
+  const pathname = new URL(target ?? "/", "http://127.0.0.1").pathname;
+  const parts = pathname.split("/");
+  return { token: parts[1] ?? "", path: "/" + parts.slice(2).join("/") };
 }
 
 /** Starts the inspector's server and the channel to the app. */
@@ -368,6 +511,9 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
   const logs: ConsoleLine[] = [];
   let cache: { at: number; data: Snapshot } | null = null;
   let listenPort = options.port;
+  // A random per-session path segment, as Node's own inspector does: a page that was not handed
+  // the full URL cannot talk to the inspector, even though it can reach loopback.
+  const token = randomBytes(32).toString("base64url");
 
   const snapshot = async (force: boolean): Promise<Snapshot> => {
     if (!force && cache !== null && Date.now() - cache.at < 400) return cache.data;
@@ -392,38 +538,79 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     } });
   };
 
-  const evaluate = async (expression: string, returnByValue: boolean): Promise<{ [key: string]: unknown }> => {
+  const evaluateOnce = async (expression: string): Promise<{ [key: string]: unknown }> => {
     const snap = await snapshot(false);
-    const dom = consoleDom(snap);
-    const sandbox: { [key: string]: unknown } = {
-      document: dom.document,
-      getComputedStyle: dom.getComputedStyle,
-      console: {
-        log: (...args: unknown[]) => { const t = args.map(String).join(" "); dom.addLog("log", t); addLog("log", t); return undefined; },
-        warn: (...args: unknown[]) => { const t = args.map(String).join(" "); dom.addLog("warn", t); addLog("warn", t); return undefined; },
-        error: (...args: unknown[]) => { const t = args.map(String).join(" "); dom.addLog("error", t); addLog("error", t); return undefined; },
-      },
-      JSON: JSON,
-      Math: Math,
-      String: String,
-      Number: Number,
-      Boolean: Boolean,
-      Array: Array,
-      Object: Object,
-      Date: Date,
-      undefined: undefined,
+    // `DONT_CONTEXTIFY` gives the context its own intrinsics instead of folding a host object into
+    // it; the console's globals are then built inside the context from JSON, so the expression
+    // never sees a host object or function to walk back through.
+    const context = createContext(vmConstants.DONT_CONTEXTIFY);
+    runInContext(`(${INSPECT_CONSOLE})(${JSON.stringify(JSON.stringify(snap))})`, context);
+    // A rejection the expression leaves unhandled is raised on the dev process, which would end
+    // `native dev`. Node reports rejections per process, so watch the one turn in which they
+    // surface and keep those whose promise belongs to the context's realm; the rest are the dev
+    // command's own and keep Node's default when nothing else was listening.
+    const rejections: string[] = [];
+    let foreign: unknown;
+    const hadListeners = process.listenerCount("unhandledRejection") > 0;
+    const watch = (reason: unknown, promise: Promise<unknown>): void => {
+      if (promise instanceof Promise) {
+        if (foreign === undefined) foreign = reason;
+        return;
+      }
+      rejections.push(rejectionMessage(reason));
     };
-    const context = createContext(sandbox);
+    process.on("unhandledRejection", watch);
+    let raw: string;
     try {
-      const value = runInContext(expression, context, { timeout: 1000, displayErrors: false });
-      const described = describe(value);
-      if (returnByValue) return { result: described };
-      return { result: described };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      try {
+        raw = String(runInContext(`__inspectRun(${JSON.stringify(expression)})`, context, { timeout: 1000, displayErrors: false }));
+      } catch (err) {
+        raw = JSON.stringify({ exception: err instanceof Error ? err.message : String(err) });
+      }
+      // Context microtasks drain before the turn ends; this lets a rejected promise surface.
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+    } finally {
+      process.off("unhandledRejection", watch);
+    }
+    if (foreign !== undefined && !hadListeners) {
+      process.nextTick(() => { throw foreign; });
+    }
+    // A rejected promise the expression returned was handled inside the context; report it.
+    let returned: { error?: unknown } | null = null;
+    try {
+      returned = JSON.parse(String(runInContext("__inspectThenable()", context, { timeout: 1000 }))) as { error?: unknown } | null;
+    } catch {
+      returned = null;
+    }
+    let collected: unknown = [];
+    try {
+      collected = JSON.parse(String(runInContext("__inspectLogs()", context, { timeout: 1000 })));
+    } catch {
+      // A console that could not be read leaves the evaluation's result alone.
+    }
+    if (Array.isArray(collected)) {
+      for (const entry of collected) {
+        if (entry !== null && typeof entry === "object") {
+          const record = entry as { level?: unknown; text?: unknown };
+          if (typeof record.text === "string") {
+            addLog(typeof record.level === "string" ? record.level : "log", record.text);
+          }
+        }
+      }
+    }
+    let answer: { exception?: unknown; value?: unknown };
+    try {
+      answer = JSON.parse(raw) as { exception?: unknown; value?: unknown };
+    } catch {
+      answer = { exception: "the expression produced no result" };
+    }
+    const exception = answer.exception;
+    const rejectedPromise = returned !== null && typeof returned.error === "string" ? returned.error : undefined;
+    const text = typeof exception === "string" ? exception : rejectedPromise ?? rejections[0];
+    if (typeof text === "string") {
       return { exceptionDetails: {
         exceptionId: 1,
-        text: message,
+        text,
         lineNumber: 0,
         columnNumber: 0,
         scriptId: "0",
@@ -431,6 +618,15 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
         stackTrace: { callFrames: [] },
       } };
     }
+    return { result: answer.value };
+  };
+
+  // One console evaluation at a time, so the rejection window above sees only its own promises.
+  let evaluateQueue: Promise<void> = Promise.resolve();
+  const evaluate = (expression: string): Promise<{ [key: string]: unknown }> => {
+    const run = evaluateQueue.then(() => evaluateOnce(expression));
+    evaluateQueue = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const handle = async (client: Client, message: { id?: number; method?: string; params?: { [key: string]: unknown } }): Promise<void> => {
@@ -505,7 +701,7 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
       } else if (method === "Page.reload") {
         reply({});
       } else if (method === "Runtime.evaluate") {
-        reply(await evaluate(String(params.expression ?? ""), params.returnByValue === true));
+        reply(await evaluate(String(params.expression ?? "")));
       } else if (method === "Native.getSnapshot") {
         reply(await snapshot(true));
       } else if (method === "Native.getLayers") {
@@ -525,15 +721,49 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     }
   };
 
+  const debuggerUrl = (): string => `ws://127.0.0.1:${listenPort}/${token}/devtools/page/native`;
+
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : "";
+    const origin = req.headers.origin;
+    const deny = (status: number, text: string): void => {
+      res.writeHead(status, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+      res.end(text);
+    };
+    // DNS rebinding points a hostile name at 127.0.0.1; the Host header still carries that name.
+    if (!isInspectorHost(host, listenPort)) {
+      deny(403, "forbidden");
+      return;
+    }
+    // A page another origin serves may not drive the inspector, even if it reaches the address.
+    if (origin !== undefined && (typeof origin !== "string" || !isInspectorOrigin(origin, listenPort))) {
+      deny(403, "forbidden");
+      return;
+    }
+    let request: { token: string; path: string };
+    try {
+      request = splitRequestPath(req.url);
+    } catch {
+      deny(400, "bad request");
+      return;
+    }
+    if (!isSameToken(request.token, token)) {
+      deny(404, "not found");
+      return;
+    }
+    const path = request.path;
+    if (path === "/" || path === "/index.html") {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+        "X-Frame-Options": "DENY",
+        "Content-Security-Policy": "frame-ancestors 'none'",
+      });
       res.end(INSPECT_HTML);
       return;
     }
-    if (url.pathname === "/json" || url.pathname === "/json/list") {
-      res.writeHead(200, { "Content-Type": "application/json" });
+    if (path === "/json" || path === "/json/list") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify([{
         description: "Native SDK app",
         devtoolsFrontendUrl: "",
@@ -541,28 +771,28 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
         title: "Native SDK inspector",
         type: "page",
         url: "native://app/",
-        webSocketDebuggerUrl: `ws://127.0.0.1:${listenPort}/devtools/page/native`,
+        webSocketDebuggerUrl: debuggerUrl(),
       }]));
       return;
     }
-    if (url.pathname === "/json/version") {
-      res.writeHead(200, { "Content-Type": "application/json" });
+    if (path === "/json/version") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify({
         Browser: "Native SDK inspector",
         "Protocol-Version": "1.3",
         "User-Agent": "native",
         "V8-Version": "",
         "WebKit-Version": "",
-        webSocketDebuggerUrl: `ws://127.0.0.1:${listenPort}/devtools/page/native`,
+        webSocketDebuggerUrl: debuggerUrl(),
       }));
       return;
     }
-    if (url.pathname === "/json/protocol") {
-      res.writeHead(200, { "Content-Type": "application/json" });
+    if (path === "/json/protocol") {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(JSON.stringify({ version: { major: "1", minor: "3" }, domains: [] }));
       return;
     }
-    if (url.pathname === "/snapshot.json") {
+    if (path === "/snapshot.json") {
       snapshot(true).then((data) => {
         res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify(data));
@@ -577,18 +807,64 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
   });
 
   server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
+    // A client can reset the connection while a handshake reply is still being written. Without a
+    // listener Node raises that write error on the process, which would end `native dev`.
+    socket.on("error", () => {
+      try {
+        socket.destroy();
+      } catch {
+        // A socket that already closed needs nothing.
+      }
+    });
+    const refuse = (status: string): void => {
+      try {
+        socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
+      } catch {
+        socket.destroy();
+      }
+    };
+    const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : "";
+    const origin = req.headers.origin;
+    if (!isInspectorHost(host, listenPort)) {
+      refuse("403 Forbidden");
+      return;
+    }
+    if (origin !== undefined && (typeof origin !== "string" || !isInspectorOrigin(origin, listenPort))) {
+      refuse("403 Forbidden");
+      return;
+    }
+    let request: { token: string; path: string };
+    try {
+      request = splitRequestPath(req.url);
+    } catch {
+      refuse("400 Bad Request");
+      return;
+    }
+    if (!isSameToken(request.token, token)) {
+      refuse("403 Forbidden");
+      return;
+    }
+    if (request.path !== "/devtools/page/native") {
+      refuse("404 Not Found");
+      return;
+    }
     const key = req.headers["sec-websocket-key"];
     if (typeof key !== "string") {
-      socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+      refuse("400 Bad Request");
       return;
     }
     const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
-    socket.write(
-      "HTTP/1.1 101 Switching Protocols\r\n" +
-      "Upgrade: websocket\r\n" +
-      "Connection: Upgrade\r\n" +
-      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-    );
+    try {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+    } catch {
+      socket.destroy();
+      return;
+    }
     const client = new Client(socket);
     clients.add(client);
     client.onText = (text: string) => {
@@ -613,7 +889,9 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     });
   });
 
-  const url = `http://127.0.0.1:${listenPort}/`;
+  // Only the terminal the developer runs `native dev` in sees the token; anything that was not
+  // handed this URL (a page in the developer's browser, say) cannot use the inspector.
+  const url = `http://127.0.0.1:${listenPort}/${token}/`;
   // The port the server was asked for may be taken; the caller asked for a specific one, so a
   // failure to listen is the caller's to report.
   const close = (): void => {
@@ -645,19 +923,4 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     },
     close,
   };
-}
-
-/** A console value as the protocol reports it. */
-function describe(value: unknown): { [key: string]: unknown } {
-  if (value === null) return { type: "object", subtype: "null", value: null };
-  if (value === undefined) return { type: "undefined" };
-  const type = typeof value;
-  if (type === "string" || type === "number" || type === "boolean") return { type, value };
-  if (type === "function") return { type: "function", description: String(value) };
-  try {
-    const json = JSON.stringify(value);
-    return { type: "object", value: json === undefined ? String(value) : JSON.parse(json) };
-  } catch {
-    return { type: "object", description: String(value) };
-  }
 }

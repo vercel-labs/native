@@ -24,12 +24,15 @@ var __hStarted = false;
 // Promise tests run one at a time, in registration order, as WPT's harness starts them.
 var __hPromiseChain = Promise.resolve();
 
-function __hTest(name, optional) {
+function __hTest(name, optional, sync) {
   var t = {
     name: name,
     status: 0,
     message: "",
     optional: optional === true,
+    // A sync test is over when its function returns: it never held the page open, so its done()
+    // runs the cleanups without settling anything.
+    _sync: sync === true,
     _cleanups: [],
     _finished: false,
     _fail: function (e) {
@@ -65,7 +68,7 @@ function __hTest(name, optional) {
       for (var i = 0; i < t._cleanups.length; i++) {
         try { t._cleanups[i](); } catch (e) { t._fail(e); }
       }
-      __hPending--;
+      if (!t._sync) __hPending--;
       __hMaybeSettle();
     },
   };
@@ -387,9 +390,11 @@ function step_func_done(fn) {
 
 function test(fn, name) {
   // Synchronous, in script order, as WPT registers and starts a test while the page runs: code
-  // after test() must see its effect. Only the report waits for the page's load.
-  var t = __hTest(name === undefined ? (fn.name || "test") : name, false);
+  // after test() must see its effect. Only the report waits for the page's load. Its cleanups run
+  // as soon as it returns, before the next test reads the page, as WPT's harness has them.
+  var t = __hTest(name === undefined ? (fn.name || "test") : name, false, true);
   __hRun(t, fn);
+  t.done();
   return t;
 }
 

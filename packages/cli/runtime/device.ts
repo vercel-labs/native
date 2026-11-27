@@ -6,7 +6,7 @@
 // fontDeviceMetrics in style.ts), which is 1 in a headless run, so device-pixel rounding of line
 // boxes and snapped boxes stays as it was.
 
-import { hostBackingScale } from "./host.ts";
+import { hostBackingScale, hostDisplayScale } from "./host.ts";
 import { SNAPSHOT_SCALE, chosenRasterScale } from "./device-scale.ts";
 export { SNAPSHOT_SCALE } from "./device-scale.ts";
 
@@ -28,5 +28,10 @@ export function rasterScale(): number {
   // has recorded it: the run's environment says so already.
   const headless = process.env.NATIVE_SNAPSHOT !== undefined || process.env.NATIVE_SNAPSHOT_COMPOSITED !== undefined ||
     process.env.NATIVE_STEPS !== undefined;
-  return chosenRasterScale(hostBackingScale(), snapshotScale, headless);
+  // A window reports the scale of the screen it is on, and a page's first script can run before
+  // run() opens the window: the display gives the scale until then, so a canvas sized from
+  // devicePixelRatio at load has the pixels its frames will have. A headless run has no window of
+  // its own and keeps the scale its host reports.
+  const backing = headless ? hostBackingScale() : hostDisplayScale();
+  return chosenRasterScale(backing, snapshotScale, headless);
 }

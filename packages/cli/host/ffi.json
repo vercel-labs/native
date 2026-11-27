@@ -243,6 +243,7 @@
     { "name": "hostCanvasSetLineDash", "symbol": "host_canvas_set_line_dash", "params": ["i32", "string"], "returns": "void" },
     { "name": "hostCanvasSetFont", "symbol": "host_canvas_set_font", "params": ["i32", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasSetFilter", "symbol": "host_canvas_set_filter", "params": ["i32", "string"], "returns": "void" },
+    { "name": "hostCanvasSvgFilter", "symbol": "host_canvas_svg_filter", "params": ["i32", "string", "i32", "f64", "f64", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasBeginPath", "symbol": "host_canvas_begin_path", "params": ["i32"], "returns": "void" },
     { "name": "hostCanvasMoveTo", "symbol": "host_canvas_move_to", "params": ["i32", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasLineTo", "symbol": "host_canvas_line_to", "params": ["i32", "f64", "f64"], "returns": "void" },
@@ -268,6 +269,7 @@
     { "name": "hostCanvasDrawPart", "symbol": "host_canvas_draw_part", "params": ["i32", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
 
     { "name": "hostBackingScale", "symbol": "host_backing_scale", "params": [], "returns": "f64" },
+    { "name": "hostDisplayScale", "symbol": "host_display_scale", "params": [], "returns": "f64" },
     { "name": "hostReducedMotion", "symbol": "host_reduced_motion", "params": [], "returns": "i32" },
     { "name": "hostColorScheme", "symbol": "host_color_scheme", "params": [], "returns": "i32" },
     { "name": "hostIncreaseContrast", "symbol": "host_increase_contrast", "params": [], "returns": "i32" },
