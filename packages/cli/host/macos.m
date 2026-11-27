@@ -11611,24 +11611,44 @@ static int mask_blur_chunk(CompBackend *b, const MaskGroup *g, const CompWalk *w
   const CompWalkChunk *c = &walk->chunks[index];
   const WinChunk *e = &g_win_chunks[index];
   if (e->ext || e->pending || e->tex_count <= 0 || c->blur_sigma <= 0) return 0;
-  // A picture of the same commands at the same alpha is kept, as an unchanged chunk is.
-  {
+  // What the picture is of: the chunk's own key, the radius (which the chunk's commands do not
+  // carry, since the filter's push stays out of the range) and the alpha it was made at.
+  uint64_t key = g_win_keys[index] == 0 ? 0 : key_double(g_win_keys[index], c->blur_sigma);
+  if (key != 0) {
     BlurCache *keep = &g_blur_cache[index];
-    if (keep->tex >= 0 && keep->key != 0 && keep->key == g_win_keys[index] &&
-        keep->alpha == c->alpha) {
-      return 1;
-    }
+    if (keep->tex >= 0 && keep->key == key && keep->alpha == c->alpha) return 1;
   }
+  // An own-space chunk's tiles are in its layer's space: the picture is made in device pixels, so
+  // the chunk's matrix (without the device scale, which is in the tiles already) is applied to
+  // them, and the box the scratch covers is their device box.
+  CompMatrix inv = comp_matrix_scale((float)(1.0 / scale), (float)(1.0 / scale));
+  CompMatrix place = e->own ? comp_matrix_mul(c->m, inv) : comp_matrix_identity();
   int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
   for (int t = 0; t < e->tex_count; t++) {
     CompRect r = e->tiles[t].rect;
+    double dx0 = r.x, dy0 = r.y, dx1 = r.x + r.w, dy1 = r.y + r.h;
+    if (e->own) {
+      double px[4] = {r.x, r.x + r.w, r.x + r.w, r.x};
+      double py[4] = {r.y, r.y, r.y + r.h, r.y + r.h};
+      dx0 = dy0 = dx1 = dy1 = 0;
+      for (int k = 0; k < 4; k++) {
+        double x = px[k], y = py[k];
+        double tx = place.m[0] * x + place.m[4] * y + place.m[12];
+        double ty = place.m[1] * x + place.m[5] * y + place.m[13];
+        if (k == 0 || tx < dx0) dx0 = tx;
+        if (k == 0 || ty < dy0) dy0 = ty;
+        if (k == 0 || tx > dx1) dx1 = tx;
+        if (k == 0 || ty > dy1) dy1 = ty;
+      }
+    }
     if (t == 0) {
-      x0 = r.x; y0 = r.y; x1 = r.x + r.w; y1 = r.y + r.h;
+      x0 = (int)floor(dx0); y0 = (int)floor(dy0);
+      x1 = (int)ceil(dx1); y1 = (int)ceil(dy1);
     } else {
-      if (r.x < x0) x0 = r.x;
-      if (r.y < y0) y0 = r.y;
-      if (r.x + r.w > x1) x1 = r.x + r.w;
-      if (r.y + r.h > y1) y1 = r.y + r.h;
+      if ((int)floor(dx0) < x0) x0 = (int)floor(dx0);
+      if ((int)floor(dy0) < y0) y0 = (int)floor(dy0);
+      if ((int)ceil(dx1) > x1) x1 = (int)ceil(dx1);
+      if ((int)ceil(dy1) > y1) y1 = (int)ceil(dy1);
     }
   }
   if (x1 <= x0 || y1 <= y0) return 0;
@@ -11642,7 +11662,8 @@ static int mask_blur_chunk(CompBackend *b, const MaskGroup *g, const CompWalk *w
   CompMatrix into = comp_matrix_translate((float)-(x0 - pad), (float)-(y0 - pad));
   for (int t = 0; t < e->tex_count; t++) {
     CompRect r = e->tiles[t].rect;
-    CompMatrix M = comp_matrix_mul(into, comp_matrix_translate((float)r.x, (float)r.y));
+    CompMatrix M = comp_matrix_mul(comp_matrix_mul(into, place),
+                                   comp_matrix_translate((float)r.x, (float)r.y));
     mt_surface_draw(b, e->tiles[t].tex, (CompRect){0, 0, r.w, r.h}, &M, c->alpha, NULL);
   }
   mt_surface_end(b);
@@ -11671,7 +11692,7 @@ static int mask_blur_chunk(CompBackend *b, const MaskGroup *g, const CompWalk *w
   cache->y = y0 - pad;
   cache->w = w;
   cache->h = h;
-  cache->key = g_win_keys[index];
+  cache->key = key;
   cache->alpha = c->alpha;
   return 1;
 }

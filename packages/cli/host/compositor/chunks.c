@@ -528,6 +528,7 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
         run.mask_role = s->mask_role;
         run.mask_id = s->mask_id;
         run.mask_box = s->mask_box;
+        run.blur_sigma = s->blur_sigma;
       }
       int end = absorb_state(src, ctx, list_id, i, total, &run);
       if (end >= 0 && (open >= 0 || w->count < COMP_MAX_LAYERS)) {
@@ -547,7 +548,17 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
       // A pure blur inside a mask's content: the interior is walked as chunks of its own, drawn
       // crisp, and the chunk carries the radius for the host to blur the pixels by.
       int end = group_end(src, ctx, list_id, i, total);
-      if (end > i) {
+      // A blur inside the blur's own content cannot be one radius on one chunk: the replay keeps
+      // both.
+      int nested_blur = 0;
+      for (int k = i + 1; k < end && !nested_blur; k++) {
+        CompCmdView v;
+        memset(&v, 0, sizeof(v));
+        if (src->view(ctx, list_id, k, &v) && v.kind == COMP_CMD_EFFECT && v.blur_sigma > 0) {
+          nested_blur = 1;
+        }
+      }
+      if (end > i && !nested_blur) {
         int at = w->count;
         int fail = g_walk_fail, fail_at = g_walk_fail_at, fail_kind = g_walk_fail_kind;
         int span = g_walk_group_span;
