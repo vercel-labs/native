@@ -4616,6 +4616,16 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
                            GetModuleHandleW(NULL), NULL);
   free(wide);
   if (!g_hwnd) return;
+  // The executable's icon resource (id 1, compiled from the page's PNG by windows-icon.ts): the
+  // titlebar, Alt-Tab and the taskbar read the window's icons. A build with no page icon has no
+  // resource, and LoadImage answers NULL, leaving the shell's default.
+  HMODULE module = GetModuleHandleW(NULL);
+  HICON icon_big = (HICON)LoadImageW(module, MAKEINTRESOURCEW(1), IMAGE_ICON, 0, 0,
+                                     LR_DEFAULTSIZE | LR_SHARED);
+  if (icon_big) SendMessageW(g_hwnd, WM_SETICON, ICON_BIG, (LPARAM)icon_big);
+  HICON icon_small = (HICON)LoadImageW(module, MAKEINTRESOURCEW(1), IMAGE_ICON,
+                                       GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED);
+  if (icon_small) SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)icon_small);
   // A machine with no input method installed gives a window no IME context, which leaves nothing
   // for a test to drive; NATIVE_IME_TEST gives the window a default one.
   if (getenv("NATIVE_IME_TEST") != NULL) {

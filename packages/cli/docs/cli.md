@@ -112,9 +112,12 @@ from the display name. On macOS the display name is the app menu's ("About Tide"
 
 The bundle gets `.native/app.json` (the same facts, with the icon at `.native/icon.png`) and the
 platform's packaging reads it. On macOS the icon becomes `Contents/Resources/AppIcon.icns` with
-the system's `sips` and `iconutil`, and the `Info.plist` names it with `CFBundleIconFile`. A
-manifest that can't be read, or an icon file that isn't there, prints one warning and the build
-goes on with what it has.
+the system's `sips` and `iconutil`, and the `Info.plist` names it with `CFBundleIconFile`. On
+Windows the same PNG becomes an .ico at 16, 24, 32, 48, 64 and 256 pixels, compiled into the
+executable's icon resource by zig's resource compiler (a Windows build already needs zig), so
+Explorer, Alt-Tab and the taskbar show it, and the window sets it with `WM_SETICON` for its
+titlebar and taskbar icons. A manifest that can't be read, or an icon file that isn't there,
+prints one warning and the build goes on with what it has.
 
 On macOS a release build is also signed and packaged; [Shipping a macOS app](macos.md) covers the
 identity and notary environment variables, the `.dmg`, and how to check a build.
