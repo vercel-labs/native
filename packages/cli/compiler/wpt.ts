@@ -983,7 +983,7 @@ async function runBatchInDir(dir: string, jobs: Job[], outDir: string, hostObjs:
       if (await prepare(false, true)) await run();
     }
   }
-  return { outputs: out, failures, built, startup };
+  return { outputs: out, failures, built, startup, dirs: [dir] };
 }
 
 /**
@@ -1019,12 +1019,14 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
     const outputs = new Map(first.outputs);
     const failures = new Map(first.failures);
     process.stderr.write(`\nnative wpt: batch ${index}: the runner died before its first page for ${jobs.length} page(s); running them one per program to find the one that breaks it\n`);
+    const dirs = [...(first.dirs ?? [])];
     for (let n = 0; n < jobs.length; n++) {
-      const part = await runBatch(index * 1000 + n + 1, [jobs[n]], outDir, hostObjs, depth + 1);
+      const part = await runBatch(splitIndex++, [jobs[n]], outDir, hostObjs, depth + 1);
       for (const [k, v] of part.outputs) outputs.set(k, v);
       for (const [k, v] of part.failures) failures.set(k, v);
+      if (part.dirs !== undefined) dirs.push(...part.dirs);
     }
-    return { outputs, failures, built: true };
+    return { outputs, failures, built: true, dirs };
   }
   if (jobs.length <= 1 || why === "") return first;
   if (depth === 0 && first.built === false) {
@@ -1040,12 +1042,14 @@ async function runBatch(index: number, jobs: Job[], outDir: string, hostObjs: st
     if (first.startup === true && jobs.length > 1) {
       const outputs = new Map(first.outputs);
       const failures = new Map(first.failures);
+      const dirs = [...(first.dirs ?? [])];
       for (let n = 0; n < jobs.length; n++) {
-        const part = await runBatch(index * 1000 + n + 1, [jobs[n]], outDir, hostObjs, depth + 1);
+        const part = await runBatch(splitIndex++, [jobs[n]], outDir, hostObjs, depth + 1);
         for (const [k, v] of part.outputs) outputs.set(k, v);
         for (const [k, v] of part.failures) failures.set(k, v);
+        if (part.dirs !== undefined) dirs.push(...part.dirs);
       }
-      return { outputs, failures, built: true };
+      return { outputs, failures, built: true, dirs };
     }
     if (first.startup === true) {
       for (const j of jobs) first.outputs.set(j.page.key, "CRASH the runner died before its first page started");
