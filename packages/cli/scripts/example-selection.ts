@@ -159,6 +159,8 @@ export interface Selection {
   examples: string[];
   tags: string[];
   reasons: string[];
+  /** Examples whose own files changed; they always run. */
+  direct: string[];
   /** True when a rule selects every example (a change to shared ground). */
   all: boolean;
 }
@@ -190,6 +192,7 @@ export function selectExamples(
 ): Selection {
   const examples = Object.keys(manifest.examples).sort();
   const selected = new Set<string>();
+  const direct = new Set<string>();
   const tags = new Set<string>();
   const reasons: string[] = [];
   let all = false;
@@ -197,6 +200,7 @@ export function selectExamples(
     const own = exampleInPath(path, examples);
     if (own !== null) {
       selected.add(own);
+      direct.add(own);
       reasons.push(`${path} selects ${own} (the example itself)`);
       continue;
     }
@@ -221,7 +225,7 @@ export function selectExamples(
     }
   }
   if (all) {
-    return { examples: examples, tags: Object.keys(manifest.tags).sort(), reasons, all: true };
+    return { examples: examples, tags: Object.keys(manifest.tags).sort(), reasons, direct: Array.from(direct).sort(), all: true };
   }
   for (const name of examples) {
     const own = manifest.examples[name];
@@ -231,14 +235,16 @@ export function selectExamples(
     for (const name of baseline) if (examples.indexOf(name) >= 0) selected.add(name);
     if (selected.size > 0) reasons.push("no rule selected an example; running the baseline");
   }
-  return { examples: Array.from(selected).sort(), tags: Array.from(tags).sort(), reasons, all: false };
+  return { examples: Array.from(selected).sort(), tags: Array.from(tags).sort(), reasons, direct: Array.from(direct).sort(), all: false };
 }
 
 /**
- * The examples each shard of a pull request runs. A change with unfocused reach runs the manifest's
- * smoke set, one app per shard. A targeted selection keeps up to `perShard` apps for each of
- * `shards` shards, most relevant first (an app whose declared tags match more of the change's tags),
- * and spreads them round-robin. Apps beyond the cap are returned as dropped.
+ * The examples each shard of a pull request runs. Every example whose own files changed always
+ * runs, even when the change also reaches shared ground: a changed app must not slip out of the
+ * tier that would catch its regression. A change with unfocused reach adds the manifest's smoke
+ * set; a targeted selection adds matching apps up to the shard cap, most relevant first. Directly
+ * changed apps are included before the cap, so they are never dropped. Apps beyond the cap are
+ * returned as dropped.
  */
 export function shardSelection(
   selection: Selection,
@@ -246,29 +252,45 @@ export function shardSelection(
   shards: number,
   perShard: number,
 ): { shards: string[][]; dropped: string[] } {
-  const picked = selection.all ? (manifest.smoke ?? selection.examples).slice() : selection.examples.slice();
-  if (!selection.all) {
+  const direct = selection.direct ?? [];
+  const directSet = new Set(direct);
+  const picked: string[] = [];
+  const add = (name: string): void => {
+    if (picked.indexOf(name) < 0) picked.push(name);
+  };
+  if (selection.all) {
+    for (const name of direct) add(name);
+    for (const name of manifest.smoke ?? selection.examples) add(name);
+  } else {
     const relevance = (name: string): number => {
       const own = manifest.examples[name] ?? [];
       let count = 0;
       for (const tag of own) if (selection.tags.indexOf(tag) >= 0) count++;
       return count;
     };
-    picked.sort((a, b) => {
+    for (const name of direct) add(name);
+    const ranked = selection.examples.slice().sort((a, b) => {
       const byRelevance = relevance(b) - relevance(a);
       return byRelevance !== 0 ? byRelevance : (a < b ? -1 : a > b ? 1 : 0);
     });
+    for (const name of ranked) add(name);
   }
   const cap = shards * perShard;
-  const kept = picked.slice(0, cap);
-  const dropped = picked.slice(cap);
+  let kept: string[];
+  let dropped: string[];
+  if (selection.all) {
+    kept = picked;
+    dropped = [];
+  } else {
+    const directPicked = picked.filter((name) => directSet.has(name));
+    const rest = picked.filter((name) => !directSet.has(name));
+    const room = Math.max(0, cap - directPicked.length);
+    kept = directPicked.concat(rest.slice(0, room));
+    dropped = rest.slice(room);
+  }
   const out: string[][] = [];
   for (let i = 0; i < shards; i++) out.push([]);
-  if (selection.all) {
-    for (let i = 0; i < kept.length && i < shards; i++) out[i].push(kept[i]);
-  } else {
-    for (let i = 0; i < kept.length; i++) out[i % shards].push(kept[i]);
-  }
+  for (let i = 0; i < kept.length; i++) out[i % shards].push(kept[i]);
   return { shards: out, dropped };
 }
 
@@ -322,7 +344,7 @@ function main(argv: string[]): void {
     }
   }
   const selection: Selection = all
-    ? { examples: exampleNames(root), tags: Object.keys(manifest.tags).sort(), reasons: ["--all"], all: false }
+    ? { examples: exampleNames(root), tags: Object.keys(manifest.tags).sort(), reasons: ["--all"], direct: [], all: false }
     : selectExamples(changed, manifest);
   let examples = selection.examples;
   if (only !== null) examples = examples.filter((name) => only.indexOf(name) >= 0);

@@ -85,12 +85,32 @@ check("every Windows example is in the selection catalog", WINDOWS_EXAMPLES.ever
 check("the real manifest names exactly the apps on disk", Object.keys(real.examples).sort().join(" ") === disk.join(" "), Object.keys(real.examples).sort().join(" "));
 check("every rule tag is in the real catalog", SELECTION_RULES.every((rule) => (rule.tags ?? []).every((tag) => real.tags[tag] !== undefined)));
 
-const targeted: Selection = { examples: ["alpha", "beta", "gamma", "delta"], tags: ["paint", "text"], reasons: [], all: false };
+const targeted: Selection = { examples: ["alpha", "beta", "gamma", "delta"], tags: ["paint", "text"], reasons: [], direct: [], all: false };
 const capped = shardSelection(targeted, manifest, 2, 1);
 check("the shard cap keeps the most relevant apps", JSON.stringify(capped.shards) === JSON.stringify([["delta"], ["alpha"]]), JSON.stringify(capped.shards));
 check("apps beyond the cap are reported as dropped", JSON.stringify(capped.dropped) === JSON.stringify(["beta", "gamma"]), JSON.stringify(capped.dropped));
 const realPaintShards = shardSelection(realPaint, real, 4, 2);
 check("a paint change runs two apps in each shard", realPaintShards.shards.every((list) => list.length === 2) && realPaintShards.dropped.length === 0, JSON.stringify(realPaintShards.shards));
+
+const ownDirect = selectExamples(["examples/beta/app.ts"], manifest, rules);
+check("an example's own change is recorded as direct", JSON.stringify(ownDirect.direct) === JSON.stringify(["beta"]), JSON.stringify(ownDirect.direct));
+
+const mixed = selectExamples(["examples/beta/app.ts", "src/all.ts"], manifest, rules);
+check("an example change with shared ground keeps the example direct", mixed.all && JSON.stringify(mixed.direct) === JSON.stringify(["beta"]), JSON.stringify(mixed.direct));
+const mixedShards = shardSelection(mixed, manifest, 2, 1);
+check("the smoke substitution keeps a directly changed example", JSON.stringify(mixedShards.shards) === JSON.stringify([["beta"], ["alpha"]]), JSON.stringify(mixedShards.shards));
+check("the smoke substitution drops nothing", mixedShards.dropped.length === 0, JSON.stringify(mixedShards.dropped));
+
+const directCapped: Selection = { examples: ["alpha", "beta", "gamma"], tags: ["paint", "text"], reasons: [], direct: ["gamma"], all: false };
+const directCappedShards = shardSelection(directCapped, manifest, 1, 1);
+check("a direct example is kept even beyond the shard cap", JSON.stringify(directCappedShards.shards) === JSON.stringify([["gamma"]]), JSON.stringify(directCappedShards.shards));
+check("the cap then applies to the remaining apps", JSON.stringify(directCappedShards.dropped) === JSON.stringify(["alpha", "beta"]), JSON.stringify(directCappedShards.dropped));
+
+const realMixed = selectExamples(["examples/gallery/app.tsx", "examples/coverage.json"], real);
+check("a real example change with shared ground is direct and all-reaching", realMixed.all && realMixed.direct.indexOf("gallery") >= 0, JSON.stringify(realMixed.direct));
+const realMixedShards = shardSelection(realMixed, real, 4, 2);
+const realMixedFlat = realMixedShards.shards.reduce((all: string[], list: string[]) => all.concat(list), []);
+check("the real mixed change keeps gallery and the smoke set", realMixedFlat.indexOf("gallery") >= 0 && ["counter", "ui-dashboard", "canvas-particles", "webgl-cube"].every((name) => realMixedFlat.indexOf(name) >= 0) && realMixedShards.dropped.length === 0, JSON.stringify(realMixedShards.shards));
 
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
