@@ -85,7 +85,9 @@ export class Event {
     this.cancelable = dictBool(init, "cancelable", false);
     this.composed = dictBool(init, "composed", false);
     // A DOMHighResTimeStamp on the same clock as performance.now(), as browsers report it.
-    this.timeStamp = performance.now();
+    // An event timestamp is a clock a page can read, so it is coarsened as Chrome coarsens it:
+    // WPTs Event-timestamp-safe-resolution requires a resolution no better than 5 microseconds.
+    this.timeStamp = Math.floor(performance.now() * 200) / 200;
   }
   stopPropagation(): void {
     this.propagationStopped = true;
