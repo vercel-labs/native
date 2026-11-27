@@ -11097,9 +11097,32 @@ static uint64_t key_cmd(uint64_t h, const Cmd *c) {
   return h;
 }
 
+/** Folds the pixels a run of commands rasters into `h`, following a layer ref into the list it
+ *  paints: a chunk under a mask or a projection holds such a ref where the walk can't split, and
+ *  what it draws is the layer's commands. Answers 0 when the run can't be keyed: a canvas draws
+ *  pixels its script changes without a new command, and so does a video, which draws the frame it
+ *  is on; a chain of layers deeper than the walk follows has more than the key should hold. */
+static int key_range(uint64_t *out, CmdList *l, size_t first, size_t count, int depth) {
+  uint64_t h = *out;
+  for (size_t i = 0; i < count; i++) {
+    const Cmd *cmd = &l->cmds[first + i];
+    if (cmd->kind == CMD_CANVAS || cmd->kind == CMD_VIDEO) return 0;
+    if (cmd->kind == CMD_LAYER_REF) {
+      if (depth >= 6 || cmd->layer < 0 || cmd->layer >= g_layer_count) return 0;
+      CmdList *inner = &g_layers[cmd->layer].list;
+      h = key_mix(h, 0x6c62272e07bb0142ull);
+      if (!key_range(&h, inner, 0, inner->count, depth + 1)) return 0;
+      continue;
+    }
+    h = key_cmd(h, cmd);
+  }
+  *out = h;
+  return 1;
+}
+
 /** The key of a chunk rastered under `raster_m` (with its clips baked in when it isn't `own`)
  *  into a frame of `pw` x `ph`; 0 when its commands don't pin its pixels down: a canvas draws
- *  pixels its script changes without a new command, and a layer ref paints a list of its own. */
+ *  pixels its script changes without a new command. */
 static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *raster_m, int pw,
                           int ph) {
   if (c->count <= 0) return 0;
@@ -11127,11 +11150,7 @@ static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *ras
       h = key_double(h, c->clips[k].r);
     }
   }
-  for (int i = 0; i < c->count; i++) {
-    const Cmd *cmd = &l->cmds[c->first + i];
-    if (cmd->kind == CMD_CANVAS || cmd->kind == CMD_LAYER_REF) return 0;
-    h = key_cmd(h, cmd);
-  }
+  if (!key_range(&h, l, (size_t)c->first, (size_t)c->count, 0)) return 0;
   return h == 0 ? 1 : h;
 }
 
