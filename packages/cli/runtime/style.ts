@@ -1115,7 +1115,16 @@ function collectCustoms(el: Element, runtime: RuntimeMatch[], parent: Node | nul
         if (isCustom(prop)) setCustom(raw, prop, tables.textDeclValues[id], fromParent);
       }
     }
-    for (const m of runtime) {
+    // Important declarations reverse the layer order, as applyRuntime does for the properties it
+    // sets: the earliest layer's !important wins. Apart from the layers the matches stay in
+    // cascade order: ascending specificity, then source order.
+    let matches = runtime;
+    if (important && runtime.length > 1) {
+      const total = sheetLayerTotal();
+      matches = runtime.slice().sort((a, b) =>
+        (total - a.layer) - (total - b.layer) || a.spec - b.spec || a.order - b.order);
+    }
+    for (const m of matches) {
       for (const d of m.rule.decls) {
         if ((d.important === true) !== important) continue;
         if (d.prop !== undefined && isCustom(d.prop)) setCustom(raw, d.prop, d.value === undefined ? "" : d.value, fromParent);

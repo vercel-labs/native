@@ -16,7 +16,7 @@ const PAGE = `<!doctype html>
 #u { --z: rgb(255, 0, 0) !important; }
 @layer c { #u { --z: rgb(0, 0, 255) !important; } }
 </style></head><body>
-<div id="c"></div><div id="u"></div>
+<div id="c"></div><div id="u"></div><div id="r"></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -25,6 +25,12 @@ const value = (id: string, name: string): string =>
   getComputedStyle(document.getElementById(id) as HTMLElement).getPropertyValue(name);
 console.log("layered " + value("c", "--x") + " " + value("c", "--y"));
 console.log("unlayered " + value("u", "--z"));
+// A sheet a script adds follows the same layer order as a compiled one.
+const style = document.createElement("style");
+style.textContent = "@layer a { #r { --x: rgb(255, 0, 0) !important; --y: rgb(255, 0, 0); } }" +
+  " @layer b { #r { --x: rgb(0, 0, 255) !important; --y: rgb(0, 0, 255); } }";
+document.head.appendChild(style);
+console.log("runtime " + value("r", "--x") + " " + value("r", "--y"));
 `;
 
 const EXPECTED_LOG = [
@@ -32,6 +38,8 @@ const EXPECTED_LOG = [
   "layered rgb(255, 0, 0) rgb(0, 0, 255)",
   // An unlayered important declaration is the weakest, so the layered one takes it.
   "unlayered rgb(0, 0, 255)",
+  // The same holds for the layers a runtime sheet declares.
+  "runtime rgb(255, 0, 0) rgb(0, 0, 255)",
 ];
 
 let failed = 0;

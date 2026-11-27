@@ -59,13 +59,22 @@ export class LayerRegistry {
   order(): { key: number[]; count: number } {
     const key = new Array<number>(this.layers.length).fill(0);
     let next = 0;
-    const visit = (id: number): void => {
-      // A layer's sublayers come first, and its own rules after them, as an implicit final
-      // sublayer of the layer.
-      for (const c of this.layers[id].children) visit(c);
-      key[id] = next++;
-    };
-    for (const id of this.top) visit(id);
+    // A layer's sublayers come first, and its own rules after them, as an implicit final
+    // sublayer of the layer. The walk is iterative — a name may carry thousands of dotted parts,
+    // and the tree they make is deeper than the stack can hold — with a negative marker standing
+    // for "this layer's sublayers are done".
+    const stack: number[] = [];
+    for (let i = this.top.length - 1; i >= 0; i--) stack.push(this.top[i]);
+    while (stack.length > 0) {
+      const id = stack.pop() as number;
+      if (id < 0) {
+        key[-id - 1] = next++;
+        continue;
+      }
+      stack.push(-id - 1);
+      const kids = this.layers[id].children;
+      for (let k = kids.length - 1; k >= 0; k--) stack.push(kids[k]);
+    }
     return { key, count: next };
   }
 }
