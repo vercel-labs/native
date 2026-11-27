@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="native-window" content="width=480, height=480, resizable=no, titlebar=hidden-inset">
+    <title>Interval</title>
+    <link rel="stylesheet" href="../_fonts/fonts.css">
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <menu type="application"><menu label="Timer">
+      <menuitem id="menu-reset" label="Reset" accesskey="R"></menuitem>
+      <menuitem id="menu-25" label="25 Minutes" accesskey="3"></menuitem>
+    </menu></menu>
+    <header class="bar"><span class="name">Interval</span></header>
+    <main>
+      <div class="dial">
+        <svg viewBox="0 0 320 320" aria-hidden="true">
+          <g id="ticks"></g>
+          <circle class="track" cx="160" cy="160" r="146"></circle>
+          <circle id="arc" cx="160" cy="160" r="146" transform="rotate(-90 160 160)"></circle>
+        </svg>
+        <div class="face">
+          <div id="time" class="time">25:00</div><div id="label" class="label">Paused</div>
+        </div>
+      </div>
+      <div class="presets">
+        <button class="preset" id="preset-5" data-minutes="5">5 min</button>
+        <button class="preset" data-minutes="15">15 min</button>
+        <button class="preset active" data-minutes="25">25 min</button>
+      </div>
+    </main>
+    <p class="hint">Space to start or pause</p>
+    <script type="module" src="app.ts"></script>
+  </body>
+</html>

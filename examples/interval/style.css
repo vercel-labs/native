@@ -1,0 +1,57 @@
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; display: flex; flex-direction: column;
+  background: oklch(0.145 0 0); color: oklch(0.985 0 0);
+  font-family: "Geist Sans", system-ui, sans-serif; user-select: none;
+}
+/* hidden-inset: the page draws under a transparent titlebar, so this bar is the drag region. */
+.bar {
+  display: flex; align-items: center;
+  height: env(titlebar-area-height, 40px);
+  /* The same inset on both sides, so the bar sits symmetrically beside the traffic lights. */
+  padding: 0 calc(env(titlebar-area-x, 0px) + 14px);
+  app-region: drag;
+  font-family: "Geist Mono", monospace; font-size: 11px; font-weight: 500;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.name { color: oklch(0.68 0 0); }
+main {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 28px; padding-bottom: 10px; app-region: no-drag;
+}
+.dial { position: relative; width: 320px; height: 320px; }
+.dial svg { display: block; width: 100%; height: 100%; }
+#ticks line { stroke: oklch(1 0 0 / 0.14); stroke-width: 1; }
+#ticks line.major { stroke: oklch(1 0 0 / 0.34); }
+.track { fill: none; stroke: oklch(1 0 0 / 0.07); stroke-width: 1.5; }
+/* The sweep sets the circle's stroke-dashoffset attribute; a CSS value here would beat it. */
+#arc {
+  fill: none; stroke: oklch(0.985 0 0); stroke-width: 2.5; stroke-linecap: round;
+  stroke-dasharray: 917.35;
+}
+.face {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 8px;
+}
+.time {
+  font-family: "Geist Mono", monospace; font-size: 56px; font-weight: 500;
+  line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums;
+}
+.label {
+  font-family: "Geist Mono", monospace; font-size: 10px; font-weight: 500;
+  letter-spacing: 0.18em; text-transform: uppercase; color: oklch(0.46 0 0);
+}
+.presets { display: flex; gap: 8px; }
+.preset {
+  padding: 8px 16px; border: 1px solid oklch(1 0 0 / 0.14); border-radius: 999px;
+  background: transparent; color: oklch(0.62 0 0); cursor: pointer;
+  font-family: "Geist Mono", monospace; font-size: 12px; font-weight: 500;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.preset:hover { border-color: oklch(1 0 0 / 0.3); color: oklch(0.82 0 0); }
+.preset.active { background: oklch(0.985 0 0); border-color: oklch(0.985 0 0); color: oklch(0.145 0 0); }
+.hint {
+  margin: 0 0 22px; text-align: center; font-family: "Geist Mono", monospace;
+  font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: oklch(0.38 0 0);
+}
