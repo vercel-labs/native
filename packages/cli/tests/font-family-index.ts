@@ -90,7 +90,7 @@ const expectedMono = advance(MONO, TEXT, SIZE);
 
 const PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="native-window" content="width=600, height=240"><style>
-body { margin: 0; font-size: ${SIZE}px; }
+body { margin: 0; font-size: ${SIZE}px; font-kerning: none; }
 div { height: 40px; }
 @font-face { font-family: FamilyA; src: url("a.ttf"); }
 @font-face { font-family: FamilyB; src: url("b.ttf"); }
