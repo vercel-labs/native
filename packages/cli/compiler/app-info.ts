@@ -23,6 +23,10 @@ export interface AppIcon {
   height: number;
   /** The media type the page or manifest declared, or one guessed from the extension. */
   type: string;
+  /** The purposes the manifest gave it: `any`, `maskable` and `monochrome`. `any` without one. */
+  purposes: string[];
+  /** Whether the manifest entry stated a purpose at all, which is an author's explicit intent. */
+  purposeStated: boolean;
 }
 
 /** The app's identity, as a release build writes it into the bundle. */
@@ -155,7 +159,7 @@ function localFile(appDir: string, href: string): string | null {
 
 /** An icon entry from a link or a manifest, when its file is readable. */
 function iconOf(appDir: string, href: string, declaredType: string | null, sizes: string | null,
-  warnings: string[]): AppIcon | null {
+  purpose: string | null, warnings: string[]): AppIcon | null {
   const source = localFile(appDir, href);
   if (source === null) {
     warnings.push(`icon '${href}' is not a file the bundle can hold`);
@@ -164,12 +168,19 @@ function iconOf(appDir: string, href: string, declaredType: string | null, sizes
   const measured = pngSize(source);
   const declared = declaredSize(sizes);
   const side = measured === null ? declared : Math.min(measured.width, measured.height);
+  const stated = purpose !== null && purpose.trim() !== "";
+  const purposes = stated
+    ? purpose!.toLowerCase().split(/\s+/).filter((p) => p === "any" || p === "maskable" || p === "monochrome")
+    : [];
   return {
     source,
     href,
     width: measured === null ? side : measured.width,
     height: measured === null ? side : measured.height,
     type: iconType(declaredType, href),
+    purposes: purposes.length > 0 ? purposes : ["any"],
+    // An empty or unknown purpose is no intent at all: the icon takes the default layout.
+    purposeStated: purposes.length > 0,
   };
 }
 
@@ -278,7 +289,7 @@ export function appInfoOf(htmlPath: string): AppInfo {
       const record = entry as Record<string, unknown>;
       const href = text(record["src"]);
       if (href === null) continue;
-      const icon = iconOf(appDir, href, text(record["type"]), text(record["sizes"]), warnings);
+      const icon = iconOf(appDir, href, text(record["type"]), text(record["sizes"]), text(record["purpose"]), warnings);
       if (icon !== null) icons.push(icon);
     }
   }
@@ -288,7 +299,7 @@ export function appInfoOf(htmlPath: string): AppInfo {
       if (!r.includes("icon")) continue;
       const href = el.attrs.get("href") ?? "";
       if (href === "") continue;
-      const icon = iconOf(appDir, href, el.attrs.get("type") ?? null, el.attrs.get("sizes") ?? null, warnings);
+      const icon = iconOf(appDir, href, el.attrs.get("type") ?? null, el.attrs.get("sizes") ?? null, null, warnings);
       if (icon !== null) icons.push(icon);
     }
   }
@@ -322,10 +333,12 @@ export interface BundledAppInfo {
   updateUrl: string | null;
   /** The icon's path inside the bundle's resources, or null. */
   icon: string | null;
+  /** The platform-ready icon (inset and on macOS masked) beside the source, or null. */
+  iconReady: string | null;
 }
 
 /** The bundle's app.json for an app, with the icon at the path a bundle gives it. */
-export function bundledInfo(info: AppInfo): BundledAppInfo {
+export function bundledInfo(info: AppInfo, iconReady = false): BundledAppInfo {
   return {
     name: info.name,
     shortName: info.shortName,
@@ -333,5 +346,6 @@ export function bundledInfo(info: AppInfo): BundledAppInfo {
     version: info.version,
     updateUrl: info.updateUrl,
     icon: info.icon === null ? null : ".native/icon.png",
+    iconReady: iconReady && info.icon !== null ? ".native/icon-ready.png" : null,
   };
 }
