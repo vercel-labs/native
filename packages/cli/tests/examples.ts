@@ -153,6 +153,14 @@ const EXAMPLES: { [name: string]: Example } = {
     steps: "type a | print #log",
     want: ["input value=a"],
   },
+  interval: {
+    open: "frame 0 | frame 16",
+    // The dial opens at 25:00 paused; a preset restarts it at its length, Space runs it for three
+    // seconds (the first frame at 0 is the baseline, the second measures the elapsed time) and
+    // pauses it, and the Timer menu's 25 Minutes item comes back to the default.
+    steps: "print #time | print #state | click #preset-5 | frame 16 | print #time | key Space | frame 0 | frame 3000 | print #time | print #state | key Space | frame 16 | print #state | menuclick Timer/25 Minutes | frame 16 | print #time | print #state",
+    want: ["25:00", "Paused", "05:00", "04:57", "Running", "Paused", "25:00", "Paused"],
+  },
   todo: {
     open: "frame 16",
     steps: "type a | key Enter | type b | key Enter | print #left | click .item | frame 16 | print #left",
