@@ -414,6 +414,11 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   const rel = (p: string) => relative(process.cwd(), p) || p;
   const htmlFile = rel(htmlPath);
   const doc = parseHtml(readFileSync(htmlPath, "utf8"), htmlFile, diags);
+  // A quirks document reads ids and class names case-insensitively when it matches selectors, so
+  // the build screens and builds its tables the same way.
+  const docMode = documentMode(readFileSync(htmlPath, "utf8"));
+  const quirks = docMode === 1;
+  const fold = (name: string): string => (quirks ? name.toLowerCase() : name);
   // Value rows are process-wide tables the parser registers into; each app starts its own.
   exprRows.load([]);
   clipRows.load([]);
@@ -1206,15 +1211,15 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
    * ends up none, and getComputedStyle() then still reports the pseudo-element's own style.
    */
   const hasPseudoRule = (el: HElement, kind: number, name: string | null = null): boolean => {
-    const id = el.attrs.get("id") ?? "";
-    const classes = (el.attrs.get("class") ?? "").split(/\s+/).filter(Boolean);
+    const id = fold(el.attrs.get("id") ?? "");
+    const classes = (el.attrs.get("class") ?? "").split(/\s+/).filter(Boolean).map(fold);
     const isRoot = el === htmlEl;
     return rules.some((r) => r.selectors.some((s) => s.pseudo === kind &&
       (name === null || s.pseudoName === name) &&
       // The local name counts whatever namespace the selector names (the namespace itself is not
       // screened here), and a class prefix can't be screened at all: the box is made and the
       // rule's conditions decide at runtime whether it draws anything.
-      (s.tag === null || s.tag === el.tag) && (s.id === null || s.id === id) && (!s.root || isRoot) &&
+      (s.tag === null || s.tag === el.tag) && (s.id === null || fold(s.id) === id) && (!s.root || isRoot) &&
       ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(c)))));
   };
 
@@ -1481,7 +1486,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   // (a conservative stand-in for classList.add("x") analysis). Same for tags a script can make,
   // which decide whether runtime selector matching is needed at all and, when it is, which rules
   // it has to be able to match.
-  const possibleClasses = new Set(staticClasses);
+  const possibleClasses = new Set([...staticClasses].map(fold));
   const possibleTags = new Set<string>();
   /** A script makes elements the build never saw, so the runtime selector table is needed. */
   let runtimeElements = false;
@@ -1494,7 +1499,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
     // literal also names the tags it can make.
     for (const m of src.matchAll(/"([^"\n]*)"|'([^'\n]*)'|`([^`]*)`/g)) {
       const text = m[1] ?? m[2] ?? m[3];
-      for (const tok of text.split(/[^\w-]+/)) if (tok) possibleClasses.add(tok);
+      for (const tok of text.split(/[^\w-]+/)) if (tok) possibleClasses.add(fold(tok));
       for (const t of text.matchAll(/<\s*([a-zA-Z][\w-]*)/g)) possibleTags.add(t[1].toLowerCase());
     }
     // createElement("div") names its tag; a call whose tag the build cannot read (a variable, or
@@ -1558,8 +1563,8 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   // A class-prefix condition names no class the build can list, so it can never be ruled out
   // here: the rule stays for the runtime to test.
   const plausible = (sel: Selector) => markupMayChange || (sel.classPrefixes ?? []).length > 0 ||
-    (sel.classes.every((c) => possibleClasses.has(c)) &&
-      sel.chain.every((l) => (l.classPrefixes ?? []).length > 0 || l.classes.every((c) => possibleClasses.has(c))));
+    (sel.classes.every((c) => possibleClasses.has(fold(c))) &&
+      sel.chain.every((l) => (l.classPrefixes ?? []).length > 0 || l.classes.every((c) => possibleClasses.has(fold(c)))));
   let staticChains = 0;
   let chainStates = 0;
 
@@ -1690,7 +1695,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         // namespace itself is not screened here, so "*|a" still names anchors only.
         if (sel.tag && sel.tag !== origin.tag) continue;
         if (sel.root && at !== rootIdx) continue;
-        if (!markupMayChange && sel.id !== null && sel.id !== origin.id) continue;
+        if (!markupMayChange && sel.id !== null && fold(sel.id) !== fold(origin.id)) continue;
         if (!plausible(sel)) continue;
         let s = sel;
         // The element's id is fixed statically, but a script may change it (or give one to an
@@ -1834,7 +1839,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         const generated = sel.pseudo === P.PE_SCROLL_MARKER || sel.pseudo === P.PE_SCROLL_MARKER_GROUP;
         // A tag neither the tree nor a script can make can never match anything.
         if (!generated && sel.tag && sel.tagNs === undefined && !possibleTags.has(sel.tag) && !possibleTags.has("*")) continue;
-        if (!generated && sel.id && !possibleClasses.has(sel.id) && !markupMayChange) continue;
+        if (!generated && sel.id && !possibleClasses.has(fold(sel.id)) && !markupMayChange) continue;
         if (!plausible(sel)) continue;
         for (const part of parts) {
           dyn.push({
@@ -2121,7 +2126,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   const tables = { title, width, height, windowOptions, imageBase: options.bundle !== undefined ? "" : appDir,
     siteBase, bundled: options.bundle !== undefined,
     xmlDocument: /\.xht(ml)?$/i.test(htmlPath),
-    quirks: documentMode(readFileSync(htmlPath, "utf8")),
+    quirks: docMode,
     charset: pageCharset(readFileSync(htmlPath, "utf8")) } as AppTables;
   const data = tables as unknown as Record<string, unknown>;
   const scalars = new Set(["TITLE", "WIDTH", "HEIGHT", "WINDOW_OPTIONS", "IMAGE_BASE", "SITE_BASE", "BUNDLED", "XML_DOCUMENT", "QUIRKS", "CHARSET"]);

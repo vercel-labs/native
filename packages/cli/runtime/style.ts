@@ -2917,6 +2917,8 @@ function sameCustoms(a: Map<string, string> | null, b: Map<string, string> | nul
  */
 let chainIndexFor: number[][] | null = null;
 let ancestorClassNames: Set<string> | null = null;
+/** The document mode the chain index was built for: a quirks document folds class names. */
+let chainIndexQuirks = false;
 let ancestorChainsTestMore = false;
 /**
  * The state bits a rule tests on a compound other than its subject — an ancestor or an earlier
@@ -2929,8 +2931,10 @@ let ancestorStates = 0;
 let notStates = 0;
 
 function ensureChainIndex(): void {
-  if (chainIndexFor === tables.chainComb) return;
+  const foldNames = isQuirks();
+  if (chainIndexFor === tables.chainComb && chainIndexQuirks === foldNames) return;
   chainIndexFor = tables.chainComb;
+  chainIndexQuirks = foldNames;
   ancestorClassNames = null;
   ancestorChainsTestMore = false;
   ancestorStates = 0;
@@ -2953,7 +2957,7 @@ function ensureChainIndex(): void {
       for (const link of links) {
         for (const c of link) {
           if (ancestorClassNames === null) ancestorClassNames = new Set<string>();
-          ancestorClassNames.add(c);
+          ancestorClassNames.add(foldNames ? c.toLowerCase() : c);
         }
       }
     }
@@ -3031,7 +3035,8 @@ function descendantsCanSeeChange(el: Element, ident: IdentityChange, stateDelta:
   if (ident.classes !== null && ident.classes.length > 0) {
     if (ancestorChainsTestMore) return true;
     if (ancestorClassNames !== null) {
-      for (const c of ident.classes) if (ancestorClassNames.has(c)) return true;
+      const foldNames = isQuirks();
+      for (const c of ident.classes) if (ancestorClassNames.has(foldNames ? c.toLowerCase() : c)) return true;
     }
   }
   if (ident.other && ancestorChainsTestMore) return true;
