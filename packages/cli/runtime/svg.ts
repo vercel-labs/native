@@ -1192,6 +1192,16 @@ let layerMaxDepth = 0;
 let layerOwner: Element | null = null;
 /** The root bitmap's size in device pixels, set by paintSvg for the regions clamped to it. */
 let svgPixelW = 0, svgPixelH = 0;
+/** The bitmap size of each open layer; a nested region is clamped to the layer it paints into,
+ *  whose own origin is that region's corner, not to the root viewport in this local space. */
+let targetWs: number[] = [];
+let targetHs: number[] = [];
+/** The furthest edge each nesting level's filter region reached, in that level's local space. */
+let layerEdgesW: number[] = [];
+let layerEdgesH: number[] = [];
+
+function targetW(): number { return targetWs.length > 0 ? targetWs[targetWs.length - 1] : svgPixelW; }
+function targetH(): number { return targetHs.length > 0 ? targetHs[targetHs.length - 1] : svgPixelH; }
 
 function layerSizeKey(w: number, h: number): number {
   return w * 16384 + h;
@@ -1248,6 +1258,8 @@ function acquireLayer(w: number, h: number): number {
     layerSizes[at] = key;
   }
   layerDepth++;
+  targetWs.push(iw);
+  targetHs.push(ih);
   layerActiveBytes += need;
   if (layerActiveBytes > layerPeakBytes) layerPeakBytes = layerActiveBytes;
   if (layerDepth > layerMaxDepth) layerMaxDepth = layerDepth;
@@ -1261,6 +1273,8 @@ function acquireLayer(w: number, h: number): number {
 function releaseLayer(): void {
   if (layerDepth > 0) {
     layerDepth--;
+    targetWs.pop();
+    targetHs.pop();
     layerActiveBytes -= layerBytes[layerDepth] ?? 0;
   }
 }
@@ -1344,8 +1358,11 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
   // The region is known before anything is allocated: a layer for the whole root would cost
   // megabytes per nesting level however small the painted part is.
   const row = compileSvgFilter(filter, node, filterBBox(node, name, vw, vh), m2, vw, vh,
-    svgPixelW, svgPixelH, (ref) => (ids === null ? undefined : ids.get(ref)));
+    targetW(), targetH(), (ref) => (ids === null ? undefined : ids.get(ref)));
   if (row === null) return;
+  const at = layerDepth;
+  if (row.x + row.w > (layerEdgesW[at] ?? 0)) layerEdgesW[at] = row.x + row.w;
+  if (row.y + row.h > (layerEdgesH[at] ?? 0)) layerEdgesH[at] = row.y + row.h;
   const layer = acquireLayer(row.w, row.h);
   if (layer < 0) {
     // Over the nesting or memory bound: paint the element unfiltered, as Chrome does when it
@@ -1547,6 +1564,10 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   layerActiveBytes = 0;
   layerPeakBytes = 0;
   layerMaxDepth = 0;
+  layerEdgesW = [];
+  layerEdgesH = [];
+  targetWs = [];
+  targetHs = [];
   // The clear is in canvas space, so the identity transform restores it after the last pass's
   // per-shape transforms.
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
@@ -1567,6 +1588,6 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   hostCanvasDraw(id, x, y, w, h, alpha, 1);
   if (process.env.NATIVE_SVG_FILTER_STATS !== undefined && process.env.NATIVE_SVG_FILTER_STATS !== "0") {
     const which = el.getAttribute("id") ?? "";
-    console.log(`native: svg filter layers svg=${which} peak=${layerPeakBytes} depth=${layerMaxDepth} pool=${layerPoolBytes}`);
+    console.log(`native: svg filter layers svg=${which} peak=${layerPeakBytes} depth=${layerMaxDepth} pool=${layerPoolBytes} nested=${layerEdgesW[1] ?? 0}x${layerEdgesH[1] ?? 0}`);
   }
 }
