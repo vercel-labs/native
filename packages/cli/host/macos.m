@@ -6991,6 +6991,10 @@ static void ink_range(InkBox *box, CmdList *list, size_t first, size_t last, CGA
           w = (double)c->len * (c->size + fabs(c->letter) + fabs(c->word));
           h = (c->line_height > c->size * 1.4 ? c->line_height : c->size * 1.4) + c->size * 0.5;
           pad += c->size * 0.25;
+        } else if (c->kind == CMD_LINE) {
+          // A text decoration records its span in w and its thickness in line_width, with the
+          // offset already in y: its box is that span and that thickness, not a zero height.
+          h = c->line_width;
         }
         double mx, my, mw, mh;
         ink_map(&m, x - pad, y - pad, w + 2 * pad, h + 2 * pad, &mx, &my, &mw, &mh);
@@ -10648,6 +10652,11 @@ static int metal_cmd_view(void *ctx, int list_id, int index, CompCmdView *out) {
         // A polygon's box is its points': filled borders and diagonal sides are recorded that way.
         out->empty = !poly_box(c->text, &x, &y, &w, &h);
         if (out->empty) return 1;
+      } else if (c->kind == CMD_LINE) {
+        // A decoration line's thickness sits below the y it records, which already holds the
+        // offset: its box is the span and that thickness, not a zero height at the span's start.
+        h = c->line_width;
+        out->empty = !(c->w > 0 && h > 0);
       } else {
         out->empty = c->w <= 0 && c->h <= 0;
       }

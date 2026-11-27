@@ -43,6 +43,9 @@ body { margin: 0; background: #060607; color: #f4f2ee; font: 16px/1.3 sans-serif
   -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 30%, #000 70%, transparent 100%);
   mask-image: linear-gradient(180deg, transparent 0, #000 30%, #000 70%, transparent 100%); }
 #mgroup .sib { position: absolute; left: 10px; top: 30px; width: 30px; height: 16px; background: #2a7cff; }
+#deco { position: absolute; left: 20px; top: 200px; width: 200px; height: 20px; opacity: .6; }
+.deco { text-decoration: underline; text-decoration-thickness: 10px; text-decoration-color: #2a7cff;
+  text-decoration-skip-ink: none; text-underline-offset: 40px; }
 #deep { position: absolute; left: 120px; top: 90px; width: 40px; height: 20px; opacity: .6; }
 .deep { position: absolute; left: 0; top: 0; width: 40px; height: 20px; will-change: transform; }
 .leaf { position: absolute; left: 0; top: 30px; width: 40px; height: 16px; background: #6dffb0; }
@@ -50,6 +53,7 @@ body { margin: 0; background: #060607; color: #f4f2ee; font: 16px/1.3 sans-serif
 <div id="poly"><div class="tri"></div></div>
 <div id="persp"><div class="plane"></div></div>
 <div id="mgroup"><div class="shift"><div class="masked"></div></div><div class="sib"></div></div>
+<div id="deco"><span class="deco">decorated</span></div>
 <div id="deep">${deep(7)}</div>
 </body></html>`);
 
@@ -123,6 +127,11 @@ ok("a projected child paints outside the group's border box",
 const sib = liveAt(232, 228);
 ok("a sibling after a mask in a transformed subtree is in the bounds", sib[2] > 100 && sib[2] > sib[0] + 40,
   `${sib}`);
+// A thick underline sits 40 px below the group's border box, with nothing else of the group's
+// ink outside it.
+const deco = liveAt(40, 260);
+ok("a thick underline paints outside the group's border box", deco[2] > 100 && deco[2] > deco[0] + 60,
+  `${deco}`);
 // A leaf under seven nested layers sits 30 px below the group's border box.
 const leaf = liveAt(140, 128);
 ok("a leaf under seven nested layers is in the bounds", leaf[1] > 100 && leaf[1] > leaf[0] + 40, `${leaf}`);
