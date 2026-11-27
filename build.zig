@@ -390,6 +390,7 @@ pub fn build(b: *std.Build) void {
     const embed_exports_mod = module(b, target, optimize, "src/embed/c_exports.zig");
     embed_exports_mod.addImport("native_sdk", desktop_mod);
     embed_exports_mod.export_symbol_names = &mobile_export_symbol_names;
+    embed_exports_mod.pic = if (target.result.abi.isAndroid()) true else null;
     const embed_lib = b.addLibrary(.{
         .linkage = .static,
         .name = "native-sdk",
