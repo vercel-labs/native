@@ -110427,8 +110427,7 @@
   {
    "path": "css/css-variables/variable-supports-23.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-24.html",
@@ -110518,14 +110517,12 @@
   {
    "path": "css/css-variables/variable-supports-41.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-42.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-43.html",
@@ -110560,8 +110557,7 @@
   {
    "path": "css/css-variables/variable-supports-49.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-50.html",
@@ -110581,8 +110577,7 @@
   {
    "path": "css/css-variables/variable-supports-53.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-54.html",
@@ -110592,26 +110587,22 @@
   {
    "path": "css/css-variables/variable-supports-55.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-56.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-57.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-58.html",
    "kind": "reftest",
-   "status": "fail",
-   "reason": "1017 pixels differ (max 255)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-supports-59.html",
