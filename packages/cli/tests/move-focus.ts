@@ -11,6 +11,7 @@ const PAGE = `<!doctype html>
 <html><head><title>move-focus</title></head><body>
 <div id="a" tabindex="0">a</div>
 <div id="b"></div>
+<div id="box"><div id="c" tabindex="0">c</div><div id="d"></div></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -28,9 +29,19 @@ a.focus();
 log("before " + active() + " " + a.matches(":focus"));
 b.moveBefore(a, null);
 log("after " + active() + " " + a.matches(":focus") + " " + a.parentElement!.id + " blurs=" + blurs);
+
+// A move within the same parent keeps it too: the insert takes the node out and puts it back.
+const c = document.getElementById("c") as HTMLElement;
+const d = document.getElementById("d") as HTMLElement;
+const box = document.getElementById("box") as HTMLElement;
+let sameBlurs = 0;
+c.addEventListener("blur", () => { sameBlurs++; });
+c.focus();
+box.moveBefore(c, null);
+log("same parent " + active() + " " + c.matches(":focus") + " " + (box.firstElementChild as HTMLElement).id + " blurs=" + sameBlurs);
 `;
 
-const EXPECTED_LOG = ["before a true", "after a true b blurs=0"];
+const EXPECTED_LOG = ["before a true", "after a true b blurs=0", "same parent c true d blurs=0"];
 
 let failed = 0;
 function check(name: string, ok: boolean, detail = ""): void {

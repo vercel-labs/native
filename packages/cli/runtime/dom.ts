@@ -3098,8 +3098,11 @@ export class Node extends EventTarget {
       throw new TypeError("Failed to execute 'moveBefore': 2 arguments required, but only 1 present.");
     }
     if (n.parentNode === this) {
-      // Already here: move within the child list.
-      this.insertBefore(n, child);
+      // Already here: move within the child list. The insert takes the node out and puts it back
+      // in one step, so it is the same state-preserving move as a cross-parent one.
+      const wasMoving = atomicMove;
+      atomicMove = true;
+      try { this.insertBefore(n, child); } finally { atomicMove = wasMoving; }
       return n;
     }
     if (n.parentNode !== null) {
