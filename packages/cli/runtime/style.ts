@@ -380,7 +380,11 @@ function attrMatches(el: Element, enc: string): boolean {
   if (opWithFlag === "") return true;
   const op = opWithFlag.charAt(0);
   const flag = opWithFlag.slice(1);
-  const ci = flag === "i" || (flag === "" && attrDefaultsInsensitive(el, name));
+  // A quirks document reads ids and class names case-insensitively wherever they are matched,
+  // so an attribute condition on either is folded there too (a rewritten subject id included).
+  const foldedName = name.toLowerCase();
+  const ci = flag === "i" || (flag === "" && (attrDefaultsInsensitive(el, name) ||
+    (isQuirks() && (foldedName === "id" || foldedName === "class"))));
   const h = ci ? have.toLowerCase() : have;
   const w = ci ? want.toLowerCase() : want;
   if (op === "=") return h === w;
@@ -3001,7 +3005,15 @@ function pseudoRulesTestIdentity(el: Element, ident: IdentityChange): boolean {
     if (!(c instanceof Element) || c.pseudoKind === P.PE_NONE) continue;
     for (const r of c.rules) {
       if (classes !== null && classes.length > 0) {
-        for (const k of tables.ruleClasses[r]) if (classes.indexOf(k) >= 0) return true;
+        // A quirks document folds the names it compares, so "Bar" removed still ends ".bar".
+        const foldIt = isQuirks();
+        for (const k of tables.ruleClasses[r]) {
+          const want = foldIt ? k.toLowerCase() : k;
+          for (let j = 0; j < classes.length; j++) {
+            const c2 = foldIt ? classes[j].toLowerCase() : classes[j];
+            if (c2 === want) return true;
+          }
+        }
       }
       if (ident.other && r < tables.ruleAttrs.length && tables.ruleAttrs[r].length > 0) return true;
     }

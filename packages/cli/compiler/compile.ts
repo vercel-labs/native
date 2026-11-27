@@ -1220,7 +1220,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
       // screened here), and a class prefix can't be screened at all: the box is made and the
       // rule's conditions decide at runtime whether it draws anything.
       (s.tag === null || s.tag === el.tag) && (s.id === null || fold(s.id) === id) && (!s.root || isRoot) &&
-      ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(c)))));
+      ((s.classPrefixes ?? []).length > 0 || s.classes.every((c) => classes.includes(fold(c))))));
   };
 
   /** A child node for generated content. It carries no attributes: its style is all rules. */
@@ -1543,7 +1543,7 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
   if (unknownTags) possibleTags.add("*");
 
   const compoundMatchesStatic = (c: ChainLink, n: OutNode, idx: number) =>
-    (!c.tag || c.tag === n.tag) && (!c.id || c.id === n.id) && (!c.root || idx === rootIdx);
+    (!c.tag || c.tag === n.tag) && (!c.id || fold(c.id) === fold(n.id)) && (!c.root || idx === rootIdx);
   /** Evaluates an ancestor chain against the static tree (only for tag/#id/:root compounds). */
   const chainMatchesStatic = (chain: ChainLink[], k: number, idx: number): boolean => {
     if (k === chain.length) return true;
