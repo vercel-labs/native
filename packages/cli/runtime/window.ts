@@ -1188,6 +1188,8 @@ export function dispatchTestRendered(): void {
   document.dispatchEvent(event);
 }
 
+export function resetLoadGate(): void { loadFired = false; }
+
 export function dispatchLoad(): void {
   if (loadFired) return;
   loadFired = true;
