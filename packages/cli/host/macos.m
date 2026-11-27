@@ -6854,7 +6854,12 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
   if (spec.alpha < 1 && spec.count == 0 && spec.bcount == 0 && spec.blend == 0) {
     CGContextSaveGState(ctx);
     CGContextSetAlpha(ctx, spec.alpha);
-    CGContextBeginTransparencyLayer(ctx, NULL);
+    // The group's layer covers the box it paints, not the whole context: a fading word inside a
+    // masked column used to make a layer the size of the frame on every frame. 10% and a dozen
+    // pixels of room are the slack the filter path allows for edges and antialiasing.
+    double gx = c->w * 0.1 + 12, gy = c->h * 0.1 + 12;
+    CGContextBeginTransparencyLayerWithRect(ctx, CGRectMake(c->x - gx, c->y - gy,
+                                                            c->w + 2 * gx, c->h + 2 * gy), NULL);
     ReplayState plain;
     plain.depth = 0;
     plain.transforms = 0;
