@@ -28,6 +28,8 @@ log("level2 " + m(":heading(2)"));
 log("levels13 " + m(":heading(1, 3)"));
 log("level7 " + m(":heading(7)"));
 log("not " + m(":not(:heading)"));
+// A level may carry a sign: -1 is no heading's level, +2 is h2's.
+log("signed " + m(":heading(-1, 2)") + " " + m(":heading(+2)"));
 `;
 
 const EXPECTED_LOG = [
@@ -37,6 +39,7 @@ const EXPECTED_LOG = [
   "levels13 101000010",
   "level7 000000000",
   "not 000000101",
+  "signed 010000000 010000000",
 ];
 
 let failed = 0;

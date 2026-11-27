@@ -558,7 +558,9 @@ function scanCompoundFresh(text: string, inNot: boolean, allowPseudo: boolean, d
         } else {
           for (const raw of splitTopLevel(arg, ",")) {
             const text = raw.trim();
-            if (!/^\d+$/.test(text)) return null;
+            // A level is an integer and may carry a sign; a signed value no heading has names
+            // nothing, as any other level outside 1-6 does.
+            if (!/^[+-]?\d+$/.test(text)) return null;
             const n = Number(text);
             if (n >= 1 && n <= 6) tags.push("h" + n);
           }
