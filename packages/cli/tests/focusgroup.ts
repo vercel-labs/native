@@ -18,6 +18,11 @@ const PAGE = `<!doctype html>
 <div id="n" focusgroup="toolbar nomemory"><span id="n1" tabindex="0">n1</span><span id="n2" tabindex="0">n2</span></div>
 <button id="after_n">after nomemory</button>
 <div id="w" focusgroup="toolbar wrap"><span id="w1" tabindex="0">w1</span><span id="w2" tabindex="0">w2</span><span id="w3" tabindex="0">w3</span></div>
+<div id="m" focusgroup="toolbar"><span id="m1" tabindex="0">m1</span><span id="m2" tabindex="0">m2</span><span id="m3" tabindex="0">m3</span></div>
+<button id="after_m">after memory</button>
+<div id="d" focusgroup="toolbar"><span id="d1" tabindex="0">d1</span><span id="d2" tabindex="0" style="display:none">d2</span><span id="d3" tabindex="0">d3</span></div>
+<button id="after_d">after hidden</button>
+<div id="q" focusgroup="toolbar"><span id="q1" tabindex="0">q1</span><span id="q2" tabindex="0" style="visibility:hidden">q2</span><span id="q3" tabindex="0">q3</span></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -47,6 +52,12 @@ const STEPS = [
   "click #n1", "key ArrowRight", "key Tab", "key Shift+Tab",
   // wrap token
   "click #w1", "key ArrowRight", "key ArrowRight", "key ArrowRight",
+  // the remembered item follows any focus change, not just Tab: click m2, click away, come back
+  "click #m2", "click #after_m", "key Shift+Tab",
+  // a display: none item is no entry stop and no arrow target
+  "click #after_d", "key Shift+Tab", "click #d1", "key ArrowRight",
+  // nor is a visibility: hidden one
+  "click #q1", "key ArrowRight",
 ].join(" | ");
 
 const EXPECTED = [
@@ -71,6 +82,10 @@ const EXPECTED = [
   "key ArrowRight -> w2",
   "key ArrowRight -> w3",
   "key ArrowRight -> w1",
+  "key Tab -> m2",
+  "key Tab -> d1",
+  "key ArrowRight -> d3",
+  "key ArrowRight -> q3",
 ];
 
 const dir = mkdtempSync(join(tmpdir(), "native-focusgroup-"));

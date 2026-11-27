@@ -4,7 +4,7 @@
 // toolbar and a tablist move inline, a listbox block; a tablist wraps at its ends by default, and
 // the `wrap` token makes any segment wrap while `nomemory` stops it remembering its item.
 
-import { Element, Node } from "../dom.ts";
+import { Element, Node, isRenderedForFocus, setFocusMovedHook } from "../dom.ts";
 
 /** How one segment moves: which axis its arrows follow, whether it wraps, whether it remembers. */
 export interface SegmentBehavior {
@@ -50,7 +50,9 @@ function collectItems(root: Element, out: Element[]): void {
     if (!(kid instanceof Element)) continue;
     // A nested segment is an item of its own segment, not of this one.
     if (focusgroupBehavior(kid) !== null) continue;
-    if (kid.isFocusable) out.push(kid);
+    // Only an item the page draws takes part: a display: none or visibility: hidden control is
+    // not a stop for the arrows, and a segment whose first item is hidden still has an entry.
+    if (kid.isFocusable && isRenderedForFocus(kid)) out.push(kid);
     collectItems(kid, out);
   }
 }
@@ -102,3 +104,10 @@ export function moveInSegment(segment: Element, from: Element, key: string): Ele
   }
   return items[j];
 }
+
+// Every focus change inside a segment updates the item Tab will come back to — a click, focus()
+// or Tab itself — as Chrome's does; leaving the segment by another route keeps the last item.
+setFocusMovedHook((el: Element) => {
+  const seg = segmentFor(el);
+  if (seg !== null && seg !== el) rememberSegmentItem(seg, el);
+});

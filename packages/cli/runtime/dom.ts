@@ -12443,6 +12443,14 @@ export function refreshFocusVisible(): void {
  * Focuses `el` (or clears focus). `visible` decides whether the focus counts as keyboard focus,
  * which :focus-visible matches; when it is omitted the element and the last interaction decide.
  */
+/** A hook the focusgroup layer sets: an element took focus, however it came — a click, focus() or
+ *  Tab — so a segment can remember the item it holds. */
+let focusMovedHook: ((el: Element) => void) | null = null;
+
+export function setFocusMovedHook(fn: ((el: Element) => void) | null): void {
+  focusMovedHook = fn;
+}
+
 /** A hook the accessibility layer sets: focus moved, so its tree's focused node changed. */
 let focusChangedHook: (() => void) | null = null;
 
@@ -12560,6 +12568,7 @@ export function setFocus(el: Element | null, visible?: boolean): void {
         dateSetActive(el, 0);
       }
     }
+    if (focusMovedHook !== null) focusMovedHook(el);
     dispatch(trusted(new FocusEvent("focus", { relatedTarget: prev })), el);
     dispatch(trusted(new FocusEvent("focusin", { bubbles: true, composed: true, relatedTarget: prev })), el);
   }
@@ -14117,6 +14126,13 @@ function collectMatches(el: Node, sels: Selector[], scope: Element | null, out: 
 /** Is the element generated at all? A display: none box has no rects and no box, and neither
  *  has one that isn't in the document, since nothing laid it out. A box inside a display: none
  *  subtree isn't generated either: the subtree drops out whole, whatever the box's own display. */
+/** Whether an element takes part in focus and hit testing: it is in the document, no box above it
+ *  is display: none, and it is not visibility: hidden or collapse (which inherits, so its own
+ *  computed value covers its ancestors). */
+export function isRenderedForFocus(el: Element): boolean {
+  return !isUnrendered(el) && el.sv[P.P_VISIBILITY] === P.VIS_VISIBLE;
+}
+
 function isUnrendered(el: Element): boolean {
   if (el.nodeType !== 1 || !el.isConnected) return true;
   for (let p: Element | null = el; p !== null; p = p.parentElement) {
