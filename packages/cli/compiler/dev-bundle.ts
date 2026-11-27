@@ -5,7 +5,7 @@
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { context, type BuildContext } from "esbuild";
+import { context, type BuildContext, type BuildOptions } from "esbuild";
 import type { AppBuild } from "./build.ts";
 import { jsxSettings } from "./build.ts";
 import { importPath } from "./scripts.ts";
@@ -99,13 +99,9 @@ function writeScriptSources(built: AppBuild): string {
  * writes that bundle's sources from `built`. Each rebuild takes the build it is given, so an
  * edit to any of the page's scripts — a concatenated classic one included — is what runs next.
  */
-export async function createScriptBundler(built: AppBuild): Promise<ScriptBundler> {
-  const appDir = built.appDir;
-  const entry = writeScriptSources(built);
-  const jsx = jsxSettings(appDir, true);
-  const automatic = jsx.jsx !== "react";
-  const bundle = join(appDir, ".native", "dev-bundle.js");
-  let ctx: BuildContext | null = await context({
+/** The options every dev bundle is built with, whatever its JSX mode. */
+function bundleOptions(entry: string, bundle: string, appDir: string): BuildOptions {
+  return {
     entryPoints: [entry],
     outfile: bundle,
     bundle: true,
@@ -120,10 +116,32 @@ export async function createScriptBundler(built: AppBuild): Promise<ScriptBundle
     logLevel: "silent",
     absWorkingDir: appDir,
     define: { "process.env.NODE_ENV": '"development"' },
-    ...(automatic
-      ? { jsx: "automatic" as const, jsxImportSource: jsx.jsxImportSource, jsxDev: jsx.jsx === "react-jsxdev" }
-      : { jsx: "transform" as const, jsxFactory: jsx.jsxFactory, jsxFragmentFactory: jsx.jsxFragmentFactory }),
-  });
+  };
+}
+
+export async function createScriptBundler(built: AppBuild): Promise<ScriptBundler> {
+  const appDir = built.appDir;
+  const entry = writeScriptSources(built);
+  const jsx = jsxSettings(appDir, true);
+  const automatic = jsx.jsx !== "react";
+  const bundle = join(appDir, ".native", "dev-bundle.js");
+  // Each JSX mode is its own object literal: the bundle is built by the compiled CLI too, and
+  // scriptc reads an object literal's shape at compile time, so the options can't be assigned
+  // afterwards or spread from a conditional.
+  const options: BuildOptions = automatic
+    ? {
+        ...bundleOptions(entry, bundle, appDir),
+        jsx: "automatic",
+        jsxImportSource: jsx.jsxImportSource,
+        jsxDev: jsx.jsx === "react-jsxdev",
+      }
+    : {
+        ...bundleOptions(entry, bundle, appDir),
+        jsx: "transform",
+        jsxFactory: jsx.jsxFactory,
+        jsxFragment: jsx.jsxFragmentFactory,
+      };
+  let ctx: BuildContext | null = await context(options);
 
   return {
     bundle,

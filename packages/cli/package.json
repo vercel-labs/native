@@ -28,7 +28,9 @@
     "test:examples": "node tests/scratch.ts node tests/examples.ts",
     "wpt": "node compiler/cli.ts wpt run",
     "wpt:verify-incremental": "node scripts/wpt-verify-incremental.ts",
-    "prepack": "node scripts/build.ts"
+    "prepack": "node scripts/build.ts",
+    "build:native": "node scripts/build-native.ts",
+    "pack:npm": "node scripts/pack.ts"
   },
   "dependencies": {
     "@scriptc/experimental": "^0.4.16",

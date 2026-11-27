@@ -3,7 +3,7 @@
 <p>
   <a href="https://vercel.com/labs#active-experiments"><img alt="Vercel Labs Experiment" src="https://img.shields.io/badge/LABS-EXPERIMENT-0a0a0a.svg?style=for-the-badge&amp;logo=Vercel&amp;labelColor=000000" height="28"></a>
   <a href="https://www.npmjs.com/package/@native-sdk/cli"><img alt="npm version: @native-sdk/cli" src="https://img.shields.io/npm/v/%40native-sdk%2Fcli.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
-  <a href="https://github.com/vercel-labs/native/blob/next/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/github/license/vercel-labs/native.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
+  <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg?style=for-the-badge&amp;labelColor=000000" height="28"></a>
   <a href="https://www.npmjs.com/package/@native-sdk/cli"><img alt="npm downloads per month: @native-sdk/cli" src="https://img.shields.io/npm/dm/%40native-sdk%2Fcli.svg?style=for-the-badge&amp;labelColor=000000&amp;label=npm%20downloads" height="28"></a>
 </p>
 
@@ -13,36 +13,28 @@ Native SDK is experimental and supports a subset of HTML, CSS and the DOM. Run `
 
 ## Installation
 
-Install with Node.js 24 or later. On macOS the Xcode command line tools provide the compiler (`xcode-select --install`); on Linux, [shipping a Linux app](packages/cli/docs/linux.md) lists the host libraries and the packaging tools; and on Windows `zig` on the PATH builds both scriptc's link and the Win32 host. The web-platform tests build the headless Linux host and need the libraries listed in [cli.md](packages/cli/docs/cli.md).
-
-Add the CLI to an app with npm and run it from a `package.json` script:
+Install the CLI into your app's project with Node.js 24 or later:
 
 ```console
-$ npm install --save-dev @native-sdk/cli
+$ npm install -D @native-sdk/cli
 ```
+
+Run it through your package.json scripts:
 
 ```json
 {
   "scripts": {
-    "build": "native build . -o build/hello",
-    "dev": "native dev ."
+    "dev": "native dev",
+    "build": "native build"
   }
 }
 ```
 
-`npx @native-sdk/cli build .` runs the same CLI without installing it. The package named `native` on npm is unrelated, so don't write `npx native`.
+`npm run dev` watches the app and applies edits as you save, and `npm run build` builds it. Both work on the project directory. For a one-off command, run the package by its name: `npx @native-sdk/cli check`.
 
-To work on Native SDK itself, clone the repository and install the workspace:
+Building an app also needs a C compiler for its host. On macOS the Xcode command line tools provide it (`xcode-select --install`); on Linux, [shipping a Linux app](packages/cli/docs/linux.md) lists the host libraries and the packaging tools; and on Windows `zig` on the PATH builds both scriptc's link and the Win32 host.
 
-```console
-$ git clone https://github.com/vercel-labs/native.git
-$ cd native
-$ pnpm install
-```
-
-The repository is a pnpm workspace: the CLI is `packages/cli`, the docs site `apps/docs`, and each app under `examples/` is a package of its own. `pnpm build` builds the CLI, the examples and the docs site through Turborepo, `pnpm test` runs the test suite, and `pnpm test:examples` builds and launches every example.
-
-An app is a directory of its own and doesn't have to live in this repository. The examples below run the CLI from a checkout as `node packages/cli/compiler/cli.ts`, or as `native` from the app's `package.json` script.
+An app is a directory of its own and doesn't have to live in this repository. To work on Native SDK itself, or to run the CLI from a clone, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Build an app
 
@@ -79,18 +71,14 @@ document.getElementById("wave")!.addEventListener("click", () => {
 });
 ```
 
-`native build` writes a self-contained app bundle: on macOS `hello.app`, with its images, fonts
-and other files in `Contents/Resources`, and elsewhere the executable `hello` with a
-`hello.resources` directory beside it. Files a script names at run time — a cover image, a track —
-go in a `public` directory beside the page: the build copies it into the app's root as it is, and a
-URL built in code names them. The build's output path is still a way to run the app:
+`npm run build` (`native build`) writes a self-contained app bundle named after the project directory: in a directory called `hello`, on macOS `hello.app`, with its images, fonts and other files in `Contents/Resources`, and elsewhere the executable `hello` with a `hello.resources` directory beside it. `-o <path>` names another output. The output path is still a way to run the app:
 
 ```console
-$ node packages/cli/compiler/cli.ts build . -o hello
+$ npm run build
 $ ./hello
 ```
 
-`native run` builds and runs in one step. `native dev` watches the app and applies HTML and CSS edits to the open window in place; a TypeScript edit rebuilds and relaunches it, keeping what state it can. The [examples](examples) are a counter; a todo list; an article with inline formatting and a link; a dashboard with a sidebar, stat cards and a members table; an animated canvas piece; a canvas particle field; a spinning WebGL 2 cube; a WebGL 2 texture uploaded from a file; a `@keyframes` and transition piece; a todo list in Preact; an input method composing marked text in a field; a playable three.js game; a lit three.js hero scene; a React 19 and Tailwind 4 dashboard; a React 19 and Tailwind 4 settings app; a React 19 issue tracker with a command palette, drag to reorder and a detail pane; and a music library and player with album art, a track list and a working scrubber.
+`npx @native-sdk/cli run` builds and runs in one step. `npm run dev` (`native dev`) watches the app and applies HTML and CSS edits to the open window in place; a TypeScript edit rebuilds and relaunches it, keeping what state it can. The [examples](examples) are a counter; a todo list; an article with inline formatting and a link; a dashboard with a sidebar, stat cards and a members table; an animated canvas piece; a canvas particle field; a spinning WebGL 2 cube; a WebGL 2 texture uploaded from a file; a `@keyframes` and transition piece; a todo list in Preact; an input method composing marked text in a field; a playable three.js game; a lit three.js hero scene; a React 19 and Tailwind 4 dashboard; and a React 19 and Tailwind 4 settings app.
 
 ## Test an app
 

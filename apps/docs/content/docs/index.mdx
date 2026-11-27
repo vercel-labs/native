@@ -12,43 +12,35 @@ Native SDK is experimental and supports a subset of HTML, CSS and the DOM. Run `
 
 Install with Node.js 24 or later. On macOS the Xcode command line tools provide the compiler (`xcode-select --install`); on Linux the host's libraries and a C compiler are listed in [Shipping a Linux app](https://github.com/vercel-labs/native/blob/next/packages/cli/docs/linux.md); and on Windows `zig` on the `PATH` builds scriptc's link and the Win32 host.
 
-Add the CLI to an app with a package manager and run it from a `package.json` script:
+Install the CLI into your app's project:
 
 ```console
-$ npm install --save-dev @native-sdk/cli
+$ npm install -D @native-sdk/cli
 ```
+
+Run it through your package.json scripts, with `npm run dev` and `npm run build`:
 
 ```json
 {
   "scripts": {
-    "build": "native build . -o build/hello",
-    "dev": "native dev ."
+    "dev": "native dev",
+    "build": "native build"
   }
 }
 ```
 
-`npx @native-sdk/cli build .` runs the same CLI without installing it. Don't write `npx native`: the package named `native` on npm is unrelated.
-
-To work on Native SDK itself, clone the repository and install the workspace:
-
-```console
-$ git clone https://github.com/vercel-labs/native.git
-$ cd native
-$ pnpm install
-```
-
-A checkout runs the same CLI as `node packages/cli/compiler/cli.ts`.
+For a one-off command, run the package by its name, as `npx @native-sdk/cli <command>`.
 
 ## Build an app
 
 An app is an HTML page with its stylesheets and scripts, in a directory of its own. It doesn't have to live in the Native SDK repository. [Getting started](/getting-started) walks through a complete app. The short version:
 
 ```console
-$ npx @native-sdk/cli build . -o build/hello
-$ ./build/hello
+$ npm run build
+$ ./hello
 ```
 
-`native run` builds and runs in one step. `native dev` watches the app and applies HTML and CSS edits to the open window in place; a TypeScript edit rebuilds and relaunches it. See the [live editing guide](/guides/live-editing).
+`npx @native-sdk/cli run` builds and runs in one step. `npm run dev` (`native dev`) watches the app and applies HTML and CSS edits to the open window in place; a TypeScript edit rebuilds and relaunches it. See the [live editing guide](/guides/live-editing).
 
 The [examples](https://github.com/vercel-labs/native/tree/next/examples) are:
 

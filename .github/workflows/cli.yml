@@ -1,0 +1,158 @@
+# Builds the CLI's native executable with scriptc on every platform it ships for, packs the npm
+# packages around it (scripts/pack.ts), and checks that the executable builds apps: on Linux and
+# Windows the examples gate builds every example with it instead of the CLI run from source.
+# The release workflows (release.yml for a v* tag, prerelease.yml for a manual run) publish what
+# the same steps build.
+name: cli
+
+on:
+  push:
+    branches: [next]
+  pull_request:
+    branches: [next]
+
+jobs:
+  forms:
+    name: scriptc forms
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The executable is compiled by scriptc, which reads some options at compile time. This
+      # catches a call shape it refuses (SC2020, SC1090) in seconds, instead of after the matrix
+      # has built every platform.
+      - name: Check the CLI's sources for constructs scriptc cannot compile
+        working-directory: packages/cli
+        run: node scripts/check-scriptc-forms.ts
+
+  executable:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-24.04, target: x86_64-linux-gnu.2.34 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm, target: aarch64-linux-gnu.2.34 }
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: win32-x64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # scriptc links Windows executables with zig, and links the glibc executables with zig against
+      # a glibc 2.34 sysroot (SCRIPTC_TARGET), so they run on glibc 2.34 and newer instead of
+      # needing the runner's glibc. pack.ts fails if one needs a newer glibc symbol version.
+      - uses: vercel-labs/setup-zig@v1
+        if: ${{ matrix.platform == 'win32-x64' || matrix.target }}
+        with:
+          version: 0.17.1
+      - name: Install the Linux host's build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld pkg-config \
+            libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
+            libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
+            libegl-dev libgl-dev libgl1-mesa-dri libsqlite3-dev fonts-dejavu-core
+      - run: pnpm install --frozen-lockfile
+      - name: Build the executable
+        env:
+          SCRIPTC_TARGET: ${{ matrix.target }}
+        working-directory: packages/cli
+        run: node scripts/build-native.ts
+      - name: Pack the npm packages
+        working-directory: packages/cli
+        run: node scripts/pack.ts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.platform }}
+          path: packages/cli/dist/npm/native-sdk-cli-${{ matrix.platform }}-*.tgz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.platform == 'linux-x64'
+        with:
+          name: cli
+          path: packages/cli/dist/npm/native-sdk-cli-[0-9]*.tgz
+          if-no-files-found: error
+
+      # The examples gate, with each app built by the executable. Linux runs the apps against the
+      # headless host; Windows against the Win32 host, whose windows have a desktop there.
+      - name: Build and run the examples with the executable (Linux)
+        if: matrix.platform == 'linux-x64'
+        env:
+          NATIVE_SDK_CLI: ${{ github.workspace }}/packages/cli/dist/native
+        working-directory: packages/cli
+        run: node tests/scratch.ts node tests/examples.ts
+      - name: Install ANGLE
+        if: matrix.platform == 'win32-x64'
+        shell: pwsh
+        run: |
+          $root = "$env:RUNNER_TEMP\angle"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/mmozeiko/build-angle/releases/download/2026-11-15/angle-x64-2026-11-15.zip" -OutFile "$env:RUNNER_TEMP\angle.zip"
+          Expand-Archive "$env:RUNNER_TEMP\angle.zip" -DestinationPath "$env:RUNNER_TEMP\angle-unpack" -Force
+          Move-Item "$env:RUNNER_TEMP\angle-unpack\angle-x64\bin" $root
+          "NATIVE_ANGLE_DIR=$root" | Out-File -Append -FilePath $env:GITHUB_ENV
+      - name: Build and run the examples with the executable (Windows)
+        if: matrix.platform == 'win32-x64'
+        env:
+          NATIVE_SDK_CLI: ${{ github.workspace }}\packages\cli\dist\native.exe
+        working-directory: packages/cli
+        run: node tests/scratch.ts node tests/examples.ts counter article todo dashboard canvas webgl-cube webgl-texture
+      - name: Check an example on macOS
+        if: runner.os == 'macOS'
+        working-directory: packages/cli
+        run: dist/native check ../../examples/counter
+
+  # The packages as a user installs them: the launcher and its sources from the main package, the
+  # executable from this platform's package, scriptc from the registry. `npm run build` builds
+  # an example in a new project.
+  install:
+    name: install (${{ matrix.platform }})
+    needs: executable
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-24.04 }
+          - { platform: win32-x64, runner: windows-latest }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: vercel-labs/setup-zig@v1
+        if: matrix.platform == 'win32-x64'
+        with:
+          version: 0.17.1
+      - name: Install the Linux host's build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang lld pkg-config \
+            libcairo2-dev libfreetype-dev libfontconfig-dev libharfbuzz-dev \
+            libpng-dev libjpeg-dev libgif-dev libdbus-1-dev libasound2-dev \
+            libegl-dev libgl-dev libsqlite3-dev
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli*
+          path: dist/npm
+          merge-multiple: true
+      - name: Install the packages and build an example
+        run: node packages/cli/scripts/check-install.ts dist/npm

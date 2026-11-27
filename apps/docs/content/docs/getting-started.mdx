@@ -21,29 +21,39 @@ $ xcode-select --install
 
 On Linux, install the host's libraries and a C compiler, which [Shipping a Linux app](https://github.com/vercel-labs/native/blob/next/packages/cli/docs/linux.md) lists. On Windows, put `zig` on the `PATH`.
 
-## Add the CLI to the app
+## Create a project and install Native SDK
 
-An app is a directory of its own with an HTML page, its stylesheets and its scripts. It doesn't have to live in the Native SDK repository. Create a `hello` directory, anywhere you keep projects, and add the CLI to it:
+Create a directory for the app and install the CLI into it:
 
 ```console
-$ npm install --save-dev @native-sdk/cli
+$ mkdir hello
+$ cd hello
+$ npm init -y
+$ npm install -D @native-sdk/cli
 ```
+
+Add `dev` and `build` scripts that run the CLI:
+
+```console
+$ npm pkg set scripts.dev="native dev" scripts.build="native build"
+```
+
+The project's package.json now has:
 
 ```json
 {
   "scripts": {
-    "build": "native build . -o build/hello",
-    "check": "native check .",
-    "dev": "native dev ."
+    "dev": "native dev",
+    "build": "native build"
   }
 }
 ```
 
-The package installs the `native` command, so the scripts and `npx @native-sdk/cli` run the same CLI. Don't write `npx native`; the package named `native` on npm is unrelated.
+Both commands work on the project directory. A command you run once, such as `check`, runs as `npx @native-sdk/cli <command>`.
 
-## Create the app
+## Create an app
 
-Add three files to the directory.
+An app is an HTML page with its stylesheets and scripts. Add three files to the `hello` directory.
 
 `index.html`:
 
@@ -84,22 +94,23 @@ Build the app:
 
 ```console
 $ npm run build
-$ ./build/hello
+$ ./hello
 ```
 
-The build writes a self-contained app bundle — `build/hello.app` on macOS, with the app's files in
-its Resources, or `build/hello` with a `build/hello.resources` directory elsewhere — so the app
-keeps working when it is moved and the source is deleted. The path given with `-o` runs it either
-way. The window shows a heading and a button. Click **Wave** to change the heading to "Hello, native".
+The build writes a self-contained app bundle named after the project directory — `hello.app` on
+macOS, with the app's files in its Resources, or `hello` with a `hello.resources` directory
+elsewhere — so the app keeps working when it is moved and the source is deleted. `./hello` runs it
+either way. The window shows a heading and a button. Click **Wave** to change the heading to "Hello, native".
 
-`npx @native-sdk/cli run .` builds and runs in one step, and `npm run dev` watches the app while you edit it.
+`npx @native-sdk/cli run` builds and runs in one step, and `npm run dev` keeps the window open
+while you edit (see [live editing](/guides/live-editing)).
 
 ## Check what the app uses
 
 `native check` reports diagnostics without building an executable:
 
 ```console
-$ npm run check
+$ npx @native-sdk/cli check
 ```
 
 Native SDK supports a subset of HTML, CSS and the DOM. The command lists anything the app uses that isn't supported. The [supported features](/reference/supported-html) pages describe what compiles today.
@@ -109,7 +120,7 @@ Native SDK supports a subset of HTML, CSS and the DOM. The command lists anythin
 Apps can run without a window, driven by scripted input, and save a screenshot:
 
 ```console
-$ NATIVE_STEPS='click #wave | print #greeting' NATIVE_SNAPSHOT=out.png ./build/hello
+$ NATIVE_STEPS='click #wave | print #greeting' NATIVE_SNAPSHOT=out.png ./hello
 Hello, native
 ```
 

@@ -9,7 +9,7 @@ $ cd packages/cli
 $ node compiler/cli.ts wpt fetch   # one-time: sparse WPT checkout into ~/.cache/native/wpt
 ```
 
-The CLI and everything it compiles into an app live in `packages/cli`; the commands below run there. From the repository root, `pnpm typecheck`, `pnpm build`, `pnpm test`, `pnpm test:examples` and `pnpm wpt` run the same tasks through Turborepo.
+The repository is a pnpm workspace: the CLI and everything it compiles into an app live in `packages/cli`, the docs site in `apps/docs`, and each app under `examples/` is a package of its own. The commands below run in `packages/cli`, where a clone runs the CLI from source as `node compiler/cli.ts <command>` (from the repository root, `node packages/cli/compiler/cli.ts`); the examples' `native` is the same CLI. The web-platform tests build the headless Linux host and need the libraries listed in [cli.md](packages/cli/docs/cli.md). From the repository root, `pnpm typecheck`, `pnpm build`, `pnpm test`, `pnpm test:examples` and `pnpm wpt` run the same tasks through Turborepo.
 
 [How it works](packages/cli/docs/how-it-works.md) explains the build-time/runtime split and where each area's code lives.
 
@@ -30,6 +30,25 @@ Work on a branch. For a change to HTML, CSS or DOM support:
 5. Commit with a plain, descriptive message, and commit `wpt/results.json` with the change.
 
 Never special-case WPT file names, loosen the pixel comparison or fuzzy rules, or count skips as passes. A feature only counts when it's implemented as CSS specifies.
+
+## Node in development, scriptc for release
+
+Develop with Node, compile with scriptc. Contributors run the CLI from source (`node compiler/cli.ts …`), with nothing to build first; the `@native-sdk/cli` package users install is the same code compiled by scriptc into a native executable, which needs no Node to run its commands. So `compiler/` and `shared/` stay one source tree that both run:
+
+- Use what scriptc compiles. A Node-only API with no scriptc lowering (a loader hook, `node:vm`, `createRequire`, a recursive `fs.watch`) gets a small shim both paths use — `compiler/resolve.ts` resolves modules as Node does, `compiler/console-eval.ts` evaluates inspector console expressions, `compiler/watch-tree.ts` watches a tree a directory at a time — so a user sees the same behaviour from either.
+- Find the CLI's own files through `ROOT` (`compiler/root.ts`), never `import.meta.url`: in the executable that is the path of the file on the machine that compiled it. The executable finds `runtime/`, `shared/` and `host/` from `NATIVE_SDK_ROOT` (the npm launcher sets it) or beside itself.
+- A non-null assertion is checked at run time in the executable: `x!` on a null throws there, where Node carries on.
+
+In the workspace, the examples' `native` command is still the CLI on Node (`dist/native.js`, which `pnpm build` bundles). Check a change against the executable as well when it touches the CLI, from `packages/cli`:
+
+```console
+$ pnpm build:native                                              # dist/native (dist/native.exe on Windows); add -- --dev to build faster
+$ dist/native build ../../examples/counter -o build/counter
+$ NATIVE_SDK_CLI=$PWD/dist/native node tests/examples.ts counter todo
+$ pnpm pack:npm --check                                          # packs dist/npm and installs it into a new project
+```
+
+The published packages, which `scripts/pack.ts` lays out: `@native-sdk/cli` carries the launcher (`bin/native.js`), the `runtime/`, `shared/` and `host/` sources every app build compiles, and scriptc as a dependency; `@native-sdk/cli-<platform>` (darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64) carries the executable. The [cli workflow](.github/workflows/cli.yml) builds every platform's executable and runs the examples gate with it on Linux and Windows; [release.yml](.github/workflows/release.yml) (a `v*` tag) and [prerelease.yml](.github/workflows/prerelease.yml) (manual) publish them.
 
 ## Rebasing
 

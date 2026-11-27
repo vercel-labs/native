@@ -13,6 +13,7 @@
 //   npm test
 //   node tests/examples.ts counter todo      (just those examples)
 //   node tests/examples.ts --shard 1/4       (every fourth app, for a suite split across jobs)
+//   NATIVE_SDK_CLI=$PWD/dist/native node tests/examples.ts   (built by the native executable)
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
@@ -20,6 +21,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { decodePng } from "./png.ts";
 import type { Image } from "./png.ts";
+
+/** The command that builds each app: the CLI from source under Node, or the native executable
+ *  NATIVE_SDK_CLI names (the release build's, which CI checks the same examples with). */
+const CLI: string[] = process.env.NATIVE_SDK_CLI ? [process.env.NATIVE_SDK_CLI] : ["node", "compiler/cli.ts"];
 
 /** One app and the way a person drives it. */
 interface Example {
@@ -436,7 +441,7 @@ for (const name of apps) {
   // Windows runs an executable by its .exe name; the built path carries it there.
   const exe = join(out, process.platform === "win32" ? `${name}.exe` : name);
   const started = performance.now();
-  const b = spawnSync("node", ["compiler/cli.ts", "build", dir, "-o", exe], { encoding: "utf8" });
+  const b = spawnSync(CLI[0], [...CLI.slice(1), "build", dir, "-o", exe], { encoding: "utf8" });
   const buildMs = performance.now() - started;
   if (b.status !== 0) {
     if (exempt) {

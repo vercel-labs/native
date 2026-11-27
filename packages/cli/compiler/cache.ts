@@ -20,6 +20,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { publicDirOf, type BundleFile } from "./bundle.ts";
 import { installedPackage } from "./installed.ts";
 import { PAGE_TABLES_FILE } from "../shared/page-tables.ts";
+import { NATIVE_BINARY } from "./root.ts";
 
 /** The on-disk format of an entry and of the manifest it carries. */
 const SCHEMA = 3;
@@ -31,6 +32,11 @@ const ENV_IGNORED = new Set([
   "NATIVE_CACHE_DIR",
   "NATIVE_NO_CACHE",
   "NATIVE_CACHE_MAX_MB",
+  // Where the executable finds its sources and how it was built, which the sdk and toolchain
+  // digests already cover, and its own debugging output.
+  "NATIVE_SDK_ROOT",
+  "NATIVE_SDK_BINARY",
+  "NATIVE_DEBUG",
   "SCRIPTC_CACHE_DIR",
   "SCRIPTC_NO_CACHE",
   "SCRIPTC_STATE_DIR",
@@ -204,6 +210,17 @@ export function toolchainDigest(root: string): string {
       // shared key.
     }
   }
+  // The native executable has no compiler/ sources beside it: the executable itself is the
+  // compiler, named by its size and modification time like scriptc's below.
+  if (NATIVE_BINARY) {
+    try {
+      const stat = statSync(realpathSync(process.execPath));
+      manifest.push(["executable", `${stat.size}:${stat.mtimeMs}`]);
+    } catch {
+      manifest.push(["executable", process.execPath]);
+    }
+  }
+  // scriptc as the build finds it: installed beside native, hoisted (npm) or nested (pnpm).
   const scriptcDir = installedPackage(root, "scriptc") ?? join(root, "node_modules", "scriptc");
   const scriptc = join(scriptcDir, "package.json");
   try {
@@ -406,7 +423,7 @@ export class BuildCache {
   lookup(key: string): CacheEntry | null {
     try {
       const dir = this.entryPath(key);
-      const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8")) as Partial<CacheEntry> & { schema?: number };
+      const meta = JSON.parse(readFileSync(join(dir, "meta.json"), "utf8")) as Omit<Partial<CacheEntry>, "files"> & { schema?: number; files?: Record<string, string> };
       if (meta.schema !== SCHEMA || meta.key !== key || typeof meta.fast !== "string") return null;
       const bin = join(dir, "bin");
       if (!existsSync(bin) || statSync(bin).size !== meta.bytes) return null;
@@ -417,7 +434,7 @@ export class BuildCache {
       } catch {
         // An entry that can't be touched is evicted by its old time.
       }
-      const files = new Map(meta.files === undefined ? [] : Object.entries(meta.files as unknown as Record<string, string>));
+      const files = new Map(meta.files === undefined ? [] : Object.entries(meta.files));
       const assets = Array.isArray(meta.assets)
         ? meta.assets.filter((a): a is BundleFile => a !== null && typeof a === "object" &&
             typeof (a as BundleFile).source === "string" && typeof (a as BundleFile).dest === "string")
@@ -613,12 +630,9 @@ export function readBuildRecord(appDir: string, output: string): BuildRecord | n
     if (data.schema !== SCHEMA || data.outputs === undefined || typeof data.outputs !== "object") return null;
     const hit = data.outputs[output];
     if (hit === undefined || typeof hit.program !== "string" || typeof hit.size !== "number" || typeof hit.mtimeMs !== "number") return null;
-    return {
-      program: hit.program,
-      size: hit.size,
-      mtimeMs: hit.mtimeMs,
-      ...(typeof hit.scriptcMs === "number" ? { scriptcMs: hit.scriptcMs } : {}),
-    };
+    const record: BuildRecord = { program: hit.program, size: hit.size, mtimeMs: hit.mtimeMs };
+    if (typeof hit.scriptcMs === "number") record.scriptcMs = hit.scriptcMs;
+    return record;
   } catch {
     return null;
   }

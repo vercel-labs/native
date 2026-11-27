@@ -1,6 +1,6 @@
 # CLI reference
 
-Run the CLI with `node compiler/cli.ts <command>` (shown as `native` below).
+Run the CLI with `node compiler/cli.ts <command>` from a checkout (shown as `native` below). The `@native-sdk/cli` npm package is the same CLI compiled by scriptc into a native executable, installed with `npm install -D @native-sdk/cli` and run from package.json scripts (`"build": "native build"`) or once as `npx @native-sdk/cli <command>`. It needs Node only for its launcher, and builds apps with the scriptc it installs. `native --version` prints its version.
 
 ## Commands
 

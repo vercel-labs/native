@@ -256,7 +256,17 @@ jobs:
       # before the CLI that asks for them is published.
       - name: Publish the dev-host packages
         run: |
-          for tarball in $(ls "$RUNNER_TEMP"/dist/dev-host-*.tgz); do
+          # `pnpm pack` names a tarball <package name without its scope>-<version>.tgz, so a dev
+          # host is native-sdk-dev-host-<platform>-<version>.tgz. The CLI's optional dependencies
+          # name these exact versions, so a release that publishes none would leave the CLI asking
+          # for packages that do not exist.
+          shopt -s nullglob
+          tarballs=("$RUNNER_TEMP"/dist/native-sdk-dev-host-*.tgz)
+          if [ ${#tarballs[@]} -eq 0 ]; then
+            echo "no @native-sdk/dev-host-* tarball in $RUNNER_TEMP/dist" >&2
+            exit 1
+          fi
+          for tarball in "${tarballs[@]}"; do
             npm publish "$tarball" --provenance --access public
           done
       - name: Publish the CLI

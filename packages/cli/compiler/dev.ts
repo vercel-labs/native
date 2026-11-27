@@ -2,8 +2,7 @@
 // in the host's island, in the page that is already open; `--compiled` rebuilds and relaunches
 // the executable instead, as every build did before the island existed.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
-import type { FSWatcher } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { extname, join, relative, sep } from "node:path";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
@@ -18,6 +17,7 @@ import type { CoverageFinding } from "./dev-coverage.ts";
 import { startInspector } from "./inspect.ts";
 import type { Inspector } from "./inspect.ts";
 import { devSourcesPath, writeDevSources } from "./source-map.ts";
+import { watchTree, type TreeWatcher } from "./watch-tree.ts";
 import { BuildProgress } from "./progress.ts";
 
 /** The markup and style files a reload applies, and the script files that need a rebuild. */
@@ -103,8 +103,10 @@ async function openInspector(appDir: string, buildDir: string, inspectPort: numb
 /** Starts the executable, and with an inspector pipes what it prints through the dev command so
  *  the console panel sees each line as the app writes it. */
 function startExecutable(executable: string, cwd: string, env: NodeJS.ProcessEnv, inspector: Inspector | null): ChildProcess {
-  const running = spawn(executable, [], { cwd, stdio: inspector === null ? "inherit" : ["inherit", "pipe", "pipe"], env });
-  if (inspector !== null) {
+  // A literal stdio per branch: scriptc reads it at compile time, and the CLI is compiled.
+  if (inspector === null) return spawn(executable, [], { cwd, stdio: "inherit", env });
+  const running = spawn(executable, [], { cwd, stdio: ["inherit", "pipe", "pipe"], env });
+  {
     const streaming = inspector;
     const pending = { stdout: "", stderr: "" };
     const forward = (stream: "stdout" | "stderr", text: string): void => {
@@ -149,9 +151,8 @@ async function devIsland(input: string, out: string | null, inspectPort: number 
   // path at build time: point it at this install's pack instead. A host built here already
   // records this machine's own path.
   const pack = host.prebuilt ? libnodePack() : null;
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
-    ...(pack === null ? {} : { SCRIPTC_LIBNODE: pack.dir }),
     NATIVE_DEV_TABLES: dataFile,
     NATIVE_DEV_STATE: stateFile,
     NATIVE_DEV_CTL: ctlFile,
@@ -168,6 +169,7 @@ async function devIsland(input: string, out: string | null, inspectPort: number 
       .filter((value) => value !== undefined && value !== "")
       .join(" "),
   };
+  if (pack !== null) env["SCRIPTC_LIBNODE"] = pack.dir;
 
   const fail = (err: unknown): void => {
     console.error(err instanceof Error ? err.message : String(err));
@@ -186,7 +188,7 @@ async function devIsland(input: string, out: string | null, inspectPort: number 
     });
   };
 
-  let watcher: FSWatcher | null = null;
+  let watcher: TreeWatcher | null = null;
   let bundler: ScriptBundler | null = null;
   /** The page's scripts as last bundled; a change to the set means a new context. */
   let scripts = "";
@@ -376,8 +378,10 @@ async function devIsland(input: string, out: string | null, inspectPort: number 
     return !EDITABLE.has(extname(name));
   };
 
-  watcher = watch(appDir, { recursive: true }, (_event, name) => {
-    if (name === null) return;
+  // One non-recursive watcher per directory: the compiled CLI has no recursive fs.watch.
+  const skipDir = (name: string): boolean =>
+    name.split(sep).join("/").split("/").some((part) => part === "node_modules" || part.startsWith("."));
+  watcher = watchTree(appDir, skipDir, (_event, name) => {
     const file = name.split(sep).join("/");
     if (ignored(file)) return;
     queue(file);
@@ -424,7 +428,7 @@ async function devCompiled(input: string, out: string | null, inspectPort: numbe
     NATIVE_DEV_SOURCES: devSourcesPath(appDir),
   };
 
-  let watcher: FSWatcher | null = null;
+  let watcher: TreeWatcher | null = null;
   let child: ChildProcess | null = null;
   let restarting = false;
   /** The page's scripts as last built; a change to them needs a new executable. */
@@ -607,8 +611,9 @@ async function devCompiled(input: string, out: string | null, inspectPort: numbe
     return !EDITABLE.has(extname(name));
   };
 
-  watcher = watch(appDir, { recursive: true }, (_event, name) => {
-    if (name === null) return;
+  const skipDir = (name: string): boolean =>
+    name.split(sep).join("/").split("/").some((part) => part === "node_modules" || part.startsWith("."));
+  watcher = watchTree(appDir, skipDir, (_event, name) => {
     const file = name.split(sep).join("/");
     if (ignored(file)) return;
     queue(file);

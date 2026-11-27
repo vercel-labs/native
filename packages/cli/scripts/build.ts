@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 
-rmSync(dist, { recursive: true, force: true });
+// Only this build's own files: dist/ also holds the native executable and the npm packages
+// scripts/build-native.ts and scripts/pack.ts write there.
+for (const name of ["native.js", "testharness.js"]) rmSync(join(dist, name), { force: true });
 mkdirSync(dist, { recursive: true });
 await build({
   entryPoints: [join(root, "compiler", "cli.ts")],

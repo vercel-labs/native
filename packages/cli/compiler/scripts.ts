@@ -5,10 +5,10 @@
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GLOBALS, WORKER_GLOBALS } from "./globals.ts";
+import { ROOT } from "./root.ts";
 import { NODE_SUPPLIED } from "./dom-globals.ts";
 import { rewriteWorkerConstructions } from "./worker-entries.ts";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME = join(ROOT, "runtime");
 
 /** A source file scriptc compiles as JavaScript: no type checking, no type positions. */
@@ -459,7 +459,8 @@ function withoutDefault(text: string): string {
  */
 function patternNames(target: string): string[] | null {
   const colon = topLevelIndex(target, ":");
-  const text = (colon < 0 ? target : target.slice(0, colon)).trim();
+  const typed = colon < 0 ? target : target.slice(0, colon);
+  const text = typed.trim();
   if (text === "") return null;
   if (text[0] === "{") {
     if (text[text.length - 1] !== "}") return null;

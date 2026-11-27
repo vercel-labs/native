@@ -9,7 +9,6 @@ import { spawn, spawnSync, type SpawnOptions } from "node:child_process";
 import { availableParallelism, tmpdir, totalmem } from "node:os";
 import { createRequire, registerHooks } from "node:module";
 import { createHash } from "node:crypto";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import { installedPackage, nodeModulesDirs } from "./installed.ts";
 import { Diagnostics } from "./diagnostics.ts";
 import { domGlobalsModule } from "./dom-globals.ts";
@@ -26,8 +25,9 @@ import { BuildProgress, parseTimingLine, type TimingEvent } from "./progress.ts"
 import { appInfoOf, bundledInfo, type AppInfo } from "./app-info.ts";
 import { packageMacApp } from "./package-macos.ts";
 import { writeDevSources } from "./source-map.ts";
+import { resolveModule } from "./resolve.ts";
+import { ROOT } from "./root.ts";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME = join(ROOT, "runtime");
 const HOST = join(ROOT, "host");
 export const color = process.stderr.isTTY ?? false;
@@ -38,24 +38,27 @@ export function die(msg: string): never {
 }
 
 /**
- * The scriptc command. `node_modules/.bin/scriptc` is a symlink to the native compiler on Unix
- * and an npm shell shim on Windows, which a process cannot start directly; the compiler itself
- * lives at `scriptc/bin/scriptc.exe` once its install script has run, and in its platform package
- * when that script was skipped (npm's allowScripts gate, for instance).
+ * The scriptc command, as a program and the arguments that start it. `node_modules/.bin/scriptc`
+ * is a symlink to the native compiler on Unix and an npm shell shim on Windows, which a process
+ * cannot start directly; the compiler itself lives at `scriptc/bin/scriptc.exe` once its install
+ * script has run, and in its platform package when that script was skipped (npm's allowScripts
+ * gate, for instance). The scriptc package is found as Node finds native's dependencies, so a
+ * hoisted install (npm) and a nested one (pnpm) both resolve.
  */
 /** The size under which scriptc's executable is still the placeholder its package ships. */
 const PLACEHOLDER_BYTES = 4096;
 
-export function findScriptc(): string {
+export function findScriptc(): { command: string; args: string[] } {
+  const exe = (command: string) => ({ command, args: [] as string[] });
   // A path named outright wins: it is how a checkout of the compiler itself, or a build of it in a
   // directory of its own, is used without installing anything over the project.
   const chosen = process.env.NATIVE_SCRIPTC;
-  if (chosen !== undefined && chosen !== "" && existsSync(chosen)) return chosen;
+  if (chosen !== undefined && chosen !== "" && existsSync(chosen)) return isBatchShim(chosen) ? shimCommand(chosen) : exe(chosen);
   // scriptc ships a placeholder script as its executable until its install script swaps the
   // release binary in, so a placeholder is passed over for the platform package's own binary.
   const scriptcDir = installedPackage(ROOT, "scriptc");
   const installed = scriptcDir === null ? null : join(scriptcDir, "bin", "scriptc.exe");
-  if (installed !== null && existsSync(installed) && statSync(installed).size > PLACEHOLDER_BYTES) return installed;
+  if (installed !== null && existsSync(installed) && statSync(installed).size > PLACEHOLDER_BYTES) return exe(installed);
   // The platform package sits beside scriptc: in its own node_modules under pnpm, and in the
   // nearest one above it, or above the CLI, when npm hoists it.
   const searched = [...(scriptcDir === null ? [] : nodeModulesDirs(scriptcDir)), ...nodeModulesDirs(ROOT)];
@@ -67,11 +70,11 @@ export function findScriptc(): string {
       for (const rel of [["dist", "bin", "scriptc.exe"], ["bin", "scriptc.exe"], ["dist", "bin", "scriptc"],
                          ["bin", "scriptc"]]) {
         const candidate = join(scoped, name, ...rel);
-        if (existsSync(candidate)) return candidate;
+        if (existsSync(candidate)) return exe(candidate);
       }
     }
   }
-  if (installed !== null && existsSync(installed)) return installed;
+  if (installed !== null && existsSync(installed)) return exe(installed);
   // npm's own shim: on Windows a .cmd beside the .exe a package's install script places, and it is
   // what a project that replaced the compiler (a checkout's own CLI, a build of main) ends up
   // with. The executable above is the published release, so the shim is only reached when that
@@ -79,10 +82,10 @@ export function findScriptc(): string {
   for (const modules of nodeModulesDirs(ROOT)) {
     for (const name of ["scriptc.cmd", "scriptc"]) {
       const local = join(modules, ".bin", name);
-      if (existsSync(local)) return local;
+      if (existsSync(local)) return isBatchShim(local) ? shimCommand(local) : exe(local);
     }
   }
-  return "scriptc";
+  return exe("scriptc");
 }
 
 /**
@@ -110,11 +113,26 @@ function isBatchShim(path: string): boolean {
   return lower.endsWith(".cmd") || lower.endsWith(".bat");
 }
 
-/** One argument as a batch file's command line wants it: quoted, with quotes it carries escaped
- *  the way the C runtime parses them back. */
-function batchQuote(arg: string): string {
-  if (arg !== "" && !/[ "'\t]/.test(arg)) return arg;
-  return '"' + arg.replace(/(\\*)"/g, '$1$1\\"') + '"';
+/**
+ * What an npm batch shim runs, started without a shell: cmd re-reads a command line, so
+ * arguments like `--define=process.env.NODE_ENV="production"` would arrive as something else.
+ * npm's shims name their target relative to themselves (`"%dp0%\..\scriptc\bin\scriptc.exe"`,
+ * or a script after `"%_prog%"`, which is node); a shim this can't read runs through cmd.
+ */
+function shimCommand(shim: string): { command: string; args: string[] } {
+  let text = "";
+  try {
+    text = readFileSync(shim, "utf8");
+  } catch {
+    // run through cmd below
+  }
+  const targets = [...text.matchAll(/"%~?dp0%?\\?([^"]+)"/gi)].map((m) => join(dirname(shim), m[1].split("\\").join("/")));
+  const target = targets[targets.length - 1];
+  if (target !== undefined && existsSync(target)) {
+    if (/\.(exe|com)$/i.test(target)) return { command: target, args: [] };
+    if (/\.[cm]?js$/i.test(target)) return { command: "node", args: [target] };
+  }
+  return { command: process.env.ComSpec || "cmd.exe", args: ["/d", "/c", shim] };
 }
 
 /** A module specifier, either `from "x"`, `import "x"` or `import("x")`. */
@@ -170,47 +188,14 @@ function sourceFileFor(path: string): string | null {
   return null;
 }
 
-const PROBE = "native-probe:";
-/** The file a probe resolves from, set for the duration of one resolveSpecifier call. */
-let probeParent: string | null = null;
-const esmResolve = typeof registerHooks === "function";
-
-// A package's "import" condition names the ESM build, which is the one an app's `import` runs;
-// require() would find its CommonJS build instead, whose requires scriptc can't compile.
-// import.meta.resolve only ever resolves from native's own file, so a resolve hook hands the
-// loader the app file to resolve from.
-if (esmResolve) {
-  registerHooks({
-    resolve(specifier, context, nextResolve) {
-      if (probeParent !== null && specifier.startsWith(PROBE)) {
-        return nextResolve(specifier.slice(PROBE.length), { ...context, parentURL: probeParent });
-      }
-      return nextResolve(specifier, context);
-    },
-  });
-}
-
 /** The file a specifier names, resolved as Node's ESM loader would from the importing file, so
  *  the app's own node_modules is searched (where its dependencies are installed). */
 function resolveSpecifier(spec: string, fromFile: string, appDir: string): string | null {
+  // A package's "import" condition names the ESM build, which is the one an app's `import` runs;
+  // require() would find its CommonJS build instead, whose requires scriptc can't compile.
   const from = (parent: string): string | null => {
-    if (esmResolve) {
-      probeParent = pathToFileURL(resolve(parent)).href;
-      try {
-        return sourceFileFor(fileURLToPath(import.meta.resolve(PROBE + spec)));
-      } catch {
-        return null; // a Node builtin, or a package that isn't installed
-      } finally {
-        probeParent = null;
-      }
-    }
-    // Node before 22.15 has no synchronous resolve hook. A require made beside the file finds the
-    // same node_modules, though with require's conditions (a package's CommonJS build).
-    try {
-      return sourceFileFor(createRequire(join(dirname(parent), "_.js")).resolve(spec));
-    } catch {
-      return null; // a Node builtin, or a package that isn't installed
-    }
+    const found = resolveModule(spec, parent, "import");
+    return found === null ? null : sourceFileFor(found);
   };
   const hit = from(fromFile);
   if (hit !== null) return hit;
@@ -227,11 +212,9 @@ function resolveSpecifier(spec: string, fromFile: string, appDir: string): strin
 function resolveRequired(spec: string, fromFile: string, appDir: string): string | null {
   const from = (parent: string): string | null => {
     const dir = dirname(parent);
-    try {
-      return copyableFile(sourceFileFor(createRequire(join(dir, "_.js")).resolve(spec)) ?? "");
-    } catch {
-      // A Node builtin, an uninstalled package, or a resolution require's own rules won't take.
-    }
+    const found = resolveModule(spec, parent, "require");
+    // Null for a Node builtin, an uninstalled package, or a resolution require's own rules won't take.
+    if (found !== null) return copyableFile(sourceFileFor(found) ?? "");
     if (!spec.startsWith(".") && !spec.startsWith("/")) return null;
     return copyableFile(sourceFileFor(resolve(dir, spec)) ?? "");
   };
@@ -861,13 +844,9 @@ function extendsFile(spec: string, fromDir: string): string | null {
     }
     return null;
   }
-  const require = createRequire(join(fromDir, "_.js"));
   for (const candidate of [spec, spec + ".json", spec + "/tsconfig.json"]) {
-    try {
-      return require.resolve(candidate);
-    } catch {
-      // try the next spelling
-    }
+    const found = resolveModule(candidate, join(fromDir, "_.js"), "require");
+    if (found !== null && existsSync(found)) return found;
   }
   return null;
 }
@@ -1807,12 +1786,15 @@ export interface ScriptcResult {
 /** Runs `command` with its output collected, handing each scriptc timing line to `onTiming` as it
  *  is written instead of collecting it: that is what lets the build follow its phases while the
  *  compiler works. A timing line is only taken out of the output when a reader takes it. */
-function runStreaming(command: string, args: string[], options: SpawnOptions,
+function runStreaming(command: string, args: string[], env: NodeJS.ProcessEnv | undefined,
   onTiming?: (event: TimingEvent) => void): Promise<ScriptcResult> {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, options);
+      child = spawn(command, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: env === undefined ? process.env : { ...process.env, ...env },
+      });
     } catch (error) {
       resolve({ status: null, stdout: "", stderr: "", error: error as Error });
       return;
@@ -1853,22 +1835,12 @@ function runStreaming(command: string, args: string[], options: SpawnOptions,
  */
 export async function runScriptc(args: string[], env?: NodeJS.ProcessEnv,
   onTiming?: (event: TimingEvent) => void): Promise<ScriptcResult> {
-  const scriptcPath = findScriptc();
+  // findScriptc() already turned a batch shim into the command it runs, so no shell is needed.
+  const scriptc = findScriptc();
   // The compiler's warnings for a large program (the whole SDK runtime) run past a megabyte. A
   // spawnSync had to be given a maxBuffer well above its 1 MB default to keep them; this reader
   // streams and keeps every line, so nothing is truncated at any size.
-  const options: SpawnOptions = env === undefined
-    ? { stdio: ["ignore", "pipe", "pipe"] }
-    : { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env } };
-  if (isBatchShim(scriptcPath)) {
-    // cmd strips the first and last quote of a /c line that starts with one, so the line carries a
-    // wrapping pair of its own: without it the trailing arguments are cut off and the compiler
-    // sees no command at all.
-    const command = '"' + [batchQuote(scriptcPath), ...args.map(batchQuote)].join(" ") + '"';
-    return runStreaming(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", command],
-                        { ...options, windowsVerbatimArguments: true }, onTiming);
-  }
-  return runStreaming(scriptcPath, args, options, onTiming);
+  return runStreaming(scriptc.command, [...scriptc.args, ...args], env, onTiming);
 }
 
 /** Links scriptc's contract types into a build directory, so generated code resolves them from

@@ -281,8 +281,13 @@ jobs:
       # `--provenance` attaches the run's signed build provenance to each tarball.
       - name: Publish the platform packages
         run: |
+          # The platform packages, the dev hosts and ANGLE: `pnpm pack` names them
+          # native-sdk-<name without its scope>-<version>.tgz.
+          shopt -s nullglob
+          matched=0
           for tarball in "$RUNNER_TEMP"/dist/native-sdk-*.tgz; do
             [ -e "$tarball" ] || continue
+            matched=$((matched + 1))
             meta=$(tar -xzOf "$tarball" package/package.json)
             name=$(printf '%s' "$meta" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')
             version=$(printf '%s' "$meta" | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')
@@ -293,6 +298,10 @@ jobs:
             fi
             npm publish "$tarball" --tag next --provenance --access public
           done
+          if [ "$matched" -eq 0 ]; then
+            echo "no platform package to publish in $RUNNER_TEMP/dist" >&2
+            exit 1
+          fi
       - name: Publish the CLI
         run: |
           for tarball in "$RUNNER_TEMP"/dist/native-sdk-cli-*.tgz; do

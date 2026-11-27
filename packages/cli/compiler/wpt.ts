@@ -25,8 +25,8 @@ import { applyHostLink, buildTarget, hostCommonCompileCommand, hostCompileComman
 import { compileApp, type CompiledApp } from "./compile.ts";
 import { TABLE_FIELDS as FIELDS } from "./fields.ts";
 import { implicitGlobals, namedAccess, topLevelDeclarations, windowAliases, windowVarAliases, withDomImports } from "./scripts.ts";
+import { ROOT } from "./root.ts";
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const RUNTIME = join(ROOT, "runtime");
 const HOST = join(ROOT, "host");
 const WPT = process.env.NATIVE_WPT ?? join(homedir(), ".cache", "native", "wpt");
@@ -1378,8 +1378,12 @@ function report(results: Result[], verbose: boolean, seconds: number): void {
   }
   const total = blank();
   console.log("\n" + "directory".padEnd(32) + "pass".padStart(7) + "fail".padStart(7) + "skip".padStart(7) + "err".padStart(6) + "  pass% of run");
-  for (const [d, c] of [...byDir].sort()) {
-    for (const k of Object.keys(c) as Status[]) total[k] += c[k];
+  for (const [d, c] of [...byDir].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) {
+    total.pass += c.pass;
+    total.fail += c.fail;
+    total.skip += c.skip;
+    total.error += c.error;
+    total.crash += c.crash;
     const run = c.pass + c.fail + c.error + c.crash;
     console.log(d.padEnd(32) + String(c.pass).padStart(7) + String(c.fail).padStart(7) + String(c.skip).padStart(7) +
       String(c.error + c.crash).padStart(6) + "  " + (run ? `${((100 * c.pass) / run).toFixed(0)}%` : "-"));
