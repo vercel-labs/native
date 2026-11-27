@@ -8380,7 +8380,20 @@ void host_open(double width, double height, const uint8_t *title, size_t title_l
       if (optY != nil) frame.origin.y = visible.origin.y + visible.size.height - optY.doubleValue - frame.size.height;
       [g_window setFrame:frame display:NO];
     } else {
-      [g_window center];
+      // Centre in the screen's visible frame, which is the free area between the menu bar and
+      // the Dock: the margins either side are equal, and the gap above the window matches the
+      // gap below it. -[NSWindow center] frames against the screen's full height, which leaves
+      // a window of this size too high once the menu bar and the Dock are accounted for.
+      NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+      if (screen != nil) {
+        NSRect visible = screen.visibleFrame;
+        NSRect frame = g_window.frame;
+        frame.origin.x = visible.origin.x + floor((visible.size.width - frame.size.width) / 2);
+        frame.origin.y = visible.origin.y + floor((visible.size.height - frame.size.height) / 2);
+        [g_window setFrame:frame display:NO];
+      } else {
+        [g_window center];
+      }
     }
     // Placement is the frame in the page's size moved onto the screen: `center` puts a window
     // taller than the display halfway above it, which leaves the titlebar and its controls out of
