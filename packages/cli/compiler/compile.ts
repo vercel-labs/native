@@ -1702,7 +1702,9 @@ export function compileApp(htmlPath: string, diags: Diagnostics, options: Compil
         // element that had none), so an id condition becomes a runtime [id] test instead of a
         // build-time decision, and an element whose id doesn't match yet still gets the rule.
         if (markupMayChange && sel.id !== null) {
-          s = { ...sel, id: null, attrs: [...sel.attrs, "id" + ATTR_SEP + "=" + ATTR_SEP + sel.id] };
+          // The "Q" flag says this condition stands for the selector's #id: a quirks document
+          // folds it, while an author's own [id=…] condition stays exact.
+          s = { ...sel, id: null, attrs: [...sel.attrs, "id" + ATTR_SEP + "=Q" + ATTR_SEP + sel.id] };
         }
         if (sel.chain.length > 0 && chainIsStatic(sel.chain)) {
           // Resolved now: the rule either applies to this element unconditionally or not at all.

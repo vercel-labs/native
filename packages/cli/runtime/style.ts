@@ -380,11 +380,11 @@ function attrMatches(el: Element, enc: string): boolean {
   if (opWithFlag === "") return true;
   const op = opWithFlag.charAt(0);
   const flag = opWithFlag.slice(1);
-  // A quirks document reads ids and class names case-insensitively wherever they are matched,
-  // so an attribute condition on either is folded there too (a rewritten subject id included).
-  const foldedName = name.toLowerCase();
-  const ci = flag === "i" || (flag === "" && (attrDefaultsInsensitive(el, name) ||
-    (isQuirks() && (foldedName === "id" || foldedName === "class"))));
+  // An author's own [id]/[class] condition is case-sensitive even in a quirks document. Only the
+  // condition a subject id becomes when a script may change markup ("Q") folds there, since it
+  // stands for the #id selector, which does.
+  const ci = flag === "i" || (flag === "Q" && isQuirks()) ||
+    (flag === "" && attrDefaultsInsensitive(el, name));
   const h = ci ? have.toLowerCase() : have;
   const w = ci ? want.toLowerCase() : want;
   if (op === "=") return h === w;

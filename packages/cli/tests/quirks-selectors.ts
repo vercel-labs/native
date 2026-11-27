@@ -15,6 +15,9 @@ const BODY = `<style>
 .bar p { background-color: rgb(255, 0, 0); }
 .S1::before { content: "P"; }
 #S9 { color: rgb(128, 0, 128); }
+[id="S1"] { font-style: italic; }
+[class="s2"] { font-style: italic; }
+[id="s1"] { font-weight: 700; }
 </style>
 <div id="s1">a</div>
 <div id="c2" class="S2">b</div>
@@ -49,6 +52,9 @@ log("static " + document.compatMode + " " + s(s1) + " " + s(c2) + " " + s(t));
 log("runtime " + getComputedStyle(s1).borderTopColor + " " + getComputedStyle(c2).outlineColor);
 log("ids " + getComputedStyle(s9).color);
 log("pseudo " + getComputedStyle(p1, "::before").content);
+// Attribute selectors stay case-sensitive even in a quirks document; only #id and .class fold.
+log("attr " + getComputedStyle(s1).fontStyle + "/" + getComputedStyle(s1).fontWeight + " " +
+  getComputedStyle(c2).fontStyle);
 anc.classList.remove("Bar");
 p1.classList.remove("S1");
 void document.documentElement.offsetTop;
@@ -108,6 +114,8 @@ const wantQuirks = [
   `ids ${PURPLE}`,
   // A pseudo-element rule written on a class in another case.
   `pseudo "P"`,
+  // [id="S1"] and [class="s2"] name other cases and stay exact; [id="s1"] matches as written.
+  `attr normal/700 normal`,
   // Removing "Bar" and "S1" takes the descendant's red and the pseudo-element's content away;
   // a pseudo-element with no rule left computes its content as "normal", as browsers have it.
   `removed ${BLACK}/${CLEAR} normal`,
@@ -119,6 +127,7 @@ const wantStandards = [
   `ids ${BLACK}`,
   // The class is written exactly here, so the pseudo-element rule applies; removing it does not.
   `pseudo "P"`,
+  `attr normal/700 normal`,
   `removed ${BLACK}/${CLEAR} normal`,
 ];
 for (let i = 0; i < wantQuirks.length; i++) check(`quirks: ${wantQuirks[i]}`, quirks[i] === wantQuirks[i], `got ${JSON.stringify(quirks[i])}`);
