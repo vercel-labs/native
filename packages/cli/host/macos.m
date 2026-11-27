@@ -8752,7 +8752,24 @@ void host_set_cursor_image(int32_t id, double hx, double hy) {
   if (g_window) [g_window invalidateCursorRectsForView:g_view];
 }
 
-double host_backing_scale(void) { return g_window ? g_window.backingScaleFactor : 1.0; }
+double host_backing_scale(void) {
+  if (g_window == nil) return 1.0;
+  // A window that isn't on a screen yet reports a scale of 1, and a page's first script can run
+  // before the window is shown: the screen it opens on gives the scale its frames draw at, so a
+  // canvas sized from devicePixelRatio is sized for the pixels it will have.
+  NSScreen *screen = g_window.screen != nil ? g_window.screen : [NSScreen mainScreen];
+  return screen != nil ? screen.backingScaleFactor : g_window.backingScaleFactor;
+}
+
+double host_display_scale(void) {
+  @autoreleasepool {
+    // The display's own scale, before there is a window on it: a page's first script runs before
+    // run() opens the window, and the screen the window opens on is the one its frames draw for.
+    NSScreen *screen = g_window != nil ? g_window.screen : nil;
+    if (screen == nil) screen = [NSScreen mainScreen];
+    return screen != nil ? screen.backingScaleFactor : 1.0;
+  }
+}
 
 int32_t host_reduced_motion(void) {
   @autoreleasepool {

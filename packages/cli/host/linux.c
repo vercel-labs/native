@@ -2829,6 +2829,9 @@ void host_bundle_dir(dir_cb cb) {
 
 double host_backing_scale(void) { return 1; }
 
+/** The Linux host draws at one device pixel per CSS px, with or without a window. */
+double host_display_scale(void) { return 1; }
+
 int32_t host_reduced_motion(void) {
   const char *env = getenv("NATIVE_REDUCED_MOTION");
   return env && *env ? (strcmp(env, "0") != 0 ? 1 : 0) : 0;

@@ -8,6 +8,7 @@ import { hostEventPhase, hostGlWindow, hostRefreshInterval, hostPoll, hostUntilR
 import { pumpImages } from "../images.ts";
 import { messageDelivered, openedWindowClosed, pollSystemSettings, reportUncaughtError, requestQuit, runFrameCallbacks, windowBlurred, windowFocused, windowMoved, windowResized } from "../window.ts";
 import { setClock } from "../animation.ts";
+import { rasterScale } from "../device.ts";
 import { usesDisplaySchedule } from "./refresh.ts";
 import { hostComposition, hostKey, hostKeyUp } from "./keyboard.ts";
 import { config, frame } from "./mount.ts";
@@ -114,7 +115,18 @@ export function tick(): void {
   setTimeout(tick, 0);
 }
 
+/** The scale the last frame drew at, so a scale that changes is reported to the page. */
+let lastScale = -1;
+
 function tickOnce(): void {
+  // A window's backing scale can become known only after its page's first script has run, since a
+  // script sizes a canvas from devicePixelRatio before the window is on a screen. The page hears a
+  // resize when the ratio it would read changes, as it does when a browser's zoom does.
+  const scale = rasterScale();
+  if (scale !== lastScale) {
+    lastScale = scale;
+    windowResized();
+  }
   // Block until this frame is due, then drain the events that arrived meanwhile; yielding back to
   // the scriptc event loop between ticks keeps timers and promises in user code running. Waiting
   // a fixed 16 ms before every frame put the period at the frame's work plus that wait, rather

@@ -481,6 +481,9 @@ export declare function hostCanvasDrawPart(id: number, x: number, y: number, w: 
 
 /** The window's backing scale factor (2 on a retina display), 1 headless. */
 export declare function hostBackingScale(): number;
+/** The display's own scale factor (2 on a retina display), with or without a window on it: the
+ *  screen a first window opens on. */
+export declare function hostDisplayScale(): number;
 /** 1 when the system asks apps to reduce motion. */
 export declare function hostReducedMotion(): number;
 /** The system's appearance: 1 for dark, 0 for light. */

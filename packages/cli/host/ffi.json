@@ -269,6 +269,7 @@
     { "name": "hostCanvasDrawPart", "symbol": "host_canvas_draw_part", "params": ["i32", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
 
     { "name": "hostBackingScale", "symbol": "host_backing_scale", "params": [], "returns": "f64" },
+    { "name": "hostDisplayScale", "symbol": "host_display_scale", "params": [], "returns": "f64" },
     { "name": "hostReducedMotion", "symbol": "host_reduced_motion", "params": [], "returns": "i32" },
     { "name": "hostColorScheme", "symbol": "host_color_scheme", "params": [], "returns": "i32" },
     { "name": "hostIncreaseContrast", "symbol": "host_increase_contrast", "params": [], "returns": "i32" },
