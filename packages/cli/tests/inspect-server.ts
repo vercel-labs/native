@@ -231,6 +231,15 @@ check("no escape attempt wrote a file as the developer", !existsSync(sentinel), 
 const loop = await rpc(ws, 20, "Runtime.evaluate", { expression: "while (true) {}", returnByValue: true });
 check("a runaway expression times out", loop.result?.exceptionDetails !== undefined, JSON.stringify(loop).slice(0, 160));
 
+const imported = await rpc(ws, 21, "Runtime.evaluate", { expression: "import('node:fs')", returnByValue: true });
+check("a dynamic import is reported as an exception",
+  imported.result?.exceptionDetails?.text === "import() is not available in the inspector console", JSON.stringify(imported).slice(0, 200));
+const rejected = await rpc(ws, 22, "Runtime.evaluate", { expression: "Promise.reject(new Error('rejected on purpose'))", returnByValue: true });
+check("a rejected promise returned by an expression is reported to the client",
+  rejected.result?.exceptionDetails?.text === "rejected on purpose", JSON.stringify(rejected).slice(0, 200));
+const afterRejection = await rpc(ws, 23, "Runtime.evaluate", { expression: "2 + 3", returnByValue: true });
+check("the console still evaluates after a rejection", afterRejection.result?.result?.value === 5, JSON.stringify(afterRejection).slice(0, 160));
+
 // --- The server listens on loopback only ---------------------------------------------------
 
 const external = Object.values(networkInterfaces()).flat()
@@ -246,6 +255,47 @@ if (external === undefined) {
   });
   check("the server is not reachable on a non-loopback address", !reachable, external.address);
 }
+
+// --- A refused upgrade that the client resets must not stop the server ----------------------
+
+function resetAfter(payload: string): Promise<void> {
+  return new Promise((resolve) => {
+    const socket = connect(port, "127.0.0.1");
+    socket.on("error", () => resolve());
+    socket.on("connect", () => {
+      socket.write(payload);
+      socket.resetAndDestroy();
+      resolve();
+    });
+    setTimeout(() => { socket.destroy(); resolve(); }, 1500).unref();
+  });
+}
+
+const refusedUpgrades = [
+  upgradeHeaders("/devtools/page/native", undefined, undefined),
+  upgradeHeaders("/not-the-token/devtools/page/native", undefined, undefined),
+  upgradeHeaders(wsPath, undefined, "https://evil.example"),
+  upgradeHeaders(wsPath, undefined, "null"),
+  upgradeHeaders(wsPath, `evil.example:${port}`, undefined),
+  upgradeHeaders(wsPath, undefined, undefined).filter((line) => !line.startsWith("Sec-WebSocket-Key")),
+];
+for (const lines of refusedUpgrades) {
+  const payload = lines.join("\r\n") + "\r\n\r\n";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await resetAfter(payload);
+    await new Promise<void>((settle) => setTimeout(settle, 10));
+  }
+}
+let survivedResets = false;
+try {
+  const afterReset = await opened(`ws://127.0.0.1:${port}${wsPath}`);
+  const answer = await rpc(afterReset, 40, "Runtime.enable");
+  survivedResets = answer.result !== undefined;
+  afterReset.close();
+} catch {
+  survivedResets = false;
+}
+check("resetting refused upgrades does not stop the server", survivedResets);
 
 // --- Fuzz the request and frame parsers, then check the server still answers ----------------
 

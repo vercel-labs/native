@@ -412,14 +412,51 @@ function (jsonText) {
       return { type: "object", description: String(value) };
     }
   }
+  var lastThenable = null;
+  function errorText(reason) {
+    if (typeof reason === "object" && reason !== null) {
+      try {
+        if (reason.code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING" || reason.code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG") {
+          return "import() is not available in the inspector console";
+        }
+        if (typeof reason.message === "string") return reason.message;
+      } catch (e) {
+        // A reason whose getters throw falls through to String().
+      }
+    }
+    return String(reason);
+  }
   globalThis.__inspectRun = function (source) {
     var value;
+    lastThenable = null;
     try {
       value = (0, evaluateIndirectly)(source);
     } catch (err) {
-      return stringify({ exception: String(err && err.message !== undefined ? err.message : err) });
+      return stringify({ exception: errorText(err) });
+    }
+    if (value !== null && (typeof value === "object" || typeof value === "function")) {
+      var then = null;
+      try { then = value.then; } catch (e) { then = null; }
+      if (typeof then === "function") {
+        // A promise the expression leaves behind must not become an unhandled rejection: a
+        // handler keeps it off the dev process, and the console reports its rejection instead.
+        var state = { settled: false, error: null };
+        lastThenable = state;
+        try {
+          then.call(value, undefined, function (reason) {
+            state.settled = true;
+            state.error = errorText(reason);
+          });
+        } catch (e) {
+          state.settled = true;
+          state.error = errorText(e);
+        }
+      }
     }
     return stringify({ value: describe(value) });
+  };
+  globalThis.__inspectThenable = function () {
+    return lastThenable === null ? "null" : stringify(lastThenable);
   };
   globalThis.__inspectLogs = function () { return stringify(logs); };
 }`;
@@ -441,6 +478,23 @@ function isSameToken(given: string | undefined, token: string): boolean {
   const a = Buffer.from(given);
   const b = Buffer.from(token);
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** A rejection reason as text; a dynamic import is named for what it is. */
+function rejectionMessage(reason: unknown): string {
+  if (typeof reason === "object" && reason !== null) {
+    try {
+      const code = (reason as { code?: unknown }).code;
+      if (code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING" || code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG") {
+        return "import() is not available in the inspector console";
+      }
+      const message = (reason as { message?: unknown }).message;
+      if (typeof message === "string") return message;
+    } catch {
+      // A reason whose getters throw falls back to String().
+    }
+  }
+  return String(reason);
 }
 
 /** The token segment of a request target and the path after it. */
@@ -484,18 +538,49 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
     } });
   };
 
-  const evaluate = async (expression: string): Promise<{ [key: string]: unknown }> => {
+  const evaluateOnce = async (expression: string): Promise<{ [key: string]: unknown }> => {
     const snap = await snapshot(false);
     // `DONT_CONTEXTIFY` gives the context its own intrinsics instead of folding a host object into
     // it; the console's globals are then built inside the context from JSON, so the expression
     // never sees a host object or function to walk back through.
     const context = createContext(vmConstants.DONT_CONTEXTIFY);
     runInContext(`(${INSPECT_CONSOLE})(${JSON.stringify(JSON.stringify(snap))})`, context);
+    // A rejection the expression leaves unhandled is raised on the dev process, which would end
+    // `native dev`. Node reports rejections per process, so watch the one turn in which they
+    // surface and keep those whose promise belongs to the context's realm; the rest are the dev
+    // command's own and keep Node's default when nothing else was listening.
+    const rejections: string[] = [];
+    let foreign: unknown;
+    const hadListeners = process.listenerCount("unhandledRejection") > 0;
+    const watch = (reason: unknown, promise: Promise<unknown>): void => {
+      if (promise instanceof Promise) {
+        if (foreign === undefined) foreign = reason;
+        return;
+      }
+      rejections.push(rejectionMessage(reason));
+    };
+    process.on("unhandledRejection", watch);
     let raw: string;
     try {
-      raw = String(runInContext(`__inspectRun(${JSON.stringify(expression)})`, context, { timeout: 1000, displayErrors: false }));
-    } catch (err) {
-      raw = JSON.stringify({ exception: err instanceof Error ? err.message : String(err) });
+      try {
+        raw = String(runInContext(`__inspectRun(${JSON.stringify(expression)})`, context, { timeout: 1000, displayErrors: false }));
+      } catch (err) {
+        raw = JSON.stringify({ exception: err instanceof Error ? err.message : String(err) });
+      }
+      // Context microtasks drain before the turn ends; this lets a rejected promise surface.
+      await new Promise<void>((resolve) => { setImmediate(resolve); });
+    } finally {
+      process.off("unhandledRejection", watch);
+    }
+    if (foreign !== undefined && !hadListeners) {
+      process.nextTick(() => { throw foreign; });
+    }
+    // A rejected promise the expression returned was handled inside the context; report it.
+    let returned: { error?: unknown } | null = null;
+    try {
+      returned = JSON.parse(String(runInContext("__inspectThenable()", context, { timeout: 1000 }))) as { error?: unknown } | null;
+    } catch {
+      returned = null;
     }
     let collected: unknown = [];
     try {
@@ -520,10 +605,12 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
       answer = { exception: "the expression produced no result" };
     }
     const exception = answer.exception;
-    if (typeof exception === "string") {
+    const rejectedPromise = returned !== null && typeof returned.error === "string" ? returned.error : undefined;
+    const text = typeof exception === "string" ? exception : rejectedPromise ?? rejections[0];
+    if (typeof text === "string") {
       return { exceptionDetails: {
         exceptionId: 1,
-        text: exception,
+        text,
         lineNumber: 0,
         columnNumber: 0,
         scriptId: "0",
@@ -532,6 +619,14 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
       } };
     }
     return { result: answer.value };
+  };
+
+  // One console evaluation at a time, so the rejection window above sees only its own promises.
+  let evaluateQueue: Promise<void> = Promise.resolve();
+  const evaluate = (expression: string): Promise<{ [key: string]: unknown }> => {
+    const run = evaluateQueue.then(() => evaluateOnce(expression));
+    evaluateQueue = run.then(() => undefined, () => undefined);
+    return run;
   };
 
   const handle = async (client: Client, message: { id?: number; method?: string; params?: { [key: string]: unknown } }): Promise<void> => {
@@ -712,11 +807,20 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
   });
 
   server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
+    // A client can reset the connection while a handshake reply is still being written. Without a
+    // listener Node raises that write error on the process, which would end `native dev`.
+    socket.on("error", () => {
+      try {
+        socket.destroy();
+      } catch {
+        // A socket that already closed needs nothing.
+      }
+    });
     const refuse = (status: string): void => {
       try {
         socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\n\r\n`);
       } catch {
-        // A socket that already closed needs nothing.
+        socket.destroy();
       }
     };
     const host = typeof req.headers.host === "string" ? req.headers.host.toLowerCase() : "";
@@ -750,12 +854,17 @@ export async function startInspector(options: InspectorOptions): Promise<Inspect
       return;
     }
     const accept = createHash("sha1").update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
-    socket.write(
-      "HTTP/1.1 101 Switching Protocols\r\n" +
-      "Upgrade: websocket\r\n" +
-      "Connection: Upgrade\r\n" +
-      `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-    );
+    try {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+    } catch {
+      socket.destroy();
+      return;
+    }
     const client = new Client(socket);
     clients.add(client);
     client.onText = (text: string) => {
