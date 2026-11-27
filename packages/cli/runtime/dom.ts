@@ -7,6 +7,7 @@ import { textRunDependence } from "./text-runs.ts";
 // box-shaped node, which for text is the anonymous box its run of text is formatted in.
 
 import * as P from "../shared/props.ts";
+import { NAMED_ENTITIES } from "../shared/entities.ts";
 import type { DateKind, SegmentDef } from "./date-times.ts";
 import {
   dateKindOf, segmentsFor, segmentValues,
@@ -16332,19 +16333,7 @@ const CLOSES_P = new Set([
 const SCOPE_STOP = new Set(["html", "table", "td", "th", "caption", "button", "marquee", "object", "applet", "template", "svg", "math"]);
 const LIST_STOP = new Set(["ul", "ol", "menu"]);
 
-const ENTITIES: Record<string, string> = {
-  amp: "&", lt: "<", gt: ">", quot: "\"", apos: "'", nbsp: " ", minus: "−", times: "×",
-  middot: "·", mdash: "—", ndash: "–", hellip: "…", copy: "©",
-  ensp: " ", emsp: " ", thinsp: " ", hairsp: " ",
-  newline: "\n", tab: "\t", lrm: "\u200E", rlm: "\u200F", zerowidthspace: "\u200B", nobreak: "\u2060",
-  shy: "\u00AD", plusmn: "±", divide: "÷", ne: "≠", le: "≤", ge: "≥",
-  frac12: "½", frac14: "¼", frac34: "¾", deg: "°", micro: "µ",
-  para: "¶", sect: "§", bullet: "•", lsquo: "‘", rsquo: "’",
-  ldquo: "“", rdquo: "”", sbquo: "‚", bdquo: "„", laquo: "«",
-  raquo: "»", prime: "′", reg: "®", trade: "™", euro: "€",
-  pound: "£", yen: "¥", cent: "¢", curren: "¤", larr: "←",
-  rarr: "→", uarr: "↑", darr: "↓", harr: "↔", iquest: "¿", iexcl: "¡",
-};
+
 
 function decodeEntities(s: string): string {
   return s.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z][a-z0-9]+);/gi, (m: string, name: string) => {
@@ -16352,7 +16341,8 @@ function decodeEntities(s: string): string {
       const code = name[1] === "x" || name[1] === "X" ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
       return Number.isFinite(code) ? String.fromCodePoint(code) : m;
     }
-    const found = ENTITIES[name.toLowerCase()];
+    // The names are case-sensitive: `&amp;` and `&AMP;` are both references, `&Amp;` is not.
+    const found = NAMED_ENTITIES[name];
     return found === undefined ? m : found;
   });
 }
