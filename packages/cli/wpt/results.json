@@ -144855,20 +144855,17 @@
   {
    "path": "css/mediaqueries/display-mode.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(display-mode)': SyntaxError: insertRule() takes exactly one rule (+10 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/display-mode.tentative.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(display-mode: unframed)': SyntaxError: insertRule() takes exactly one rule (+1 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/display-state.tentative.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(display-state: normal)': SyntaxError: insertRule() takes exactly one rule (+10 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/duplicate-media-stylesheet-crash.html",
@@ -144890,8 +144887,7 @@
   {
    "path": "css/mediaqueries/inverted-colors.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(inverted-colors)': SyntaxError: insertRule() takes exactly one rule (+8 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/match-media-parsing.html",
@@ -145133,8 +145129,7 @@
   {
    "path": "css/mediaqueries/navigation-controls.tentative.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(navigation-controls)': SyntaxError: insertRule() takes exactly one rule (+5 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/negation-001.html",
@@ -145157,8 +145152,7 @@
   {
    "path": "css/mediaqueries/overflow-media-features.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(overflow-inline)': SyntaxError: insertRule() takes exactly one rule (+16 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/prefers-color-scheme-svg-as-image.html",
@@ -145245,8 +145239,7 @@
   {
    "path": "css/mediaqueries/resizable.tentative.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Should be known: '(resizable: true)': SyntaxError: insertRule() takes exactly one rule (+9 more)"
+   "status": "pass"
   },
   {
    "path": "css/mediaqueries/scripting-print-noscript.html",

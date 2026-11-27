@@ -46,6 +46,16 @@ window.addEventListener("load", () => {
     "(color-gamut: dci-p3)", "not (color-gamut: dci-p3)", "not and", "print", "screen",
   ];
   for (const q of qs) console.log("q|" + q + "=" + matchMedia(q).matches);
+  // The same reading the media query tests use: an unknown query drops out of the list, and a
+  // known feature leaves "not all and (feature)" true whatever the feature's value is.
+  const known = (s: string): boolean => matchMedia(s + ", not all and " + s).matches;
+  const knowns = [
+    "(inverted-colors)", "(inverted-colors: none)", "(inverted-colors: 0)",
+    "(resizable)", "(resizable: true)", "(resizable: 0)",
+    "(display-mode: unframed)", "(display-state: normal)", "(display-state: none)",
+    "(navigation-controls: none)", "overflow-inline", "not all and overflow-inline",
+  ];
+  for (const s of knowns) console.log("known|" + s + "=" + known(s));
 });
 `;
 
@@ -96,6 +106,21 @@ check("an unknown feature value makes the query invalid, negated or not",
   q("(color-gamut: dci-p3)") === "false" && q("not (color-gamut: dci-p3)") === "false",
   `${q("(color-gamut: dci-p3)")} / ${q("not (color-gamut: dci-p3)")}`);
 check("a reserved word is an invalid media type", q("not and") === "false", q("not and"));
+
+const k = (s: string): string => {
+  const line = out.split("\n").find((l) => l.startsWith(`known|${s}=`));
+  return line === undefined ? "missing" : line.slice(line.lastIndexOf("=") + 1).trim();
+};
+check("the MQ5 features are known",
+  k("(inverted-colors)") === "true" && k("(resizable: true)") === "true" &&
+  k("(display-mode: unframed)") === "true" && k("(display-state: normal)") === "true" &&
+  k("(navigation-controls: none)") === "true",
+  [k("(inverted-colors)"), k("(resizable: true)"), k("(display-mode: unframed)"), k("(display-state: normal)"), k("(navigation-controls: none)")].join(" "));
+check("an unknown value leaves those features unknown",
+  k("(inverted-colors: 0)") === "false" && k("(resizable: 0)") === "false" && k("(display-state: none)") === "false",
+  [k("(inverted-colors: 0)"), k("(resizable: 0)"), k("(display-state: none)")].join(" "));
+check("bare text after a media type is no condition", k("not all and overflow-inline") === "false",
+  k("not all and overflow-inline"));
 
 check("@media prefers-color-scheme paints", colorAt(20, 20) === "0,0,255", `got ${colorAt(20, 20)}`);
 check("@media prefers-reduced-motion paints", colorAt(70, 20) === "255,0,0", `got ${colorAt(70, 20)}`);
