@@ -224,13 +224,9 @@ static MtStage *mt_stage_take(MtBackend *m, int w, int h) {
     }
   }
   if (pick == nil) {
-    for (MtStage *s in m.stages) {
-      if (s.state == 2) {
-        pick = s;
-        m.framesDropped++;
-        break;
-      }
-    }
+    // Every stage is with the presenter, and it may be reading any of them right now: drawing
+    // into one would show a frame mid-clear (a blank window), and no frame is better than a
+    // broken one. This one is dropped and the window keeps the picture it has.
   }
   if (pick != nil) {
     pick.state = 1;
