@@ -1436,6 +1436,10 @@ let dirtyElements: Node[] = [];
 let incrementalOk = false;
 /** The device-pixel rect the SVG being drawn redraws; null when it draws the whole bitmap. */
 let cullRect: number[] | null = null;
+/** The box each shape was drawn at in its root's last paint, so a shape that moved or shrank
+ *  clears where it was as well as where it is. Dropped whenever a whole canvas is drawn, which
+ *  leaves nothing of the earlier boxes on it. */
+const lastShapeBox = new Map<Node, number[]>();
 
 /** Tells the SVG walk which nodes this paint changed, and whether the change is per shape. */
 export function setSvgDirty(nodes: Node[], perShape: boolean): void {
@@ -1443,9 +1447,10 @@ export function setSvgDirty(nodes: Node[], perShape: boolean): void {
   incrementalOk = perShape;
 }
 
-/** The shapes of this SVG that changed, or null when the whole bitmap has to be drawn. */
-function changedShapes(root: Element, m: number[], vw: number, vh: number, pw: number,
-  ph: number): number[] | null {
+/** The changed shapes of this root, each with the device box it paints now, or null when one of
+ *  them is not a shape this path can bound. */
+function dirtyShapeBoxes(root: Element, m: number[], vw: number, vh: number):
+  Array<[Node, number[]]> | null {
   if (!incrementalOk || dirtyElements.length === 0) return null;
   // Only a root whose own children are all shapes (plus the definitions that draw nothing) can be
   // redrawn this way: any other child (a group, a use, a text run, a marker reference) can paint
@@ -1459,8 +1464,7 @@ function changedShapes(root: Element, m: number[], vw: number, vh: number, pw: n
         kname === "metadata") continue;
     return null;
   }
-  let box: number[] | null = null;
-  let seen = false;
+  const out: Array<[Node, number[]]> = [];
   for (const node of dirtyElements) {
     // Only the nodes under this root can change its picture; the rest of the page is another
     // element's business.
@@ -1502,12 +1506,27 @@ function changedShapes(root: Element, m: number[], vw: number, vh: number, pw: n
     }
     // A stroke runs wide of the path's box, and an antialiased edge a pixel past it.
     const pad = strokePad(el, mm);
-    const r = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
+    out.push([node, [x0 - pad, y0 - pad, x1 + pad, y1 + pad]]);
+  }
+  return out;
+}
+
+/** The device rect a paint has to clear: where the changed shapes are now and where they were
+ *  drawn last, so a shape that moved or shrank leaves nothing behind. Null draws the whole
+ *  canvas, which is also what a shape with no recorded box asks for (it is recorded after the
+ *  paint either way). */
+function changedShapes(shapes: Array<[Node, number[]]> | null, pw: number, ph: number): number[] | null {
+  if (shapes === null || shapes.length === 0) return null;
+  let box: number[] | null = null;
+  for (const [node, now] of shapes) {
+    const before = lastShapeBox.get(node);
+    if (before === undefined) return null;
+    const r = [Math.min(before[0], now[0]), Math.min(before[1], now[1]),
+               Math.max(before[2], now[2]), Math.max(before[3], now[3])];
     box = box === null ? r : [Math.min(box[0], r[0]), Math.min(box[1], r[1]),
                               Math.max(box[2], r[2]), Math.max(box[3], r[3])];
-    seen = true;
   }
-  if (!seen || box === null) return null;
+  if (box === null) return null;
   const x0 = Math.max(0, Math.floor(box[0])), y0 = Math.max(0, Math.floor(box[1]));
   const x1 = Math.min(pw, Math.ceil(box[2])), y1 = Math.min(ph, Math.ceil(box[3]));
   if (x1 <= x0 || y1 <= y0) return null;
@@ -1600,19 +1619,37 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   }
   const vw = view !== null ? view[2] : w;
   const vh = view !== null ? view[3] : h;
-  cullRect = fresh ? null : changedShapes(el, m, vw, vh, pw, ph);
+  // The ids come first: a shape's filter is found by the id its `filter` names, and the filter
+  // region is part of the box the paint has to clear.
+  ids = new Map();
+  collectIds(el);
+  const shapes = dirtyShapeBoxes(el, m, vw, vh);
+  cullRect = fresh ? null : changedShapes(shapes, pw, ph);
   // The clear is in canvas space, so the identity transform restores it after the last pass's
   // per-shape transforms.
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
+  hostCanvasSave(id);
   if (cullRect !== null) {
     hostCanvasClearRect(id, cullRect[0], cullRect[1], cullRect[2] - cullRect[0], cullRect[3] - cullRect[1]);
+    // Everything the walk draws stays inside the box just cleared: a shape that reaches the box
+    // would otherwise paint outside it, over pixels that are already right (and a translucent
+    // shape would blend into its own last picture).
+    hostCanvasBeginPath(id);
+    hostCanvasMoveTo(id, cullRect[0], cullRect[1]);
+    hostCanvasLineTo(id, cullRect[2], cullRect[1]);
+    hostCanvasLineTo(id, cullRect[2], cullRect[3]);
+    hostCanvasLineTo(id, cullRect[0], cullRect[3]);
+    hostCanvasClosePath(id);
+    hostCanvasClip(id, 0);
   } else {
     hostCanvasClearRect(id, 0, 0, pw, ph);
   }
-  ids = new Map();
-  collectIds(el);
   drawChildren(el, id, m, vw, vh, 1, null, 0, []);
+  hostCanvasRestore(id);
   ids = null;
   cullRect = null;
+  // Every changed shape's box now holds where this paint drew it, so the next paint clears the
+  // place it came from as well as the place it goes to.
+  if (shapes !== null) for (const [node, box] of shapes) lastShapeBox.set(node, box);
   hostCanvasDraw(id, x, y, w, h, alpha, 1);
 }
