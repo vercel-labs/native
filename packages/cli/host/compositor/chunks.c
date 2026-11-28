@@ -237,7 +237,10 @@ static int mask_span_ok_depth(const CompCmdSource *src, void *ctx, int list_id, 
     if ((v.kind == COMP_CMD_MASK || v.kind == COMP_CMD_PERSPECTIVE) && v.op == 0) return 0;
     // A layer a chunk replay paints can hold a canvas or a video of its own, which the chunks
     // would freeze at one frame of, so the refs are followed for it.
-    if (v.kind == COMP_CMD_LAYER_REF && depth < 8) {
+    if (v.kind == COMP_CMD_LAYER_REF) {
+      // A ref past the scan's reach could hold anything (a canvas among it), so the mask stays
+      // whole rather than split on a guess.
+      if (depth >= 8) return 0;
       int n = src->count(ctx, v.layer);
       if (n < 0 || !mask_span_ok_depth(src, ctx, v.layer, 0, n, depth + 1)) return 0;
     }
