@@ -458,6 +458,11 @@ export declare function hostCanvasArc(id: number, cx: number, cy: number, r: num
 export declare function hostCanvasArcTo(id: number, x1: number, y1: number, x2: number, y2: number, r: number): void;
 export declare function hostCanvasRect(id: number, x: number, y: number, w: number, h: number): void;
 export declare function hostCanvasFill(id: number, rule: number): void;
+/** Fills the current path with the source canvas's bitmap repeated as a tile of w x h units under
+ *  the matrix (a, b, c, d, e, f), the way an SVG pattern repeats its cell. Returns 1 when the host
+ *  drew the fill, and 0 when it does not support tiled fills and the caller must draw each tile. */
+export declare function hostCanvasFillTile(id: number, sourceId: number, a: number, b: number,
+  c: number, d: number, e: number, f: number, w: number, h: number, rule: number): number;
 export declare function hostCanvasStroke(id: number): void;
 export declare function hostCanvasClip(id: number, rule: number): void;
 export declare function hostCanvasFillRect(id: number, x: number, y: number, w: number, h: number): void;
