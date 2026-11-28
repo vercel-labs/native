@@ -110304,8 +110304,7 @@
   {
    "path": "css/css-variables/variable-substitution-shorthands.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "target3 margin-top: assert_equals: expected \"10px\", got \"8px\""
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-substitution-variable-declaration.html",

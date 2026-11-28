@@ -1219,6 +1219,29 @@ export class StyleDeclaration {
     this.setBlock(text);
   }
 
+  /**
+   * The priority a declaration of `name` carries: "important" or "". A shorthand's declaration
+   * answers for the longhands it covers, as it does for the values it sets.
+   */
+  getPropertyPriority(name: string): string {
+    if (this.computed) return "";
+    const written = name.trim();
+    const lower = written.toLowerCase();
+    const id = written.startsWith("--") ? -1 : P.propertyId(lower);
+    for (const d of this.decls) {
+      if (d.prop !== undefined) {
+        if (d.prop === written) return d.important ? "important" : "";
+        if (id >= 0) {
+          const ids = longhandIds(d.prop);
+          if (ids !== null && ids.indexOf(id) >= 0) return d.important ? "important" : "";
+        }
+        continue;
+      }
+      if (id >= 0 && d.p === id) return d.important ? "important" : "";
+    }
+    return "";
+  }
+
   getPropertyValue(name: string): string {
     // A computed style is a live view: a read settles the pending style work and brings the
     // transitions and animations to the current time, as a browser's read does.
@@ -1382,7 +1405,7 @@ export class StyleDeclaration {
     this.present = true;
     for (const d of parseDeclarationBlock(text, fonts, undefined, getSheetContent())) {
       for (const c of d.decls) {
-        if (c.prop !== undefined) this.putText(c.prop, c.value === undefined ? "" : c.value, d.important);
+        if (c.prop !== undefined) this.putText(c.prop, c.value === undefined ? "" : c.value, d.important, true);
         else this.put(c.p, c.v, c.u, d.important);
       }
     }
@@ -1491,22 +1514,43 @@ export class StyleDeclaration {
       const d = this.decls[i];
       if (d.prop !== undefined && d.prop === name) this.decls.splice(i, 1);
     }
-    for (const d of this.decls) {
-      if (d.p === p) {
-        d.v = v;
-        d.u = u;
-        d.important = important;
-        return;
-      }
+    let at = -1;
+    for (let i = 0; i < this.decls.length; i++) {
+      if (this.decls[i].p === p) { at = i; break; }
+    }
+    // A write that lands before a shorthand covering it would be put back by the shorthand's
+    // expansion, so it is written after that shorthand instead: "margin: var(--m)" then
+    // "margin-top: 20px" keeps the 20px.
+    if (at >= 0 && this.textCoversAfter(p, at)) {
+      this.decls.splice(at, 1);
+      at = -1;
+    }
+    if (at >= 0) {
+      const d = this.decls[at];
+      d.v = v;
+      d.u = u;
+      d.important = important;
+      return;
     }
     this.decls.push({ p, v, u, important });
+  }
+
+  /** Whether a text shorthand after `at` covers the longhand `p`. */
+  private textCoversAfter(p: number, at: number): boolean {
+    for (let i = at + 1; i < this.decls.length; i++) {
+      const d = this.decls[i];
+      if (d.prop === undefined) continue;
+      const ids = longhandIds(d.prop);
+      if (ids !== null && ids.indexOf(p) >= 0) return true;
+    }
+    return false;
   }
 
   /**
    * Sets a declaration kept as text. It replaces a numeric declaration of the same property, and
    * a shorthand replaces every longhand it covers, as a shorthand declaration does.
    */
-  private putText(prop: string, value: string, important: boolean): void {
+  private putText(prop: string, value: string, important: boolean, parsed: boolean = false): void {
     this.present = true;
     const ids = longhandIds(prop);
     for (let i = this.decls.length - 1; i >= 0; i--) {
@@ -1517,7 +1561,11 @@ export class StyleDeclaration {
         if (d.prop === prop) this.decls.splice(i, 1);
         continue;
       }
-      if (ids !== null && ids.indexOf(d.p) >= 0) this.decls.splice(i, 1);
+      // A parsed block keeps an !important longhand that a later shorthand covers, and the
+      // cascade decides: "margin-top: 10px !important; margin: var(--m)" keeps 10px. A scripted
+      // write of the shorthand replaces the longhands it covers, priority included, as Chrome
+      // does: setting "margin" over an important "margin-top" leaves one normal shorthand.
+      if (ids !== null && ids.indexOf(d.p) >= 0 && !(parsed && d.important)) this.decls.splice(i, 1);
     }
     this.decls.push({ p: -1, v: 0, u: 0, important, prop, value });
   }
@@ -2955,7 +3003,7 @@ export function styleView(decl: StyleDeclaration): CSSStyleDeclaration {
       if (key === "getPropertyValue") return (name: string) => decl.getPropertyValue(name);
       if (key === "setProperty") return (name: string, value: any, priority?: any) => decl.setProperty(name, value, priority);
       if (key === "removeProperty") return (name: string) => decl.removeProperty(name);
-      if (key === "getPropertyPriority") return () => "";
+      if (key === "getPropertyPriority") return (name: string) => decl.getPropertyPriority(name);
       if (key === "toString") return () => decl.cssText;
       return undefined;
     },
