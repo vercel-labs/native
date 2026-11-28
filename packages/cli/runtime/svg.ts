@@ -1248,6 +1248,9 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
   const a = alpha * el.sv[P.P_OPACITY];
   if (!(a > 0)) return;
   const m2 = mul(m, svgMatrix(node, vw, vh));
+  // A partial repaint draws only what reaches the box being redrawn; the rest of the bitmap is
+  // the picture the last paint left there.
+  if (cullRect !== null && !reachesCull(node, name, m2, vw, vh)) return;
   const inner = withClips(node, m2, vw, vh, clips);
   const filter = filterTarget(node);
   if (filter === null) {
@@ -1416,20 +1419,170 @@ function drawUse(node: Element, id: number, m: number[], vw: number, vh: number,
   drawNode(target, id, mu, vw, vh, alpha, base, depth + 1, clips);
 }
 
+// ---------------------------------------------------------------------------
+// Incremental repaint
+//
+// The bitmap an inline SVG draws into is kept between paints. A frame that changed a few of the
+// SVG's own shapes (an attribute or a text write, which the DOM marks one node at a time) clears
+// and redraws only the box those shapes cover, and the shapes that reach it, in draw order: what
+// the rest of the bitmap shows is what the last paint drew there, and nothing this frame changed.
+// A frame the DOM marked some other way (a child list replaced, a style sheet change, a resize)
+// draws the whole canvas as before.
+
+/** The elements this paint marked as changed, set by the painter for the SVG walk. */
+let dirtyElements: Node[] = [];
+/** Whether this paint can redraw part of a bitmap: false for a full paint, and for any paint that
+ *  the DOM marked through something other than individual shapes. */
+let incrementalOk = false;
+/** The device-pixel rect the SVG being drawn redraws; null when it draws the whole bitmap. */
+let cullRect: number[] | null = null;
+
+/** Tells the SVG walk which nodes this paint changed, and whether the change is per shape. */
+export function setSvgDirty(nodes: Node[], perShape: boolean): void {
+  dirtyElements = nodes;
+  incrementalOk = perShape;
+}
+
+/** The shapes of this SVG that changed, or null when the whole bitmap has to be drawn. */
+function changedShapes(root: Element, m: number[], vw: number, vh: number, pw: number,
+  ph: number): number[] | null {
+  if (!incrementalOk || dirtyElements.length === 0) return null;
+  // Only a root whose own children are all shapes (plus the definitions that draw nothing) can be
+  // redrawn this way: any other child (a group, a use, a text run, a marker reference) can paint
+  // outside its own box, and the part outside the box would keep pixels this frame changed.
+  for (const kid of root.kids) {
+    if (!kid.isElementNode) continue;
+    const kname = svgName(kid);
+    if (kname === "path" || kname === "rect" || kname === "circle" || kname === "ellipse" ||
+        kname === "line" || kname === "polygon" || kname === "polyline") continue;
+    if (kname === "defs" || kname === "title" || kname === "desc" || kname === "style" ||
+        kname === "metadata") continue;
+    return null;
+  }
+  let box: number[] | null = null;
+  let seen = false;
+  for (const node of dirtyElements) {
+    // Only the nodes under this root can change its picture; the rest of the page is another
+    // element's business.
+    let above: Node | null = node;
+    let under = false;
+    while (above !== null) {
+      if (above === root) {
+        under = true;
+        break;
+      }
+      above = above.parentNode;
+    }
+    if (!under) continue;
+    // A shape drawn straight into the root is the case this handles; anything deeper (a group, a
+    // use, a nested svg, a text run) can change more than its own box, so it draws whole.
+    if (!node.isElementNode) return null;
+    if (node.parentNode !== root) return null;
+    const name = svgName(node);
+    if (name !== "path" && name !== "rect" && name !== "circle" && name !== "ellipse" &&
+        name !== "line" && name !== "polygon" && name !== "polyline") return null;
+    const el = node as Element;
+    let shape = bboxOf(shapePath(name, (attr) => el.getAttribute(attr), vw, vh));
+    if (!(shape[2] > 0) && !(shape[3] > 0)) return null;
+    // A filtered shape paints its filter's region, which is the shape's box grown by the filter's
+    // own x/y/width/height (percentages of the box by default).
+    const filter = filterTarget(el);
+    if (filter !== null) shape = filterRegionBox(filter, shape);
+    // The shape's own transform, then the viewBox and device scale the root establishes.
+    const mm = mul(m, svgMatrix(el, vw, vh));
+    const xs = [shape[0], shape[0] + shape[2]], ys = [shape[1], shape[1] + shape[3]];
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0; i < 4; i++) {
+      const X = mm[0] * xs[i & 1] + mm[2] * ys[i >> 1] + mm[4];
+      const Y = mm[1] * xs[i & 1] + mm[3] * ys[i >> 1] + mm[5];
+      if (X < x0) x0 = X;
+      if (X > x1) x1 = X;
+      if (Y < y0) y0 = Y;
+      if (Y > y1) y1 = Y;
+    }
+    // A stroke runs wide of the path's box, and an antialiased edge a pixel past it.
+    const pad = strokePad(el, mm);
+    const r = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
+    box = box === null ? r : [Math.min(box[0], r[0]), Math.min(box[1], r[1]),
+                              Math.max(box[2], r[2]), Math.max(box[3], r[3])];
+    seen = true;
+  }
+  if (!seen || box === null) return null;
+  const x0 = Math.max(0, Math.floor(box[0])), y0 = Math.max(0, Math.floor(box[1]));
+  const x1 = Math.min(pw, Math.ceil(box[2])), y1 = Math.min(ph, Math.ceil(box[3]));
+  if (x1 <= x0 || y1 <= y0) return null;
+  return [x0, y0, x1, y1];
+}
+
+/** The margin a shape's box needs for its stroke and its antialiased edge, in device pixels: half
+ *  the stroke width through the matrix, plus the pixels the edge and the join spill. */
+function strokePad(el: Element, m: number[]): number {
+  const det = Math.abs(m[0] * m[3] - m[1] * m[2]);
+  const unit = Math.sqrt(det);
+  const w = el.sv[P.P_STROKE_WIDTH];
+  return 24 + (w > 0 && unit > 0 ? w * unit * 0.5 : 0);
+}
+
+/** A filter's region, as the box a shape's filter paints, from the filter's own region
+ *  attributes (a percentage of the box, as objectBoundingBox measures them). */
+function filterRegionBox(filter: Element, box: number[]): number[] {
+  function part(name: string, fallback: number): number {
+    const v = filter.getAttribute(name);
+    if (v === null) return fallback;
+    const t = v.trim();
+    if (!t.endsWith("%")) return fallback;
+    const n = Number(t.slice(0, t.length - 1));
+    return isNaN(n) ? fallback : n / 100;
+  }
+  const fx = part("x", -0.1), fy = part("y", -0.1);
+  const fw = part("width", 1.2), fh = part("height", 1.2);
+  return [box[0] + fx * box[2], box[1] + fy * box[3], box[2] * fw, box[3] * fh];
+}
+
+/** Whether a shape has any pixel inside the rect being redrawn; true for everything the walk
+ *  cannot bound, so an unknown shape is drawn rather than left stale. */
+function reachesCull(node: Element, name: string, m2: number[], vw: number, vh: number): boolean {
+  if (cullRect === null) return true;
+  if (name !== "path" && name !== "rect" && name !== "circle" && name !== "ellipse" &&
+      name !== "line" && name !== "polygon" && name !== "polyline") return true;
+  const shape = bboxOf(shapePath(name, (attr) => node.getAttribute(attr), vw, vh));
+  if (!(shape[2] > 0) && !(shape[3] > 0)) return true;
+  const filter = filterTarget(node);
+  const box = filter !== null ? filterRegionBox(filter, shape) : shape;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const xs = [box[0], box[0] + box[2]], ys = [box[1], box[1] + box[3]];
+  for (let i = 0; i < 4; i++) {
+    const X = m2[0] * xs[i & 1] + m2[2] * ys[i >> 1] + m2[4];
+    const Y = m2[1] * xs[i & 1] + m2[3] * ys[i >> 1] + m2[5];
+    if (X < x0) x0 = X;
+    if (X > x1) x1 = X;
+    if (Y < y0) y0 = Y;
+    if (Y > y1) y1 = Y;
+  }
+  // A stroke runs wide of the path's box and a filter blurs past its region; both are covered by
+  // the same pad the clear uses.
+  const pad = strokePad(node, m2);
+  const c = cullRect;
+  return !(x1 + pad < c[0] || x0 - pad > c[2] || y1 + pad < c[1] || y0 - pad > c[3]);
+}
+
 /**
  * Draws an inline <svg> into the paint list, as the replaced content of its box (x, y, w, h in
- * the page's CSS px). The picture is rasterized again on every paint: a paint pass only runs when
- * something changed, and the bitmap is sized to the box so a resize redraws at the new size.
+ * the page's CSS px). The bitmap is kept between paints: a paint that changed a few of the root's
+ * own shapes redraws just their box, and any other paint draws the whole canvas.
  */
 export function paintSvg(el: Element, x: number, y: number, w: number, h: number, alpha: number): void {
   if (!(w > 0) || !(h > 0)) return;
   const scale = rasterScale();
   const pw = Math.max(1, Math.ceil(w * scale));
   const ph = Math.max(1, Math.ceil(h * scale));
+  let fresh = false;
   if (el.svgCanvas < 0) {
     el.svgCanvas = hostCanvasCreate(pw, ph);
+    fresh = true;
   } else if (pw !== el.svgPixelsW || ph !== el.svgPixelsH) {
     hostCanvasResize(el.svgCanvas, pw, ph);
+    fresh = true;
   }
   el.svgPixelsW = pw;
   el.svgPixelsH = ph;
@@ -1438,10 +1591,6 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   svgPixelW = pw;
   svgPixelH = ph;
   layerDepth = 0;
-  // The clear is in canvas space, so the identity transform restores it after the last pass's
-  // per-shape transforms.
-  hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
-  hostCanvasClearRect(id, 0, 0, pw, ph);
   // The viewBox maps user units into the box's CSS px; the device scale then makes them pixels.
   const view = svgViewBox(el);
   let m: number[] = [scale, 0, 0, scale, 0, 0];
@@ -1451,9 +1600,19 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   }
   const vw = view !== null ? view[2] : w;
   const vh = view !== null ? view[3] : h;
+  cullRect = fresh ? null : changedShapes(el, m, vw, vh, pw, ph);
+  // The clear is in canvas space, so the identity transform restores it after the last pass's
+  // per-shape transforms.
+  hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
+  if (cullRect !== null) {
+    hostCanvasClearRect(id, cullRect[0], cullRect[1], cullRect[2] - cullRect[0], cullRect[3] - cullRect[1]);
+  } else {
+    hostCanvasClearRect(id, 0, 0, pw, ph);
+  }
   ids = new Map();
   collectIds(el);
   drawChildren(el, id, m, vw, vh, 1, null, 0, []);
   ids = null;
+  cullRect = null;
   hostCanvasDraw(id, x, y, w, h, alpha, 1);
 }
