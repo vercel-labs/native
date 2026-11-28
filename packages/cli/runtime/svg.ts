@@ -1365,6 +1365,11 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
   const row = compileSvgFilter(filter, node, filterBBox(node, name, vw, vh), m2, vw, vh,
     targetW(), targetH(), (ref) => (ids === null ? undefined : ids.get(ref)));
   if (row === null) return;
+  if (row.sw > 16384 || row.sh > 16384) {
+    // Even the region is past the host's surface: paint the element as it is, never nothing.
+    drawElement(node, name, id, m2, vw, vh, a, inh, depth, inner);
+    return;
+  }
   const at = layerDepth;
   layerClampW[at] = targetW();
   layerClampH[at] = targetH();

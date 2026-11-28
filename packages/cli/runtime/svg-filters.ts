@@ -445,14 +445,22 @@ export function compileSvgFilter(target: Element, el: Element, bbox: number[], m
   // The capture reaches past the region only by what the chain reaches for: content further out
   // can never move into it, and bounding it here keeps a shape drawn far off the page from making
   // the surface (and every buffer the host filters it with) grow with its distance.
-  const sx0 = Math.max(Math.floor(Math.min(x0, box[0]) - mL), Math.floor(-mL));
-  const sy0 = Math.max(Math.floor(Math.min(y0, box[1]) - mT), Math.floor(-mT));
-  const sx1 = Math.min(Math.ceil(Math.max(x1, box[0] + box[2]) + mR), Math.ceil(pw + mR));
-  const sy1 = Math.min(Math.ceil(Math.max(y1, box[1] + box[3]) + mB), Math.ceil(ph + mB));
-  const sw = sx1 - sx0, sh = sy1 - sy0;
-  // The host's canvas takes no side past 16384: a bigger capture would be truncated there, so the
-  // element paints unfiltered instead of losing the part that didn't fit.
-  if (sw > 16384 || sh > 16384) return null;
+  let sx0 = Math.max(Math.floor(Math.min(x0, box[0]) - mL), Math.floor(-mL));
+  let sy0 = Math.max(Math.floor(Math.min(y0, box[1]) - mT), Math.floor(-mT));
+  let sx1 = Math.min(Math.ceil(Math.max(x1, box[0] + box[2]) + mR), Math.ceil(pw + mR));
+  let sy1 = Math.min(Math.ceil(Math.max(y1, box[1] + box[3]) + mB), Math.ceil(ph + mB));
+  let sw = sx1 - sx0, sh = sy1 - sy0;
+  // A capture the host cannot take (no side past 16384) gives up the margins first: the region
+  // still filters, just without source from beyond it, as Chrome does when its surface limit is
+  // reached. Only if even the region is too big does the caller paint the element unfiltered.
+  if (sw > 16384 || sh > 16384) {
+    sx0 = x0;
+    sy0 = y0;
+    sx1 = x1;
+    sy1 = y1;
+    sw = regionW;
+    sh = regionH;
+  }
   if (!Number.isFinite(sw) || !Number.isFinite(sh) || !(sw > 0) || !(sh > 0)) {
     return { def: ops.join(";"), x: x0, y: y0, w: regionW, h: regionH,
       sx: x0, sy: y0, sw: regionW, sh: regionH, linear };
