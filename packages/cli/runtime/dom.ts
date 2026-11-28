@@ -5303,6 +5303,7 @@ export class Element extends Node {
         noteSheetAttr(this, key, text);
         if (key === "for") refreshAllLabels();
         if (key === "focusgroup") this.syncFocusGroup();
+        if (key === "autofocus" && this.isConnected) queueAutofocus(this);
       }
     }
   }
@@ -10854,7 +10855,69 @@ function disconnectedSubtree(node: Node): void {
 }
 
 /** Calls an element's connectedCallback if it has one. */
+/** Adds an element to the document's autofocus candidates: the next frame focuses the first one
+ *  that can take focus. A reinserted element joins at the end again, as a browser's does. */
+function queueAutofocus(el: Element): void {
+  const doc = document;
+  const list = doc.autofocusCandidates;
+  const at = list.indexOf(el);
+  if (at >= 0) list.splice(at, 1);
+  list.push(el);
+  autofocusDirty = true;
+}
+
+/** Queues every autofocus attribute in a subtree that has just joined the document. */
+function queueAutofocusSubtree(el: Element): void {
+  if (el.isConnected && el.hasAttribute("autofocus")) queueAutofocus(el);
+  for (const kid of el.kids) if (kid instanceof Element) queueAutofocusSubtree(kid);
+}
+
+/** Whether a candidate is waiting; the frame loop asks before running the flush. */
+let autofocusDirty = false;
+
+export function hasAutofocusCandidates(): boolean {
+  return autofocusDirty;
+}
+
+/**
+ * Flushes the document's autofocus candidates, as a browser does once per rendering update: the
+ * first candidate that is in the document and can take focus takes it, and the rest are dropped.
+ * A candidate that cannot take focus yet stays queued, so one that becomes focusable before the
+ * next frame still gets its turn.
+ */
+export function flushAutofocus(): void {
+  if (!autofocusDirty) return;
+  autofocusDirty = false;
+  const doc = document;
+  const list = doc.autofocusCandidates;
+  if (list.length === 0) return;
+  doc.autofocusCandidates = [];
+  const waiting: Element[] = [];
+  let focused = false;
+  for (const el of list) {
+    if (!el.isConnected || focused) continue;
+    if (!el.isFocusable) { waiting.push(el); continue; }
+    setFocus(el, false);
+    focused = true;
+  }
+  if (!focused) doc.autofocusCandidates = waiting;
+  else autofocusDirty = waiting.length > 0;
+}
+
+/** Queues the autofocus attributes a mounted page begins with, in tree order: the order a browser's
+ *  parse sees them, before the page's scripts run. */
+export function queueInitialAutofocus(): void {
+  const root = document.documentElement;
+  if (root === null) return;
+  const walk = (el: Element): void => {
+    if (el.hasAttribute("autofocus")) queueAutofocus(el);
+    for (const kid of el.kids) if (kid instanceof Element) walk(kid);
+  };
+  walk(root);
+}
+
 function fireConnected(el: Element): void {
+  if (el.hasAttribute("autofocus")) queueAutofocus(el);
   if (el.hooks === null || !el.hooks.connected) return;
   const callbacks = el as unknown as CustomElementCallbacks;
   if (typeof callbacks.connectedCallback === "function") callbacks.connectedCallback();
@@ -15753,6 +15816,9 @@ export class Document extends Node {
   private impl: DOMImplementation | null = null;
   /** The faces the page declares, as document.fonts reports them. */
   readonly fonts = new FontFaceSet();
+  /** Elements with an `autofocus` attribute that are waiting for the next frame, in the order they
+   *  joined — the order the document saw them, not the order the tree holds them. */
+  autofocusCandidates: Element[] = [];
 
   constructor() {
     super("#document", "", [], 0, false);
@@ -16383,6 +16449,9 @@ function markTreeStale(node: Element): void {
 function refreshAdded(node: Node): void {
   if (node.nodeType === 1) {
     markTreeStale(node as Element);
+    // An element that arrives in the document with an autofocus attribute is a candidate from now
+    // on, at the end of the queue, as a browser's insertion is.
+    queueAutofocusSubtree(node as Element);
     if (CUSTOM_DEFS > 0) {
       // A defined tag makes the node an instance of its class before its callbacks run, and the
       // elements that are in the document report themselves connected once the subtree is in.
