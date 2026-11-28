@@ -2658,8 +2658,8 @@ typedef struct {
   double hint_x, hint_y, hint_w, hint_h;
   double hint_m[6];
   int hint_circles;
-  int circle_count, circle_cap;
-  struct { double cx, cy, r; double m[6]; } *circles;
+  int oval_count, oval_cap;
+  struct { double cx, cy, r; double m[6]; } *ovals;
   int path_fresh;  // beginPath since the last element
   int path_moved;  // the last element was a moveTo, at path_mx, path_my
   double path_mx, path_my;
@@ -2754,7 +2754,7 @@ static void canvas_gpu_push(Canvas *c, int kind, const double m[6], double x, do
 /** Forgets the shape description of the path being built. */
 static void canvas_hint_begin(Canvas *c) {
   c->hint = HINT_NONE;
-  c->circle_count = 0;
+  c->oval_count = 0;
   c->path_fresh = 1;
   c->path_moved = 0;
 }
@@ -2762,22 +2762,22 @@ static void canvas_hint_begin(Canvas *c) {
 /** The path is something other than the hint described. */
 static void canvas_hint_general(Canvas *c) {
   c->hint = HINT_GENERAL;
-  c->circle_count = 0;
+  c->oval_count = 0;
 }
 
 /** Adds one full circle to the path's circle list, when the hint is one shape family so far. */
 static void canvas_hint_circle(Canvas *c, double cx, double cy, double r, const double m[6]) {
   if (c->hint != HINT_NONE && c->hint != HINT_OVALS) { canvas_hint_general(c); return; }
-  if (c->circle_count == c->circle_cap) {
-    c->circle_cap = c->circle_cap ? c->circle_cap * 2 : 64;
-    c->circles = realloc(c->circles, (size_t)c->circle_cap * sizeof(*c->circles));
+  if (c->oval_count == c->oval_cap) {
+    c->oval_cap = c->oval_cap ? c->oval_cap * 2 : 64;
+    c->ovals = realloc(c->ovals, (size_t)c->oval_cap * sizeof(*c->ovals));
   }
-  if (c->circles == NULL) { c->circle_count = 0; c->circle_cap = 0; canvas_hint_general(c); return; }
-  c->circles[c->circle_count].cx = cx;
-  c->circles[c->circle_count].cy = cy;
-  c->circles[c->circle_count].r = r;
-  memcpy(c->circles[c->circle_count].m, m, 6 * sizeof(double));
-  c->circle_count++;
+  if (c->ovals == NULL) { c->oval_count = 0; c->oval_cap = 0; canvas_hint_general(c); return; }
+  c->ovals[c->oval_count].cx = cx;
+  c->ovals[c->oval_count].cy = cy;
+  c->ovals[c->oval_count].r = r;
+  memcpy(c->ovals[c->oval_count].m, m, 6 * sizeof(double));
+  c->oval_count++;
   c->hint = HINT_OVALS;
 }
 
@@ -2844,6 +2844,12 @@ static void canvas_reset(Canvas *c) {
   c->gpu_cleared = 0;
   c->gpu_dirty = 0;
   c->gpu_unsynced = 0;
+  // The textures, if any, were made for the old size. They are destroyed and remade at the next
+  // composite; until then nothing may flush into or read back from them.
+  c->tex_cur = -1;
+  c->tex_gen = 0;
+  c->tex_w = 0;
+  c->tex_h = 0;
   c->clip_depth = 0;
   c->clip_saved_n = 0;
   canvas_hint_begin(c);
@@ -3851,8 +3857,10 @@ void host_canvas_clear_rect(int32_t id, double x, double y, double w, double h) 
     // the texture does not have to keep last frame's pixels.
     CGAffineTransform m = CGContextGetCTM(c->ctx);
     CGRect r = CGRectStandardize(CGRectApplyAffineTransform(CGRectMake(x, y, w, h), m));
-    if (r.origin.x <= 0 && r.origin.y <= 0 && r.origin.x + r.size.width >= c->w &&
-        r.origin.y + r.size.height >= c->h) {
+    // A turned or skewed rect covers its bounding box only in part: its box reaching the
+    // canvas is not the rect clearing it.
+    if (m.b == 0 && m.c == 0 && r.origin.x <= 0 && r.origin.y <= 0 &&
+        r.origin.x + r.size.width >= c->w && r.origin.y + r.size.height >= c->h) {
       c->gpu_cleared = 1;
       c->gpu_dirty = 1;
       c->gpu_unsynced = 0; // the clear throws away whatever the texture held
@@ -4210,6 +4218,7 @@ static void canvas_do(Canvas *c, CanvasOp *op) {
 /** Queues a fill whose shape the sdf shaders can draw, and answers 1 when it did. */
 static int canvas_gpu_op(Canvas *c, CanvasOp *op) {
   if (!canvas_gpu_ready(c)) return 0;
+  if (op->kind != OP_FILL && op->kind != OP_FILL_RECT) return 0;
   if ((c->fillColor & 255u) == 0) return 1; // a fully transparent fill draws nothing
   if (op->kind == OP_FILL_RECT) {
     double x = op->x, y = op->y, w = op->w, h = op->h;
@@ -4228,9 +4237,9 @@ static int canvas_gpu_op(Canvas *c, CanvasOp *op) {
   }
   // One circle is one shape. A path of many circles is a single fill whose overlaps must not
   // blend twice, which the shaders do not do yet, so it stays on the CPU.
-  if (c->hint == HINT_OVALS && c->circle_count == 1) {
-    double r = c->circles[0].r;
-    canvas_gpu_push(c, CGPU_OVAL, c->circles[0].m, c->circles[0].cx - r, c->circles[0].cy - r,
+  if (c->hint == HINT_OVALS && c->oval_count == 1) {
+    double r = c->ovals[0].r;
+    canvas_gpu_push(c, CGPU_OVAL, c->ovals[0].m, c->ovals[0].cx - r, c->ovals[0].cy - r,
                     2 * r, 2 * r);
     return 1;
   }
@@ -12036,6 +12045,17 @@ static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *ras
 static void canvas_gpu_replay_cpu(Canvas *c) {
   uint32_t color = c->fillColor;
   double alpha = c->alpha;
+  int fillKind = c->fillKind;
+  // The queued fills were drawn with a solid colour under source-over, whatever the canvas
+  // holds now, and a batch that started with a full-canvas clear draws that clear first.
+  if (c->gpu_cleared) {
+    CGContextSaveGState(c->ctx);
+    context_set_ctm(c->ctx, CGAffineTransformIdentity);
+    CGContextClearRect(c->ctx, CGRectMake(0, 0, c->w, c->h));
+    CGContextRestoreGState(c->ctx);
+  }
+  c->fillKind = 0;
+  CGContextSetBlendMode(c->ctx, kCGBlendModeNormal);
   for (int i = 0; i < c->gpu_count; i++) {
     const CanvasGpuCmd *q = &c->gpu[i];
     CGAffineTransform m = CGAffineTransformMake(q->m[0], q->m[1], q->m[2], q->m[3], q->m[4], q->m[5]);
@@ -12046,13 +12066,15 @@ static void canvas_gpu_replay_cpu(Canvas *c) {
     c->fillColor = q->color;
     c->alpha = q->alpha;
     CGContextSetAlpha(c->ctx, q->alpha);
-    canvas_fill_device(c, device, 0);
+    canvas_fill_device(c, device, 0, 0);
     CGPathRelease(device);
     CGPathRelease(p);
   }
   c->fillColor = color;
   c->alpha = alpha;
+  c->fillKind = fillKind;
   CGContextSetAlpha(c->ctx, alpha);
+  CGContextSetBlendMode(c->ctx, kComposites[c->composite >= 0 && (size_t)c->composite < sizeof(kComposites) / sizeof(kComposites[0]) ? c->composite : 0]);
   c->gpu_count = 0;
   c->gpu_cleared = 0;
   c->gpu_dirty = 0;
@@ -12073,10 +12095,10 @@ static void canvas_gpu_flush(Canvas *c) {
   }
   int k = c->tex_cur < 0 ? 0 : 1 - c->tex_cur;
   // The batch draws over the canvas as it stood: the texture the last frame sampled, when it
-  // holds draws the bitmap has not taken back; otherwise the bitmap, which a CPU operation has
-  // changed since the last batch.
-  int clear = c->gpu_cleared || c->tex_cur < 0;
-  int src = (!clear && c->gpu_unsynced) ? c->tex_cur : -1;
+  // holds draws the bitmap has not taken back; otherwise the bitmap, which the CPU drew into
+  // (or which a texture made from this batch's target starts from).
+  int clear = c->gpu_cleared;
+  int src = (!clear && c->gpu_unsynced && c->tex_cur >= 0) ? c->tex_cur : -1;
   mt_tex_wait_idle(b, c->tex[k]);
   if (!clear && src < 0 && c->ctx != NULL) {
     const unsigned char *data = CGBitmapContextGetData(c->ctx);
@@ -12169,7 +12191,7 @@ static int canvas_texture(CompBackend *b, const Cmd *cmd, CompRect *src, int *fl
   int w = (int)cv->w, h = (int)cv->h;
   if (cv->tex_w != w || cv->tex_h != h) {
     for (int k = 0; k < 2; k++) {
-      if (cv->tex_w > 0 && cv->tex[k] >= 0) {
+      if (cv->tex[k] >= 0) {
         mt_tex_wait_idle(b, cv->tex[k]);
         b->vt->tex_destroy(b, cv->tex[k]);
       }
