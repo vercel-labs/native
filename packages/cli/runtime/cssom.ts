@@ -1382,7 +1382,7 @@ export class StyleDeclaration {
     this.present = true;
     for (const d of parseDeclarationBlock(text, fonts, undefined, getSheetContent())) {
       for (const c of d.decls) {
-        if (c.prop !== undefined) this.putText(c.prop, c.value === undefined ? "" : c.value, d.important);
+        if (c.prop !== undefined) this.putText(c.prop, c.value === undefined ? "" : c.value, d.important, true);
         else this.put(c.p, c.v, c.u, d.important);
       }
     }
@@ -1484,7 +1484,7 @@ export class StyleDeclaration {
    * Sets a declaration kept as text. It replaces a numeric declaration of the same property, and
    * a shorthand replaces every longhand it covers, as a shorthand declaration does.
    */
-  private putText(prop: string, value: string, important: boolean): void {
+  private putText(prop: string, value: string, important: boolean, parsed: boolean = false): void {
     this.present = true;
     const ids = longhandIds(prop);
     for (let i = this.decls.length - 1; i >= 0; i--) {
@@ -1495,7 +1495,10 @@ export class StyleDeclaration {
         if (d.prop === prop) this.decls.splice(i, 1);
         continue;
       }
-      if (ids !== null && ids.indexOf(d.p) >= 0) this.decls.splice(i, 1);
+      // A parsed block keeps every declaration it lists: "margin-top: 10px !important; margin:
+      // 8px" is two declarations, and the cascade decides. A single setProperty() replaces the
+      // longhands its shorthand covers.
+      if (!parsed && ids !== null && ids.indexOf(d.p) >= 0) this.decls.splice(i, 1);
     }
     this.decls.push({ p: -1, v: 0, u: 0, important, prop, value });
   }
