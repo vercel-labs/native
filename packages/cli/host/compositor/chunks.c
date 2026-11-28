@@ -509,6 +509,36 @@ static int absorb_state(const CompCmdSource *src, void *ctx, int list_id, int at
   return -1;
 }
 
+/** Whether a chunk's own commands turn or scale what it draws, which its matrix does not always
+ *  say: a layer the walk keeps whole replays the transform at the head of its list into the
+ *  raster, and the host would then blur pixels the transform already turned. */
+static int chunk_holds_turn(const CompCmdSource *src, void *ctx, const CompWalkChunk *c) {
+  for (int i = 0; i < c->count; i++) {
+    CompCmdView v;
+    memset(&v, 0, sizeof(v));
+    if (!src->view(ctx, c->list_id, c->first + i, &v)) continue;
+    if (v.kind != COMP_CMD_TRANSFORM) continue;
+    double a = v.matrix.m[0], b = v.matrix.m[1], e = v.matrix.m[4], d = v.matrix.m[5];
+    if (fabs(a - 1.0) > 1e-4 || fabs(d - 1.0) > 1e-4 || fabs(b) > 1e-6 || fabs(e) > 1e-6) return 1;
+  }
+  return 0;
+}
+
+/** Whether a blur's pixels are walked into a chunk the frame draws where they are, without
+ *  scaling or turning them: the host blurs such a chunk's picture as it stands, and a chunk the
+ *  frame resamples is one the replay has to blur instead. */
+static int blur_chunk_plain(const CompCmdSource *src, void *ctx, const CompWalk *w, int at,
+                            double scale) {
+  if (at < 0 || at >= w->count) return 1;
+  const CompWalkChunk *chunk = &w->chunks[at];
+  double sx = chunk->m.m[0] / scale, sy = chunk->m.m[5] / scale;
+  if (fabs(sx - 1.0) > 1e-4 || fabs(sy - 1.0) > 1e-4 || fabs(chunk->m.m[1]) > 1e-6 ||
+      fabs(chunk->m.m[4]) > 1e-6) {
+    return 0;
+  }
+  return !chunk_holds_turn(src, ctx, chunk);
+}
+
 #define WALK_FAIL(code, where, what) \
   do { g_walk_fail = (code); g_walk_fail_at = (where); g_walk_fail_kind = (what); return 0; } while (0)
 
@@ -584,18 +614,6 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
           fprintf(stderr, "native: blur %d inner ok=%d chunks=%d fail=%d kind=%d\n", i, ok,
                   w->count - at, g_walk_fail, g_walk_fail_kind);
         }
-        // The GPU blur works on the chunk's pixels where they are; a chunk the frame scales or
-        // turns is resampled as it is drawn, and blurring a device picture of it then reads a
-        // little differently from the replay blurring the layer before that resampling. Those
-        // keep the replay.
-        if (ok && w->count > at) {
-          const CompWalkChunk *chunk = &w->chunks[at];
-          double sx = chunk->m.m[0] / scale, sy = chunk->m.m[5] / scale;
-          if (fabs(sx - 1.0) > 1e-4 || fabs(sy - 1.0) > 1e-4 ||
-              fabs(chunk->m.m[1]) > 1e-6 || fabs(chunk->m.m[4]) > 1e-6) {
-            ok = 0;
-          }
-        }
         // Several chunks inside the filter are one unblurred chunk of its content carrying the
         // radius, since the host blurs the chunk's pixels as a whole.
         if (ok && w->count - at != 1) {
@@ -608,6 +626,10 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
           }
           ok = w->count - at == 1;
         }
+        // Whatever the filter's pixels were walked into, one the frame rescales or turns keeps the
+        // replay (see blur_chunk_plain): the filter's interior, the grouped chunk it may become,
+        // and an empty interior alike.
+        if (ok && !blur_chunk_plain(src, ctx, w, at, scale)) ok = 0;
         if (ok) {
           open = -1;
           i = end;
