@@ -4895,16 +4895,33 @@ static int backdrop_draw(Replay *r, BackdropImage *s, const Cmd *clip, const Cmd
 /** The border radius the element an effect push belongs to paints its box with: the rounded clip
  *  its background is painted under, in the effect's own range. NULL when the box has square
  *  corners or the commands carry no rounded clip. */
+static const Cmd *effect_round_clip_list(const Cmd *cmds, size_t count, size_t first,
+                                         size_t last, const Cmd *eff, int layers);
+
 static const Cmd *effect_round_clip(size_t first, size_t last, const Cmd *eff) {
+  return effect_round_clip_list(g_list->cmds, g_list->count, first, last, eff, 1);
+}
+
+/** The same scan over a list the effect sits inside (a layer's own commands). A box with a layer of
+ *  its own (will-change: transform) paints its background, and the rounded clip under it, inside
+ *  that layer, so the shape is looked for there too. */
+static const Cmd *effect_round_clip_list(const Cmd *cmds, size_t count, size_t first, size_t last,
+                                         const Cmd *eff, int layers) {
   int depth = 0;
-  for (size_t k = first; k < last && k < g_list->count; k++) {
-    const Cmd *q = &g_list->cmds[k];
+  for (size_t k = first; k < last && k < count; k++) {
+    const Cmd *q = &cmds[k];
     if (q->kind == CMD_EFFECT_PUSH || q->kind == CMD_MASK_PUSH || q->kind == CMD_PERSPECTIVE_PUSH) {
       depth++;
       continue;
     }
     if (q->kind == CMD_EFFECT_POP || q->kind == CMD_MASK_POP || q->kind == CMD_PERSPECTIVE_POP) {
       if (depth > 0) depth--;
+      continue;
+    }
+    if (q->kind == CMD_LAYER_REF && depth == 0 && layers && q->layer >= 0 && q->layer < g_layer_count) {
+      CmdList *inner = &g_layers[q->layer].list;
+      const Cmd *hit = effect_round_clip_list(inner->cmds, inner->count, 0, inner->count, eff, 0);
+      if (hit != NULL) return hit;
       continue;
     }
     if (depth != 0) continue;
