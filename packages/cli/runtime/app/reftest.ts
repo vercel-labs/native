@@ -2,6 +2,7 @@
 // the event loop until it takes the `reftest-wait` class off the root element, as WPT's runner
 // does before it takes the screenshot.
 
+import { now, setClock } from "../animation.ts";
 import { document } from "../dom.ts";
 import { dispatchLoad, dispatchTestRendered, runFrameCallbacks, window } from "../window.ts";
 import { frame } from "./mount.ts";
@@ -13,6 +14,19 @@ const WAIT_LIMIT = 5000;
 const TESTS_LIMIT = 30000;
 /** A guard against a page that reschedules a frame forever without ever clearing the class. */
 const MAX_ROUNDS = 1000;
+
+/**
+ * The clock a settling frame shows. The engine's clock starts at zero for each page, while
+ * performance.now() counts the runner's own uptime, and a batch has been up for minutes by the
+ * time its later pages settle; the first frame of a page takes that moment as the origin, so a
+ * page starts at zero as a browser's timeline does.
+ */
+let clockOrigin = 0;
+function settleTime(): number {
+  const t = performance.now();
+  if (now() === 0) clockOrigin = t;
+  return t - clockOrigin;
+}
 
 function nextTask(): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(() => resolve(), 1));
@@ -31,7 +45,9 @@ export async function settlePage(): Promise<boolean> {
   dispatchLoad();
   // One task and one frame even without reftest-wait: a task the page scheduled at load has run by
   // the time a browser paints, and its change is in the snapshot.
-  runFrameCallbacks(performance.now());
+  const first = settleTime();
+  setClock(first);
+  runFrameCallbacks(first);
   frame();
   await nextTask();
   // A rendered frame has gone by, as WPT gives a page before it says this: a test that starts a
@@ -40,13 +56,17 @@ export async function settlePage(): Promise<boolean> {
   const deadline = Date.now() + WAIT_LIMIT;
   let rounds = 0;
   while (root.classList.contains("reftest-wait") && rounds < MAX_ROUNDS && Date.now() < deadline) {
-    runFrameCallbacks(performance.now());
+    const t = settleTime();
+    setClock(t);
+    runFrameCallbacks(t);
     frame();
     await nextTask();
     rounds++;
   }
   // The final state's frame: the task that removed the class may also have changed the page.
-  runFrameCallbacks(performance.now());
+  const last = settleTime();
+  setClock(last);
+  runFrameCallbacks(last);
   frame();
   return !root.classList.contains("reftest-wait");
 }
@@ -59,14 +79,20 @@ export async function settlePage(): Promise<boolean> {
 export async function settleTests(): Promise<string> {
   frame();
   dispatchLoad();
-  runFrameCallbacks(performance.now());
+  const first = settleTime();
+  setClock(first);
+  runFrameCallbacks(first);
   frame();
   await nextTask();
   const deadline = Date.now() + TESTS_LIMIT;
   while (Date.now() < deadline) {
     const result = (window as unknown as { __nativeTestharness?: string }).__nativeTestharness;
     if (result !== undefined) return result;
-    runFrameCallbacks(performance.now());
+    // The clock keeps moving for the test's whole life, so a run that starts mid-test and an
+    // animation still going when the page settled both end, as they would in a browser.
+    const t = settleTime();
+    setClock(t);
+    runFrameCallbacks(t);
     frame();
     await nextTask();
   }

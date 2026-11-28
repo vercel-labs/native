@@ -110655,8 +110655,7 @@
   {
    "path": "css/css-variables/variable-transitions-value-before-transition-property-all.html",
    "kind": "testharness",
-   "status": "error",
-   "reason": "script threw: the testharness produced no result"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variables-animation-math-functions.html",
