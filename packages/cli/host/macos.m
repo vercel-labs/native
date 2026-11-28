@@ -11467,8 +11467,11 @@ static int window_composite(void) {
   if (g_window_comp < 0) g_window_comp = window_compositing() ? 1 : 0;
   window_stats_init();
   if (g_window_comp == 0) return 0;
-  // A backdrop filter reads the frame's pixels under it, which only the replay does.
-  if (g_metal_layer == nil || g_view == nil || g_needs_backdrop) return 0;
+  // A backdrop filter reads the frame's pixels under it, which only the replay does, so the walk
+  // cannot run it. A frame with one is still composited: composite_frame_into rasters the page
+  // whole and draws it as one picture. The view's layer has no backing store of its own, so a
+  // frame turned away here would leave the window blank.
+  if (g_metal_layer == nil || g_view == nil) return 0;
   if (window_backend() == NULL) {
     g_window_comp = 0;
     return 0;
@@ -11859,7 +11862,10 @@ static int composite_frame_into(CompBackend *b, int target, double scale, int pw
   int pic = win_pic_ensure(b, pw, ph) ? (g_pic_cur == 0 ? 1 : 0) : -1;
   int into = pic >= 0 ? g_pic_tex[pic] : target;
   CompWalk *walk = (CompWalk *)malloc(sizeof(CompWalk));
-  int chunked = walk != NULL && comp_walk_nested(&METAL_CHUNK_SOURCE, NULL, scale, walk);
+  // A backdrop filter reads the pixels the frame has drawn so far, which a chunk's own raster does
+  // not hold, so a frame with one is drawn whole as a flat picture and composited from that.
+  int chunked = walk != NULL && comp_walk_nested(&METAL_CHUNK_SOURCE, NULL, scale, walk) &&
+                !g_needs_backdrop;
   g_pic_chunked = chunked && pic >= 0;
   unsigned char *flat = NULL;
   double flat_ms = 0;
@@ -12185,7 +12191,9 @@ static int composite_damaged_into(CompBackend *b, int target, double scale, int 
 /** Composites a headless run's frame as the window would, into a texture of the page's size at
  *  the snapshot scale, for NATIVE_COMPOSITOR_LIVE runs. */
 static void headless_live_composite(void) {
-  if (!headless_live() || !window_compositing() || g_needs_backdrop) return;
+  // A frame with a backdrop filter composites the way the window composites it: the same walk,
+  // and the same whole-page picture when the walk cannot run the filter.
+  if (!headless_live() || !window_compositing()) return;
   window_stats_init();
   CompBackend *b = window_backend();
   if (b == NULL) return;
