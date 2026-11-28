@@ -11614,6 +11614,12 @@ static int mask_blur_chunk(CompBackend *b, const MaskGroup *g, const CompWalk *w
   // What the picture is of: the chunk's own key, the radius (which the chunk's commands do not
   // carry, since the filter's push stays out of the range) and the alpha it was made at.
   uint64_t key = g_win_keys[index] == 0 ? 0 : key_double(g_win_keys[index], c->blur_sigma);
+  // The picture is made in device pixels, so where the chunk sits is part of what it is a picture
+  // of: a layer that only moves would otherwise keep the picture where it used to be.
+  if (key != 0) {
+    key = key_double(key, c->m.m[12]);
+    key = key_double(key, c->m.m[13]);
+  }
   if (key != 0) {
     BlurCache *keep = &g_blur_cache[index];
     if (keep->tex >= 0 && keep->key == key && keep->alpha == c->alpha) return 1;
@@ -11733,8 +11739,9 @@ static int mask_surface_draw(CompBackend *b, const MaskGroup *g, const CompWalk 
                 cache->y, cache->w, cache->h);
       }
       if (cache->tex >= 0) {
+        // Under the chunk's clip, as its tiles are drawn: a deferred rect clip applies too.
         CompMatrix B = comp_matrix_translate((float)(cache->x - g->box.x), (float)(cache->y - g->box.y));
-        mt_surface_draw(b, cache->tex, (CompRect){0, 0, cache->w, cache->h}, &B, 1.0f, NULL);
+        mt_surface_draw(b, cache->tex, (CompRect){0, 0, cache->w, cache->h}, &B, 1.0f, draw_clip);
         drawn++;
       }
       continue;

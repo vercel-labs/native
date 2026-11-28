@@ -239,6 +239,25 @@ static int mask_span_ok(const CompCmdSource *src, void *ctx, int list_id, int fi
   return 1;
 }
 
+/** Whether a run holds another blur, directly or inside a layer it paints: one chunk carries one
+ *  radius, so a blur inside a blur is left to the replay. A ref past the scan's reach counts as
+ *  one, conservatively. */
+static int span_holds_blur(const CompCmdSource *src, void *ctx, int list_id, int first, int last,
+                           int depth) {
+  for (int i = first; i < last; i++) {
+    CompCmdView v;
+    memset(&v, 0, sizeof(v));
+    if (!src->view(ctx, list_id, i, &v)) continue;
+    if (v.kind == COMP_CMD_EFFECT && v.blur_sigma > 0) return 1;
+    if (v.kind == COMP_CMD_LAYER_REF) {
+      if (depth >= 8) return 1;
+      int n = src->count(ctx, v.layer);
+      if (n < 0 || span_holds_blur(src, ctx, v.layer, 0, n, depth + 1)) return 1;
+    }
+  }
+  return 0;
+}
+
 /** Whether every clip open around a mask is a plain device rect, which a host can scissor by. */
 static int plain_clips_only(const WalkCtx *s) {
   for (int k = 0; k < s->clip_count; k++) {
@@ -550,14 +569,7 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
       int end = group_end(src, ctx, list_id, i, total);
       // A blur inside the blur's own content cannot be one radius on one chunk: the replay keeps
       // both.
-      int nested_blur = 0;
-      for (int k = i + 1; k < end && !nested_blur; k++) {
-        CompCmdView v;
-        memset(&v, 0, sizeof(v));
-        if (src->view(ctx, list_id, k, &v) && v.kind == COMP_CMD_EFFECT && v.blur_sigma > 0) {
-          nested_blur = 1;
-        }
-      }
+      int nested_blur = span_holds_blur(src, ctx, list_id, i + 1, end, 0);
       if (end > i && !nested_blur) {
         int at = w->count;
         int fail = g_walk_fail, fail_at = g_walk_fail_at, fail_kind = g_walk_fail_kind;
