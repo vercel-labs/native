@@ -15,6 +15,8 @@ import { Diagnostics } from "./diagnostics.ts";
 import { domGlobalsModule } from "./dom-globals.ts";
 import { applyHostLink, buildTarget, buildingWindows, hostCommonCompileCommand, hostCompileCommand, hostCompositorCompileCommand, hostSources, hostSourceDigest, isCompositorBackend, prepareMetalShaders, windowsSqliteImportLibrary, MACOS } from "./native-host.ts";
 import { windowsIconObject } from "./windows-icon.ts";
+import { iconChoice, iconPlatform, macIcon, platformIcon, writeIcns } from "./app-icon.ts";
+import { resizePng, writePng } from "./png.ts";
 import { compileApp, type CompiledApp, type HandlerAttribute, type ScriptFile } from "./compile.ts";
 import { AssetBundle, copyBundle, publicDirOf, type BundleCopy, type BundleFile } from "./bundle.ts";
 import { workerEntries } from "./worker-entries.ts";
@@ -1673,43 +1675,30 @@ function installAngleLibraries(resources: string): void {
   }
 }
 
-/** The iconset entries an .icns holds: the pixel size and the name iconutil expects. */
-const ICNS_ENTRIES: readonly (readonly [number, string])[] = [
-  [16, "icon_16x16.png"], [32, "icon_16x16@2x.png"],
-  [32, "icon_32x32.png"], [64, "icon_32x32@2x.png"],
-  [128, "icon_128x128.png"], [256, "icon_128x128@2x.png"],
-  [256, "icon_256x256.png"], [512, "icon_256x256@2x.png"],
-  [512, "icon_512x512.png"], [1024, "icon_512x512@2x.png"],
-];
-
-/** Builds an .icns from a PNG with the system's sips and iconutil; false when either is
- *  missing or the image can't be read. */
-function writeIcns(png: string, out: string): boolean {
-  const dir = mkdtempSync(join(tmpdir(), "native-icon-"));
-  try {
-    const iconset = join(dir, "AppIcon.iconset");
-    mkdirSync(iconset);
-    for (const [size, name] of ICNS_ENTRIES) {
-      const r = spawnSync("sips", ["-z", String(size), String(size), png, "--out", join(iconset, name)], { encoding: "utf8" });
-      if (r.status !== 0) return false;
-    }
-    return spawnSync("iconutil", ["-c", "icns", iconset, "-o", out], { encoding: "utf8" }).status === 0;
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
 /** Writes the app facts and the icon a bundle carries. Returns the icon's name for the Info.plist
- *  (without its extension) when the bundle has one. */
+ *  (without its extension) when the bundle has one. The icon a platform uses is the one whose
+ *  purpose fits it, drawn to that platform's grid: the 1024-pixel canvas with the squircle mask
+ *  and shadow on macOS, the inset sizes Windows and Linux read, or the author's own layout when
+ *  it already has its padding. */
 function writeAppMetadata(resources: string, info: AppInfo): string | null {
   const dir = join(resources, PAGE_TABLES_DIR);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "app.json"), JSON.stringify(bundledInfo(info), null, 2) + "\n");
-  if (info.icon === null) return null;
-  const png = join(dir, "icon.png");
-  copyFileSync(info.icon.source, png);
-  if (!MACOS) return null;
-  return writeIcns(png, join(resources, "AppIcon.icns")) ? "AppIcon" : null;
+  const platform = iconPlatform();
+  const choice = iconChoice(info, platform);
+  const ready = choice !== null && choice.raster !== null;
+  writeFileSync(join(dir, "app.json"), JSON.stringify(bundledInfo(info, ready), null, 2) + "\n");
+  if (choice === null) return null;
+  copyFileSync(choice.icon.source, join(dir, "icon.png"));
+  if (choice.raster === null) return null;
+  // The platform's own rendering beside the source: Linux's packaging reads it, and macOS's icon
+  // is the same picture at the canvas sizes.
+  const readyIcon = platform === "macos"
+    ? resizePng(macIcon(choice.raster, choice.template), 512)
+    : platformIcon(choice.raster, 512, choice.template);
+  writeFileSync(join(dir, "icon-ready.png"), writePng(readyIcon));
+  if (platform !== "macos") return null;
+  writeFileSync(join(resources, "AppIcon.icns"), writeIcns(macIcon(choice.raster, choice.template)));
+  return "AppIcon";
 }
 
 /** Puts the app's own files in place: the bundle beside the executable, the macOS wrapper
@@ -2165,8 +2154,8 @@ export async function emitApp(built: AppBuild, out: string | null, dev: boolean 
   // Windows app's icon is a resource of the executable, so it is compiled into an object first
   // and linked with the host's objects.
   progress?.phase("host");
-  const iconObject = buildingWindows() && info !== null && info.icon !== null && info.icon.type === "image/png"
-    ? windowsIconObject(buildDir, info.icon.source) : null;
+  const chosenIcon = buildingWindows() && info !== null ? iconChoice(info, "windows") : null;
+  const iconObject = chosenIcon === null ? null : windowsIconObject(buildDir, chosenIcon);
   buildHostObjects(buildDir, iconObject);
 
   // The program is written; only the page's tables are missing from it, since a release build

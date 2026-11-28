@@ -167,16 +167,16 @@ export function readPng(file: string): Raster | null {
   return { width, height, rgba: out };
 }
 
-/** The picture at another size, sampled bilinearly. */
-export function resizePng(src: Raster, size: number): Raster {
-  const out = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    const sy = Math.min(src.height - 1, Math.max(0, ((y + 0.5) * src.height) / size - 0.5));
+/** The picture scaled to exactly this size, sampling bilinearly. */
+export function resizeTo(src: Raster, width: number, height: number): Raster {
+  const out = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const sy = Math.min(src.height - 1, Math.max(0, ((y + 0.5) * src.height) / height - 0.5));
     const y0 = Math.floor(sy), y1 = Math.min(src.height - 1, y0 + 1), fy = sy - y0;
-    for (let x = 0; x < size; x++) {
-      const sx = Math.min(src.width - 1, Math.max(0, ((x + 0.5) * src.width) / size - 0.5));
+    for (let x = 0; x < width; x++) {
+      const sx = Math.min(src.width - 1, Math.max(0, ((x + 0.5) * src.width) / width - 0.5));
       const x0 = Math.floor(sx), x1 = Math.min(src.width - 1, x0 + 1), fx = sx - x0;
-      const o = (y * size + x) * 4;
+      const o = (y * width + x) * 4;
       for (let k = 0; k < 4; k++) {
         const p00 = src.rgba[(y0 * src.width + x0) * 4 + k];
         const p10 = src.rgba[(y0 * src.width + x1) * 4 + k];
@@ -187,7 +187,64 @@ export function resizePng(src: Raster, size: number): Raster {
       }
     }
   }
+  return { width, height, rgba: out };
+}
+
+/** The picture at another size, sampled bilinearly. */
+export function resizePng(src: Raster, size: number): Raster {
+  return resizeTo(src, size, size);
+}
+
+/** A box of the picture, as a picture of its own. */
+export function cropPng(src: Raster, x: number, y: number, width: number, height: number): Raster {
+  const out = new Uint8Array(width * height * 4);
+  for (let row = 0; row < height; row++) {
+    const from = ((y + row) * src.width + x) * 4;
+    out.set(src.rgba.subarray(from, from + width * 4), row * width * 4);
+  }
+  return { width, height, rgba: out };
+}
+
+/** The picture scaled to fit a square canvas, centred, with its aspect ratio kept. */
+export function containPng(src: Raster, size: number): Raster {
+  const scale = Math.min(size / src.width, size / src.height);
+  const width = Math.max(1, Math.round(src.width * scale));
+  const height = Math.max(1, Math.round(src.height * scale));
+  const scaled = resizeTo(src, width, height);
+  const out = new Uint8Array(size * size * 4);
+  const left = Math.floor((size - width) / 2), top = Math.floor((size - height) / 2);
+  for (let row = 0; row < height; row++) {
+    out.set(scaled.rgba.subarray(row * width * 4, (row + 1) * width * 4), ((top + row) * size + left) * 4);
+  }
   return { width: size, height: size, rgba: out };
+}
+
+/** The picture scaled to cover a square box, centred, and cropped to it. */
+export function coverPng(src: Raster, size: number): Raster {
+  const scale = Math.max(size / src.width, size / src.height);
+  const width = Math.max(1, Math.round(src.width * scale));
+  const height = Math.max(1, Math.round(src.height * scale));
+  const scaled = resizeTo(src, width, height);
+  return cropPng(scaled, Math.floor((width - size) / 2), Math.floor((height - size) / 2), size, size);
+}
+
+/**
+ * The box the picture's visible pixels occupy: left and top inclusive, right and bottom exclusive.
+ * A pixel counts when its alpha is more than a faint edge (8 of 255), so a one-pixel anti-aliased
+ * border around an otherwise full-bleed picture doesn't read as padding.
+ */
+export function alphaBounds(img: Raster): { left: number; top: number; right: number; bottom: number } {
+  let left = img.width, top = img.height, right = 0, bottom = 0;
+  for (let y = 0; y < img.height; y++) {
+    for (let x = 0; x < img.width; x++) {
+      if (img.rgba[(y * img.width + x) * 4 + 3] <= 8) continue;
+      if (x < left) left = x;
+      if (x >= right) right = x + 1;
+      if (y < top) top = y;
+      if (y >= bottom) bottom = y + 1;
+    }
+  }
+  return right > left && bottom > top ? { left, top, right, bottom } : { left: 0, top: 0, right: img.width, bottom: img.height };
 }
 
 /** A PNG holding the picture, 8-bit RGBA with no row filters. */

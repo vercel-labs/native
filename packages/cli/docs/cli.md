@@ -110,14 +110,34 @@ The identifier is `NATIVE_APP_ID`, then the manifest's `id`, then `dev.native-sd
 from the display name. On macOS the display name is the app menu's ("About Tide", "Quit Tide") and
 `CFBundleName`, and the identifier is `CFBundleIdentifier`.
 
-The bundle gets `.native/app.json` (the same facts, with the icon at `.native/icon.png`) and the
-platform's packaging reads it. On macOS the icon becomes `Contents/Resources/AppIcon.icns` with
-the system's `sips` and `iconutil`, and the `Info.plist` names it with `CFBundleIconFile`. On
-Windows the same PNG becomes an .ico at 16, 24, 32, 48, 64 and 256 pixels, compiled into the
-executable's icon resource by zig's resource compiler (a Windows build already needs zig), so
-Explorer, Alt-Tab and the taskbar show it, and the window sets it with `WM_SETICON` for its
-titlebar and taskbar icons. A manifest that can't be read, or an icon file that isn't there,
-prints one warning and the build goes on with what it has.
+The bundle gets `.native/app.json` (the same facts, with the icon at `.native/icon.png` and the
+platform's own rendering beside it at `.native/icon-ready.png`), and the platform's packaging
+reads it.
+
+The icon is drawn for the platform, from the same picture the page names. A manifest icon's
+`purpose` says how its author drew it, and the build reads it the way a browser does:
+
+- `purpose: "maskable"` is a full-bleed picture drawn for a mask. macOS gets the system's icon
+  grid: the picture is inset to 824 pixels of a 1024-pixel canvas, masked to its squircle shape,
+  and given the standard shadow. Windows and Linux keep their own sizes with a 5% margin.
+- `purpose: "any"` (the default) is a picture its author laid out. If it already has transparent
+  padding — its visible pixels stay off every edge — it is used as it is. A full-bleed opaque
+  picture is treated like a maskable one, because that is almost always what its author meant.
+  Stating `purpose: "any"` is the opt-out: an icon whose manifest entry states a purpose is used
+  exactly as drawn.
+- When the manifest lists several, each platform takes the one drawn for it — macOS a maskable
+  icon, Windows and Linux an `any` icon with its own padding — and the largest of the fitting
+  icons wins.
+
+![A full-bleed square icon](images/icon-source.png) ![The same icon on macOS's grid](images/icon-macos.png)
+
+On macOS the result is `Contents/Resources/AppIcon.icns` (16 to 1024 pixels) and the `Info.plist`
+names it with `CFBundleIconFile`. On Windows it becomes an .ico at 16, 24, 32, 48, 64 and 256
+pixels, compiled into the executable's icon resource by zig's resource compiler (a Windows build
+already needs zig), so Explorer, Alt-Tab and the taskbar show it, and the window sets it with
+`WM_SETICON` for its titlebar and taskbar icons. Linux's desktop entry uses the ready icon. A
+manifest that can't be read, or an icon file that isn't there, prints one warning and the build
+goes on with what it has.
 
 On macOS a release build is also signed and packaged; [Shipping a macOS app](macos.md) covers the
 identity and notary environment variables, the `.dmg`, and how to check a build.
