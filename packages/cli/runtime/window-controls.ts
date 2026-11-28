@@ -6,6 +6,7 @@
 // window (see app/titlebar.ts); geometrychange fires when a resize moves the region.
 
 import { DOMRect, Event, EventTarget } from "./dom.ts";
+import type { EventInit } from "./events.ts";
 
 export interface WindowControlsOverlayGeometryChangeEventInit extends EventInit {
   visible: boolean;
