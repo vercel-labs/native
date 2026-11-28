@@ -33,9 +33,13 @@ html, body { margin: 0; width: 300px; height: 200px; background: #2f6df6; overfl
 /* A glass box faded to nothing: it paints nothing at all. */
 #glassB { position: absolute; left: 180px; top: 40px; width: 100px; height: 90px;
   border-radius: 20px; background: rgba(255, 255, 255, 0.5); backdrop-filter: blur(10px); opacity: 0; }
+/* A glass box with a layer of its own: its background paints inside the layer. */
+#glassC { position: absolute; left: 180px; top: 140px; width: 100px; height: 90px;
+  border-radius: 20px; background: rgba(255, 255, 255, 0.5); backdrop-filter: blur(10px);
+  will-change: transform; transform: translate(0px, 0px); }
 </style></head><body>
 <div id="markA"></div><div id="markB"></div>
-<div id="glassA"></div><div id="glassB"></div>
+<div id="glassA"></div><div id="glassB"></div><div id="glassC"></div>
 </body></html>`);
 writeFileSync(join(dir, "app.ts"), `// A static page: the snapshot is its only frame.
 `);
@@ -85,6 +89,12 @@ ok("the filter shows inside the rounded box",
 const behind = px(206, 61);
 ok("a box faded to nothing leaves its backdrop alone", near(behind, [255, 255, 255], 2),
   `rgb(${behind.join(",")})`);
+
+// A box with a layer of its own (will-change: transform) paints its background and the rounded
+// clip under it inside that layer: the corner must still keep the page, not the square rectangle.
+const layered = px(184, 144);
+ok("a box with a layer of its own keeps the page in its square corner", near(layered, page, 3),
+  `rgb(${layered.join(",")})`);
 
 console.log(failed === 0 ? "\nall passed" : `\n${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

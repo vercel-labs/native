@@ -4875,7 +4875,12 @@ static void backdrop_shape_rect(const Replay *r, const Cmd *c, double shape[4]) 
   double x0 = c->x, y0 = c->y, x1 = c->x + c->w, y1 = c->y + c->h;
   cairo_matrix_transform_point(&r->base, &x0, &y0);
   cairo_matrix_transform_point(&r->base, &x1, &y1);
-  shape[0] = x0; shape[1] = y0; shape[2] = x1; shape[3] = y1;
+  // A mirroring transform (scaleX(-1) or scaleY(-1)) swaps the corners, and a path built without
+  // swapping them back has no area, which would drop the filter.
+  shape[0] = x0 < x1 ? x0 : x1;
+  shape[1] = y0 < y1 ? y0 : y1;
+  shape[2] = x0 < x1 ? x1 : x0;
+  shape[3] = y0 < y1 ? y1 : y0;
 }
 
 /** Draws a kept filtered backdrop where it came from, clipped to what the frame repaints. */
@@ -4995,7 +5000,9 @@ static void apply_backdrop(Replay *r, const Cmd *c, const EffectSpec *spec, doub
   // the repainted regions get exactly the backdrop they would have filtered to.
   if (reuse) {
     BackdropImage *kept = backdrop_find(c->serial, bx, by, bw, bh, scale);
-    if (kept != NULL && backdrop_draw(r, kept, clip, c)) return;
+    // The kept pixels are the clipped result, so drawing them back through the clip again would
+    // apply the shape's antialiasing twice.
+    if (kept != NULL && backdrop_draw(r, kept, NULL, c)) return;
   }
   // A blur samples past the box, and the backdrop beyond it isn't the box's to filter: the copy
   // is grown by however far the chain spreads and its edge pixels repeated into that margin.
