@@ -153,9 +153,20 @@ static void clip_subregion(Buf *b, double x, double y, double w, double h) {
 
 // --- Blur --------------------------------------------------------------------
 
+/** How many values a box pass of width n can round: a sum of at most 255 * n bytes. */
+#define BOX_DIV_MAX 65536
+
+/** The pass's rounding, one entry per sum: (s + n / 2) / n, the same integer result a divide by n
+ *  gives, without a divide per pixel. */
+static void box_div_table(uint8_t *tbl, int n) {
+  int max = 255 * n;
+  if (max >= BOX_DIV_MAX) max = BOX_DIV_MAX - 1;
+  for (int s = 0; s <= max; s++) tbl[s] = (uint8_t)((s + n / 2) / n);
+}
+
 /** One box pass along a row (horizontal) or column, with the outside counting as transparent. */
-static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius, int horizontal) {
-  int n = radius * 2 + 1;
+static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius, int horizontal,
+                     const uint8_t *div) {
   if (horizontal) {
     for (int y = 0; y < h; y++) {
       const uint8_t *in = src + (size_t)y * (size_t)w * 4;
@@ -165,10 +176,10 @@ static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius,
         s0 += in[k * 4]; s1 += in[k * 4 + 1]; s2 += in[k * 4 + 2]; s3 += in[k * 4 + 3];
       }
       for (int x = 0; x < w; x++) {
-        out[x * 4] = (uint8_t)((s0 + n / 2) / n);
-        out[x * 4 + 1] = (uint8_t)((s1 + n / 2) / n);
-        out[x * 4 + 2] = (uint8_t)((s2 + n / 2) / n);
-        out[x * 4 + 3] = (uint8_t)((s3 + n / 2) / n);
+        out[x * 4] = div[s0];
+        out[x * 4 + 1] = div[s1];
+        out[x * 4 + 2] = div[s2];
+        out[x * 4 + 3] = div[s3];
         int drop = x - radius, add = x + radius + 1;
         if (drop >= 0 && drop < w) {
           s0 -= in[drop * 4]; s1 -= in[drop * 4 + 1]; s2 -= in[drop * 4 + 2]; s3 -= in[drop * 4 + 3];
@@ -180,27 +191,41 @@ static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius,
     }
     return;
   }
+  // Columns go in blocks that fill whole cache lines, so a block's row is read once and the sums
+  // stay in registers: each column's arithmetic is the one a column-at-a-time pass has, in the
+  // same order, so the bytes are the same.
+  enum { BOX_BLOCK = 16 };
   size_t stride = (size_t)w * 4;
-  for (int x = 0; x < w; x++) {
-    int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+  for (int xb = 0; xb < w; xb += BOX_BLOCK) {
+    int nc = w - xb < BOX_BLOCK ? w - xb : BOX_BLOCK;
+    int s0[BOX_BLOCK], s1[BOX_BLOCK], s2[BOX_BLOCK], s3[BOX_BLOCK];
+    for (int c = 0; c < nc; c++) { s0[c] = s1[c] = s2[c] = s3[c] = 0; }
     for (int k = 0; k <= radius && k < h; k++) {
-      const uint8_t *p = src + (size_t)k * stride + (size_t)x * 4;
-      s0 += p[0]; s1 += p[1]; s2 += p[2]; s3 += p[3];
+      const uint8_t *p = src + (size_t)k * stride + (size_t)xb * 4;
+      for (int c = 0; c < nc; c++) {
+        s0[c] += p[c * 4]; s1[c] += p[c * 4 + 1]; s2[c] += p[c * 4 + 2]; s3[c] += p[c * 4 + 3];
+      }
     }
     for (int y = 0; y < h; y++) {
-      uint8_t *out = dst + (size_t)y * stride + (size_t)x * 4;
-      out[0] = (uint8_t)((s0 + n / 2) / n);
-      out[1] = (uint8_t)((s1 + n / 2) / n);
-      out[2] = (uint8_t)((s2 + n / 2) / n);
-      out[3] = (uint8_t)((s3 + n / 2) / n);
+      uint8_t *out = dst + (size_t)y * stride + (size_t)xb * 4;
+      for (int c = 0; c < nc; c++) {
+        out[c * 4] = div[s0[c]];
+        out[c * 4 + 1] = div[s1[c]];
+        out[c * 4 + 2] = div[s2[c]];
+        out[c * 4 + 3] = div[s3[c]];
+      }
       int drop = y - radius, add = y + radius + 1;
       if (drop >= 0 && drop < h) {
-        const uint8_t *p = src + (size_t)drop * stride + (size_t)x * 4;
-        s0 -= p[0]; s1 -= p[1]; s2 -= p[2]; s3 -= p[3];
+        const uint8_t *p = src + (size_t)drop * stride + (size_t)xb * 4;
+        for (int c = 0; c < nc; c++) {
+          s0[c] -= p[c * 4]; s1[c] -= p[c * 4 + 1]; s2[c] -= p[c * 4 + 2]; s3[c] -= p[c * 4 + 3];
+        }
       }
       if (add >= 0 && add < h) {
-        const uint8_t *p = src + (size_t)add * stride + (size_t)x * 4;
-        s0 += p[0]; s1 += p[1]; s2 += p[2]; s3 += p[3];
+        const uint8_t *p = src + (size_t)add * stride + (size_t)xb * 4;
+        for (int c = 0; c < nc; c++) {
+          s0[c] += p[c * 4]; s1[c] += p[c * 4 + 1]; s2[c] += p[c * 4 + 2]; s3[c] += p[c * 4 + 3];
+        }
       }
     }
   }
@@ -223,16 +248,32 @@ static void blur_axis(uint8_t *px, int w, int h, double sigma, int horizontal) {
   int sizes[3];
   for (int i = 0; i < 3; i++) sizes[i] = i < m ? wl : wu;
   size_t n = (size_t)w * (size_t)h * 4;
-  uint8_t *tmp = (uint8_t *)malloc(n);
-  if (!tmp) return;
+  uint8_t *a = (uint8_t *)malloc(n);
+  uint8_t *b = (uint8_t *)malloc(n);
+  uint8_t *div = (uint8_t *)malloc(BOX_DIV_MAX);
+  if (!a || !b || !div) {
+    free(a);
+    free(b);
+    free(div);
+    return;
+  }
+  // Passes read the one before, so two buffers trade places and nothing is copied between them.
+  uint8_t *cur = px;
+  int slot = 0;
   for (int pass = 0; pass < 3; pass++) {
     int radius = (sizes[pass] - 1) / 2;
     if (radius < 1) continue;
     if (radius > 128) radius = 128;
-    box_pass(px, tmp, w, h, radius, horizontal);
-    memcpy(px, tmp, n);
+    box_div_table(div, radius * 2 + 1);
+    uint8_t *dst = slot == 0 ? a : b;
+    slot = slot == 0 ? 1 : 0;
+    box_pass(cur, dst, w, h, radius, horizontal, div);
+    cur = dst;
   }
-  free(tmp);
+  if (cur != px) memcpy(px, cur, n);
+  free(a);
+  free(b);
+  free(div);
 }
 
 static void blur_buf(Buf *b, double sigmaX, double sigmaY) {
