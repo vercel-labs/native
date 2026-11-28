@@ -56,6 +56,10 @@ typedef struct {
 // The manifest's "quad" pipeline, the one every layer draws with.
 @property(nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> maskPipeline;
+// The manifest's "canvas_sdf" pipeline, which draws a 2D canvas's shapes.
+@property(nonatomic, strong) id<MTLRenderPipelineState> sdfPipeline;
+// The command buffer each canvas texture's last batch was drawn with, so a readback waits for it.
+@property(nonatomic, strong) NSMutableDictionary *canvasWrites;
 @property(nonatomic, strong) id<MTLTexture> white;
 // Untyped: a destroyed texture's slot holds NSNull, which a generic array would reject.
 @property(nonatomic, strong) NSMutableArray *textures;
@@ -833,7 +837,9 @@ static int mt_tex_create_rgba(CompBackend *b, int w, int h) {
                                                                                width:(NSUInteger)w
                                                                               height:(NSUInteger)h
                                                                            mipmapped:NO];
-  d.usage = MTLTextureUsageShaderRead;
+  // A canvas's fills can be drawn straight into it (NATIVE_GPU_CANVAS), so it is a render target
+  // as well as something the compositor samples.
+  d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
   d.storageMode = MTLStorageModeShared;
   return mt_tex_slot(m, [m.device newTextureWithDescriptor:d]);
 }
@@ -855,6 +861,72 @@ static void mt_tex_wait_idle(CompBackend *b, int tex) {
   if (cb == nil || cb == m.commandBuffer) return;
   if (cb.status < MTLCommandBufferStatusCompleted) [cb waitUntilCompleted];
   [m.readers removeObjectForKey:@(tex)];
+}
+
+/** Draws a batch of a canvas's shapes into one of its textures: the previous texture's pixels are
+ *  copied in first (or the target is cleared), then every shape is one quad in one draw call. */
+int mt_canvas_batch(CompBackend *b, int dst, int src, int clear, const MtSdfShape *shapes, int count,
+                    int width, int height) {
+  MtBackend *m = impl_of(b);
+  id<MTLTexture> d = mt_texture(m, dst);
+  if (d == nil || width <= 0 || height <= 0) return 0;
+  id<MTLTexture> s = src >= 0 ? mt_texture(m, src) : nil;
+  id<MTLCommandBuffer> cb = [m.queue commandBuffer];
+  if (!clear && s != nil && s != d) {
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit copyFromTexture:s sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake((NSUInteger)width, (NSUInteger)height, 1)
+                toTexture:d destinationSlice:0 destinationLevel:0
+       destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+  }
+  // With nothing to copy from and no clear, the texture already holds the canvas's pixels: the
+  // caller wrote them in.
+  MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+  pass.colorAttachments[0].texture = d;
+  pass.colorAttachments[0].loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
+  pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+  pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+  id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:pass];
+  if (count > 0 && m.sdfPipeline == nil) {
+    // No pipeline for the shapes: the caller draws them on the CPU instead.
+    [enc endEncoding];
+    return 0;
+  }
+  if (count > 0) {
+    id<MTLBuffer> buffer = [m.device newBufferWithBytes:shapes
+                                                 length:(NSUInteger)count * sizeof(MtSdfShape)
+                                                options:MTLResourceStorageModeShared];
+    float view[2] = {(float)width, (float)height};
+    [enc setRenderPipelineState:m.sdfPipeline];
+    [enc setVertexBuffer:buffer offset:0 atIndex:0];
+    [enc setVertexBytes:view length:sizeof(view) atIndex:1];
+    [enc setFragmentBuffer:buffer offset:0 atIndex:0];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)count * 6];
+  }
+  [enc endEncoding];
+  [cb commit];
+  // A readback has to wait for this work; a later frame samples the texture after it, because a
+  // queue runs committed command buffers in order.
+  if (m.canvasWrites == nil) m.canvasWrites = [NSMutableDictionary dictionary];
+  m.canvasWrites[@(dst)] = cb;
+  return 1;
+}
+
+/** Waits for the batch that last wrote a canvas texture, then copies its pixels out: the bitmap
+ *  the CPU path reads is exactly what the GPU drew. */
+int mt_tex_readback(CompBackend *b, int tex, void *dst, size_t stride) {
+  MtBackend *m = impl_of(b);
+  id<MTLTexture> t = mt_texture(m, tex);
+  if (t == nil || dst == NULL) return 0;
+  id<MTLCommandBuffer> cb = m.canvasWrites[@(tex)];
+  if (cb != nil) {
+    if (cb.status < MTLCommandBufferStatusCompleted) [cb waitUntilCompleted];
+    [m.canvasWrites removeObjectForKey:@(tex)];
+  }
+  [t getBytes:dst bytesPerRow:stride fromRegion:MTLRegionMake2D(0, 0, t.width, t.height)
+   mipmapLevel:0];
+  return 1;
 }
 
 static const CompBackendVTable MT_VT = {
@@ -927,6 +999,8 @@ static CompBackend *mt_backend_with_layer(void *layer) {
     return NULL;
   }
   m.maskPipeline = m.pipelines[(NSUInteger)mask];
+  int sdf = native_shader_pipeline_index("canvas_sdf");
+  if (sdf >= 0) m.sdfPipeline = m.pipelines[(NSUInteger)sdf];
   m.textures = [NSMutableArray array];
   m.freeSlots = [NSMutableIndexSet indexSet];
   id<MTLTexture> white = mt_make_texture(m, 1, 1, MTLTextureUsageShaderRead);

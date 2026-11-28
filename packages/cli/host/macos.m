@@ -33,6 +33,7 @@
 #include <unistd.h>
 #include <sqlite3.h>
 #include "svg-filter.h"
+#include "compositor/metal.h"
 #include <mach-o/dyld.h>
 #include <pthread.h>
 
@@ -2582,6 +2583,18 @@ typedef struct {
   CGPoint curve[4][3];
 } Circle;
 
+// A canvas fill the GPU draws from the shape itself. The edge's coverage comes from the shape's
+// distance to the pixel, so a fill at a fractional position is smooth without multisampling.
+enum { CGPU_RECT = 1, CGPU_OVAL };
+
+typedef struct {
+  int kind;       // CGPU_*
+  uint32_t color; // the fill's colour, as the canvas holds it (0xRRGGBBAA)
+  double alpha;   // the globalAlpha it is painted with
+  double m[6];    // local space -> device pixels
+  double x, y, w, h;
+} CanvasGpuCmd;
+
 typedef struct {
   CGContextRef ctx;
   CGMutablePathRef path;
@@ -2624,7 +2637,36 @@ typedef struct {
   // textures take turns, so a frame never writes the one the last frame may still be reading.
   unsigned long gen, tex_gen;
   int tex[2], tex_w, tex_h, tex_cur;
+  // The backend that made tex[2], for a GPU flush or a readback of one.
+  CompBackend *backend;
+  // GPU fills waiting for the canvas texture (NATIVE_GPU_CANVAS=1): shapes the sdf shaders draw
+  // straight into tex[k]. gpu_dirty is set when the texture holds draws the bitmap does not, and
+  // any operation that needs the bitmap flushes and reads it back first.
+  CanvasGpuCmd *gpu;
+  int gpu_count, gpu_cap;
+  int gpu_cleared; // the batch starts from a full-canvas clear
+  int gpu_dirty;   // the texture or the batch holds draws the bitmap does not
+  int gpu_unsynced; // the texture holds draws the bitmap has not taken back yet
+  // Clips in effect. The GPU batch only runs with none, so a clip flushes it first.
+  int clip_depth;
+  int *clip_saved;
+  int clip_saved_n, clip_saved_cap;
+  // The one shape the current path describes (HINT_*), and the circles of a path that holds only
+  // full circles (the grain canvas's per-bucket path). A path that is anything else is
+  // HINT_GENERAL and stays on the CPU.
+  int hint;
+  double hint_x, hint_y, hint_w, hint_h;
+  double hint_m[6];
+  int hint_circles;
+  int circle_count, circle_cap;
+  struct { double cx, cy, r; double m[6]; } *circles;
+  int path_fresh;  // beginPath since the last element
+  int path_moved;  // the last element was a moveTo, at path_mx, path_my
+  double path_mx, path_my;
+  double path_mm[6];
 } Canvas;
+
+enum { HINT_NONE, HINT_RECT, HINT_OVALS, HINT_GENERAL };
 
 enum {
   FILTER_BLUR = 1,
@@ -2656,6 +2698,87 @@ static size_t g_canvas_count = 0, g_canvas_cap = 0;
 static Canvas *canvas_at(int32_t id) {
   if (id < 0 || (size_t)id >= g_canvas_count) return NULL;
   return g_canvases[(size_t)id];
+}
+
+// --- GPU canvas ------------------------------------------------------------------------------
+//
+// A 2D canvas can draw its solid fills with the sdf shaders, straight into the texture the
+// compositor samples (NATIVE_GPU_CANVAS=1). Shapes whose edges the shaders can describe (a rect,
+// an oval, a path of full circles) are queued; everything else flushes the queue, reads the
+// texture back into the bitmap, and runs on the CPU as before. The bitmap is authoritative
+// whenever anything reads it.
+
+/** Whether fills take the GPU path. Off until the pixels match Chrome on the canvas parity set. */
+static int canvas_gpu_on(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *env = getenv("NATIVE_GPU_CANVAS");
+    on = env != NULL && env[0] == '1' && env[1] == 0;
+  }
+  return on;
+}
+
+static void canvas_gpu_flush(Canvas *c);
+static void canvas_gpu_sync(Canvas *c);
+static void canvas_gpu_replay_cpu(Canvas *c);
+
+/** Whether this canvas can have its fills drawn on the GPU: a 2D canvas, with a solid fill, the
+ *  default composite, no filter and no clip. */
+static int canvas_gpu_ready(Canvas *c) {
+  return canvas_gpu_on() && c->ctx != NULL && c->gl == NULL && c->filterCount == 0 &&
+         c->clip_depth == 0 && c->composite == 0 && c->fillKind == 0 && c->alpha > 0;
+}
+
+/** The context's transform, as a, b, c, d, tx, ty. */
+static void canvas_ctm(Canvas *c, double m[6]) {
+  CGAffineTransform t = CGContextGetCTM(c->ctx);
+  m[0] = t.a; m[1] = t.b; m[2] = t.c; m[3] = t.d; m[4] = t.tx; m[5] = t.ty;
+}
+
+static void canvas_gpu_push(Canvas *c, int kind, const double m[6], double x, double y,
+                            double w, double h) {
+  if (c->gpu_count == c->gpu_cap) {
+    c->gpu_cap = c->gpu_cap ? c->gpu_cap * 2 : 32;
+    c->gpu = realloc(c->gpu, (size_t)c->gpu_cap * sizeof(CanvasGpuCmd));
+  }
+  if (c->gpu == NULL) { c->gpu_count = 0; c->gpu_cap = 0; return; }
+  CanvasGpuCmd *q = &c->gpu[c->gpu_count++];
+  q->kind = kind;
+  q->color = c->fillColor;
+  q->alpha = c->alpha;
+  memcpy(q->m, m, 6 * sizeof(double));
+  q->x = x; q->y = y; q->w = w; q->h = h;
+  c->gpu_dirty = 1;
+}
+
+/** Forgets the shape description of the path being built. */
+static void canvas_hint_begin(Canvas *c) {
+  c->hint = HINT_NONE;
+  c->circle_count = 0;
+  c->path_fresh = 1;
+  c->path_moved = 0;
+}
+
+/** The path is something other than the hint described. */
+static void canvas_hint_general(Canvas *c) {
+  c->hint = HINT_GENERAL;
+  c->circle_count = 0;
+}
+
+/** Adds one full circle to the path's circle list, when the hint is one shape family so far. */
+static void canvas_hint_circle(Canvas *c, double cx, double cy, double r, const double m[6]) {
+  if (c->hint != HINT_NONE && c->hint != HINT_OVALS) { canvas_hint_general(c); return; }
+  if (c->circle_count == c->circle_cap) {
+    c->circle_cap = c->circle_cap ? c->circle_cap * 2 : 64;
+    c->circles = realloc(c->circles, (size_t)c->circle_cap * sizeof(*c->circles));
+  }
+  if (c->circles == NULL) { c->circle_count = 0; c->circle_cap = 0; canvas_hint_general(c); return; }
+  c->circles[c->circle_count].cx = cx;
+  c->circles[c->circle_count].cy = cy;
+  c->circles[c->circle_count].r = r;
+  memcpy(c->circles[c->circle_count].m, m, 6 * sizeof(double));
+  c->circle_count++;
+  c->hint = HINT_OVALS;
 }
 
 // WebGL canvases: the bitmap above is filled from the GL drawing buffer instead of drawn into.
@@ -2717,6 +2840,13 @@ static void canvas_reset(Canvas *c) {
   c->cap = c->join = 0;
   c->dashCount = 0;
   c->dashOffset = 0;
+  c->gpu_count = 0;
+  c->gpu_cleared = 0;
+  c->gpu_dirty = 0;
+  c->gpu_unsynced = 0;
+  c->clip_depth = 0;
+  c->clip_saved_n = 0;
+  canvas_hint_begin(c);
   canvas_make_context(c);
 }
 
@@ -2749,12 +2879,23 @@ void host_canvas_resize(int32_t id, double w, double h) {
 
 void host_canvas_save(int32_t id) {
   Canvas *c = canvas_at(id);
-  if (c) CGContextSaveGState(c->ctx);
+  if (!c) return;
+  CGContextSaveGState(c->ctx);
+  // The clip depth comes back with the state, since a restore puts back the clip too.
+  if (c->clip_saved_n == c->clip_saved_cap) {
+    c->clip_saved_cap = c->clip_saved_cap ? c->clip_saved_cap * 2 : 16;
+    c->clip_saved = realloc(c->clip_saved, (size_t)c->clip_saved_cap * sizeof(int));
+  }
+  if (c->clip_saved != NULL) c->clip_saved[c->clip_saved_n++] = c->clip_depth;
 }
 
 void host_canvas_restore(int32_t id) {
   Canvas *c = canvas_at(id);
-  if (c) CGContextRestoreGState(c->ctx);
+  if (!c) return;
+  // The queued fills were drawn without the clip this restore may remove; they land first.
+  canvas_gpu_sync(c);
+  CGContextRestoreGState(c->ctx);
+  if (c->clip_saved_n > 0) c->clip_depth = c->clip_saved[--c->clip_saved_n];
 }
 
 void host_canvas_set_transform(int32_t id, double a, double b, double c0, double d, double e, double f) {
@@ -2902,6 +3043,7 @@ void host_canvas_svg_filter(int32_t id, const uint8_t *def, size_t n, int32_t li
                             double x, double y, double w, double h) {
   Canvas *c = canvas_at(id);
   if (!c || !c->ctx || !(w > 0) || !(h > 0)) return;
+  canvas_gpu_sync(c);
   uint8_t *data = CGBitmapContextGetData(c->ctx);
   if (!data) return;
   size_t rowBytes = CGBitmapContextGetBytesPerRow(c->ctx);
@@ -3116,6 +3258,7 @@ void host_canvas_begin_path(int32_t id) {
   c->pathKind = 0;
   c->circleCount = 0;
   c->havePoint = 0;
+  canvas_hint_begin(c);
 }
 
 // A circle of user-space radius r, drawn under m, comes out as an ellipse whose semi-axes are
@@ -3196,6 +3339,12 @@ void host_canvas_move_to(int32_t id, double x, double y) {
   c->curX = p.x;
   c->curY = p.y;
   c->havePoint = 1;
+  if (c->hint == HINT_RECT) canvas_hint_general(c);
+  canvas_ctm(c, c->path_mm);
+  c->path_mx = x;
+  c->path_my = y;
+  c->path_moved = 1;
+  c->path_fresh = 0;
 }
 
 void host_canvas_line_to(int32_t id, double x, double y) {
@@ -3207,6 +3356,9 @@ void host_canvas_line_to(int32_t id, double x, double y) {
   c->curX = p.x;
   c->curY = p.y;
   c->havePoint = 1;
+  canvas_hint_general(c);
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 void host_canvas_quadratic_to(int32_t id, double cx, double cy, double x, double y) {
@@ -3218,6 +3370,9 @@ void host_canvas_quadratic_to(int32_t id, double cx, double cy, double x, double
   c->curX = p.x;
   c->curY = p.y;
   c->havePoint = 1;
+  canvas_hint_general(c);
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 void host_canvas_bezier_to(int32_t id, double c1x, double c1y, double c2x, double c2y, double x, double y) {
@@ -3229,6 +3384,9 @@ void host_canvas_bezier_to(int32_t id, double c1x, double c1y, double c2x, doubl
   c->curX = p.x;
   c->curY = p.y;
   c->havePoint = 1;
+  canvas_hint_general(c);
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 void host_canvas_close_path(int32_t id) {
@@ -3236,6 +3394,9 @@ void host_canvas_close_path(int32_t id) {
   if (!c) return;
   CGPathCloseSubpath(c->path);
   canvas_path_other(c);
+  canvas_hint_general(c);
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 // Arcs and rects go through a user-space path, so the transform applies to them exactly.
@@ -3246,6 +3407,17 @@ void host_canvas_arc(int32_t id, double cx, double cy, double r, double start, d
   // other geometry, the transform leaves it circular to within the pixel gate, and the arc
   // starts where the path already is (or opens the path).
   int full = fabs(fabs(end - start) - 2 * M_PI) < 1e-6;
+  // The same path is what the sdf shaders draw when it holds one full circle: a lone
+  // arc, or a moveTo to the arc's own start point followed by an arc.
+  double hm[6];
+  canvas_ctm(c, hm);
+  int hintCircle = full && r > 0 &&
+                   (c->path_fresh || (c->path_moved &&
+                    fabs(cx + r * cos(start) - c->path_mx) < 1e-6 &&
+                    fabs(cy + r * sin(start) - c->path_my) < 1e-6 &&
+                    memcmp(hm, c->path_mm, sizeof hm) == 0));
+  if (hintCircle) canvas_hint_circle(c, cx, cy, r, hm);
+  else canvas_hint_general(c);
   double radius = 0;
   CGAffineTransform m = CGContextGetCTM(c->ctx);
   if (full && r > 0 && canvas_circle_transform(m, r, &radius)) {
@@ -3272,6 +3444,8 @@ void host_canvas_arc(int32_t id, double cx, double cy, double r, double start, d
       c->curX = sp.x;
       c->curY = sp.y;
       c->havePoint = 1;
+      c->path_fresh = 0;
+      c->path_moved = 0;
       return;
     }
   }
@@ -3284,6 +3458,8 @@ void host_canvas_arc(int32_t id, double cx, double cy, double r, double start, d
   c->curX = ep.x;
   c->curY = ep.y;
   c->havePoint = 1;
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 void host_canvas_arc_to(int32_t id, double x1, double y1, double x2, double y2, double r) {
@@ -3313,11 +3489,28 @@ void host_canvas_arc_to(int32_t id, double x1, double y1, double x2, double y2, 
   c->curX = CGPathGetCurrentPoint(c->path).x;
   c->curY = CGPathGetCurrentPoint(c->path).y;
   c->havePoint = 1;
+  canvas_hint_general(c);
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 void host_canvas_rect(int32_t id, double x, double y, double w, double h) {
   Canvas *c = canvas_at(id);
   if (!c) return;
+  if (c->path_fresh && c->hint == HINT_NONE) {
+    double rx = x, ry = y, rw = w, rh = h;
+    if (rw < 0) { rx += rw; rw = -rw; }
+    if (rh < 0) { ry += rh; rh = -rh; }
+    if (rw > 0 && rh > 0) {
+      c->hint = HINT_RECT;
+      c->hint_x = rx; c->hint_y = ry; c->hint_w = rw; c->hint_h = rh;
+      canvas_ctm(c, c->hint_m);
+    } else {
+      canvas_hint_general(c);
+    }
+  } else {
+    canvas_hint_general(c);
+  }
   CGMutablePathRef p = CGPathCreateMutable();
   CGPathAddRect(p, NULL, CGRectMake(x, y, w, h));
   canvas_add_path(c, p, 0);
@@ -3327,6 +3520,8 @@ void host_canvas_rect(int32_t id, double x, double y, double w, double h) {
   c->curX = p1.x;
   c->curY = p1.y;
   c->havePoint = 1;
+  c->path_fresh = 0;
+  c->path_moved = 0;
 }
 
 // --- Fill statistics (NATIVE_CANVAS_STATS=1) ------------------------------------------
@@ -3605,6 +3800,8 @@ void host_canvas_stroke(int32_t id) {
 void host_canvas_clip(int32_t id, int32_t rule) {
   Canvas *c = canvas_at(id);
   if (!c) return;
+  // The queued fills draw without a clip, so they land before this one begins.
+  canvas_gpu_sync(c);
   CGContextRef ctx = c->ctx;
   CGAffineTransform saved = CGContextGetCTM(ctx);
   context_set_ctm(ctx, CGAffineTransformIdentity);
@@ -3612,6 +3809,7 @@ void host_canvas_clip(int32_t id, int32_t rule) {
   if (rule != 0) CGContextEOClip(ctx);
   else CGContextClip(ctx);
   context_set_ctm(ctx, saved);
+  c->clip_depth++;
 }
 
 // --- Rects ------------------------------------------------------------------
@@ -3647,6 +3845,22 @@ void host_canvas_stroke_rect(int32_t id, double x, double y, double w, double h)
 void host_canvas_clear_rect(int32_t id, double x, double y, double w, double h) {
   Canvas *c = canvas_at(id);
   if (!c) return;
+  if (canvas_gpu_on() && c->gl == NULL && c->filterCount == 0 && c->clip_depth == 0 &&
+      c->gpu_count == 0) {
+    // A clear of the whole canvas with nothing queued starts the next batch from transparent, so
+    // the texture does not have to keep last frame's pixels.
+    CGAffineTransform m = CGContextGetCTM(c->ctx);
+    CGRect r = CGRectStandardize(CGRectApplyAffineTransform(CGRectMake(x, y, w, h), m));
+    if (r.origin.x <= 0 && r.origin.y <= 0 && r.origin.x + r.size.width >= c->w &&
+        r.origin.y + r.size.height >= c->h) {
+      c->gpu_cleared = 1;
+      c->gpu_dirty = 1;
+      c->gpu_unsynced = 0; // the clear throws away whatever the texture held
+      canvas_changed(c);
+      return;
+    }
+  }
+  canvas_gpu_sync(c);
   CGContextClearRect(c->ctx, CGRectMake(x, y, w, h));
   canvas_changed(c);
 }
@@ -3993,7 +4207,43 @@ static void canvas_do(Canvas *c, CanvasOp *op) {
   }
 }
 
+/** Queues a fill whose shape the sdf shaders can draw, and answers 1 when it did. */
+static int canvas_gpu_op(Canvas *c, CanvasOp *op) {
+  if (!canvas_gpu_ready(c)) return 0;
+  if ((c->fillColor & 255u) == 0) return 1; // a fully transparent fill draws nothing
+  if (op->kind == OP_FILL_RECT) {
+    double x = op->x, y = op->y, w = op->w, h = op->h;
+    if (w < 0) { x += w; w = -w; }
+    if (h < 0) { y += h; h = -h; }
+    if (!(w > 0) || !(h > 0)) return 1;
+    double m[6];
+    canvas_ctm(c, m);
+    canvas_gpu_push(c, CGPU_RECT, m, x, y, w, h);
+    return 1;
+  }
+  if (op->kind != OP_FILL) return 0;
+  if (c->hint == HINT_RECT) {
+    canvas_gpu_push(c, CGPU_RECT, c->hint_m, c->hint_x, c->hint_y, c->hint_w, c->hint_h);
+    return 1;
+  }
+  // One circle is one shape. A path of many circles is a single fill whose overlaps must not
+  // blend twice, which the shaders do not do yet, so it stays on the CPU.
+  if (c->hint == HINT_OVALS && c->circle_count == 1) {
+    double r = c->circles[0].r;
+    canvas_gpu_push(c, CGPU_OVAL, c->circles[0].m, c->circles[0].cx - r, c->circles[0].cy - r,
+                    2 * r, 2 * r);
+    return 1;
+  }
+  return 0;
+}
+
 static void canvas_op(Canvas *c, CanvasOp *op) {
+  if (canvas_gpu_op(c, op)) {
+    canvas_changed(c);
+    return;
+  }
+  // Anything the GPU can't draw needs the bitmap, which the queued fills have not reached.
+  canvas_gpu_sync(c);
   if (c->filterCount == 0) canvas_do(c, op);
   else canvas_filtered(c, op);
   canvas_changed(c);
@@ -4048,6 +4298,8 @@ void host_canvas_get_image_data(int32_t id, double sx, double sy, double sw, dou
   uint8_t *out = n ? calloc(n, 1) : NULL;
   Canvas *c = canvas_at(id);
   if (c && c->ctx && n) {
+    // The bitmap has to hold the fills the GPU drew before they are read.
+    canvas_gpu_sync(c);
     uint8_t *data = CGBitmapContextGetData(c->ctx);
     size_t rowBytes = CGBitmapContextGetBytesPerRow(c->ctx);
     long long x0 = (long long)floor(sx), y0 = (long long)floor(sy);
@@ -4093,6 +4345,7 @@ void host_canvas_draw_image(int32_t id, int32_t imageId, double dx, double dy, d
   Canvas *c = canvas_at(id);
   if (!c || !c->ctx) return;
   if (!(dw > 0) || !(dh > 0) || !(sw > 0) || !(sh > 0)) return;
+  canvas_gpu_sync(c);
   CGImageRef img = image_at(imageId);
   if (!img) return;
   CGContextSaveGState(c->ctx);
@@ -4120,6 +4373,8 @@ void host_canvas_draw_canvas(int32_t id, int32_t sourceId, double dx, double dy,
   Canvas *src = canvas_at(sourceId);
   if (!c || !c->ctx || !src || !src->ctx) return;
   if (!(dw > 0) || !(dh > 0) || !(sw > 0) || !(sh > 0)) return;
+  canvas_gpu_sync(src);
+  canvas_gpu_sync(c);
   CGContextFlush(src->ctx);
   CGImageRef img = src->image;
   int created = 0;
@@ -4145,6 +4400,7 @@ void host_canvas_draw_canvas(int32_t id, int32_t sourceId, double dx, double dy,
 void host_canvas_put_image_data(int32_t id, double dx, double dy, double w, double h, const uint8_t *b64b, size_t n) {
   Canvas *c = canvas_at(id);
   if (!c || !c->ctx) return;
+  canvas_gpu_sync(c);
   int iw = (int)w, ih = (int)h;
   if (iw <= 0 || ih <= 0) return;
   size_t want = (size_t)iw * (size_t)ih * 4;
@@ -6507,6 +6763,8 @@ static size_t replay_range(CGContextRef ctx, size_t i, ReplayState *st) {
       if (cv && cv->ctx) {
         // A WebGL canvas that presented into an IOSurface fills its bitmap from it first.
         gl_sync_bitmap(cv);
+        // Fills the page queued on the GPU come back into the bitmap the snapshot reads.
+        canvas_gpu_sync(cv);
         // The bitmap is snapshotted when the page paints, then cached until the canvas changes.
         if (!cv->image) cv->image = CGBitmapContextCreateImage(cv->ctx);
         // A slice of the bitmap is cut in its own pixels before the scale, as an image's is.
@@ -11771,6 +12029,124 @@ static uint64_t chunk_key(const CompWalkChunk *c, int own, const CompMatrix *ras
   return h == 0 ? 1 : h;
 }
 
+// --- GPU canvas: drawing a batch --------------------------------------------------------------
+
+/** Draws a batch on the CPU, for a canvas with no texture to draw into: a flat snapshot, or a
+ *  build with no Metal device. The same shapes, filled with CoreGraphics. */
+static void canvas_gpu_replay_cpu(Canvas *c) {
+  uint32_t color = c->fillColor;
+  double alpha = c->alpha;
+  for (int i = 0; i < c->gpu_count; i++) {
+    const CanvasGpuCmd *q = &c->gpu[i];
+    CGAffineTransform m = CGAffineTransformMake(q->m[0], q->m[1], q->m[2], q->m[3], q->m[4], q->m[5]);
+    CGMutablePathRef p = CGPathCreateMutable();
+    if (q->kind == CGPU_RECT) CGPathAddRect(p, NULL, CGRectMake(q->x, q->y, q->w, q->h));
+    else CGPathAddEllipseInRect(p, NULL, CGRectMake(q->x, q->y, q->w, q->h));
+    CGMutablePathRef device = CGPathCreateMutableCopyByTransformingPath(p, &m);
+    c->fillColor = q->color;
+    c->alpha = q->alpha;
+    CGContextSetAlpha(c->ctx, q->alpha);
+    canvas_fill_device(c, device, 0);
+    CGPathRelease(device);
+    CGPathRelease(p);
+  }
+  c->fillColor = color;
+  c->alpha = alpha;
+  CGContextSetAlpha(c->ctx, alpha);
+  c->gpu_count = 0;
+  c->gpu_cleared = 0;
+  c->gpu_dirty = 0;
+  c->gpu_unsynced = 0;
+}
+
+/** Draws the queued fills into a canvas texture. The target is the texture the last frame is not
+ *  using; the previous texture's pixels are copied in unless the batch started with a clear. The
+ *  bitmap is left as it was, so the canvas reads as stale until canvas_gpu_sync copies back. */
+static void canvas_gpu_flush(Canvas *c) {
+  if (!c->gpu_dirty) return;
+  // Nothing queued and no clear: the texture already holds what the batch drew.
+  if (c->gpu_count == 0 && !c->gpu_cleared) return;
+  CompBackend *b = c->backend;
+  if (b == NULL || c->tex[0] < 0 || c->tex[1] < 0) {
+    canvas_gpu_replay_cpu(c);
+    return;
+  }
+  int k = c->tex_cur < 0 ? 0 : 1 - c->tex_cur;
+  // The batch draws over the canvas as it stood: the texture the last frame sampled, when it
+  // holds draws the bitmap has not taken back; otherwise the bitmap, which a CPU operation has
+  // changed since the last batch.
+  int clear = c->gpu_cleared || c->tex_cur < 0;
+  int src = (!clear && c->gpu_unsynced) ? c->tex_cur : -1;
+  mt_tex_wait_idle(b, c->tex[k]);
+  if (!clear && src < 0 && c->ctx != NULL) {
+    const unsigned char *data = CGBitmapContextGetData(c->ctx);
+    if (data != NULL) mt_tex_upload_rgba(b, c->tex[k], data, CGBitmapContextGetBytesPerRow(c->ctx));
+    else clear = 1;
+  }
+  MtSdfShape *shapes = malloc((size_t)c->gpu_count * sizeof(MtSdfShape));
+  if (shapes == NULL) {
+    canvas_gpu_replay_cpu(c);
+    return;
+  }
+  for (int i = 0; i < c->gpu_count; i++) {
+    const CanvasGpuCmd *q = &c->gpu[i];
+    MtSdfShape *s = &shapes[i];
+    memset(s, 0, sizeof(*s));
+    // The recorded matrix takes a local point to CoreGraphics' y-up device space; the texture's
+    // first row is the top of the canvas, so y is flipped here.
+    s->m[0] = (float)q->m[0];
+    s->m[1] = (float)-q->m[1];
+    s->m[2] = (float)q->m[2];
+    s->m[3] = (float)-q->m[3];
+    s->origin[0] = (float)q->m[4];
+    s->origin[1] = (float)(c->h - q->m[5]);
+    s->origin[2] = (float)q->kind;
+    s->box[0] = (float)q->x;
+    s->box[1] = (float)q->y;
+    s->box[2] = (float)q->w;
+    s->box[3] = (float)q->h;
+    if (q->kind == CGPU_OVAL) {
+      s->radii[0] = (float)(q->w * 0.5);
+      s->radii[1] = (float)(q->h * 0.5);
+    }
+    double a = (double)(q->color & 255u) / 255.0 * q->alpha;
+    s->color[0] = (float)((double)((q->color >> 24) & 255u) / 255.0 * a);
+    s->color[1] = (float)((double)((q->color >> 16) & 255u) / 255.0 * a);
+    s->color[2] = (float)((double)((q->color >> 8) & 255u) / 255.0 * a);
+    s->color[3] = (float)a;
+  }
+  if (getenv("NATIVE_CANVAS_STATS") != NULL) {
+    fprintf(stderr, "native: canvas gpu shapes=%d clear=%d\n", c->gpu_count, c->gpu_cleared);
+  }
+  int ok = mt_canvas_batch(b, c->tex[k], src, clear, shapes, c->gpu_count, (int)c->w, (int)c->h);
+  free(shapes);
+  if (!ok) {
+    canvas_gpu_replay_cpu(c);
+    return;
+  }
+  c->tex_cur = k;
+  c->tex_gen = c->gen;
+  c->gpu_count = 0;
+  c->gpu_cleared = 0;
+  c->gpu_unsynced = 1;
+}
+
+/** Brings the bitmap up to date with the fills drawn on the GPU, so an operation that needs the
+ *  bitmap (text, an image, a filter, a read, a flat snapshot) sees them. */
+static void canvas_gpu_sync(Canvas *c) {
+  if (!c->gpu_dirty) return;
+  canvas_gpu_flush(c);
+  if (!c->gpu_dirty) return;
+  CompBackend *b = c->backend;
+  if (b != NULL && c->tex_cur >= 0 && c->tex_gen == c->gen) {
+    if (mt_tex_readback(b, c->tex[c->tex_cur], CGBitmapContextGetData(c->ctx),
+                        CGBitmapContextGetBytesPerRow(c->ctx))) {
+      c->gpu_dirty = 0;
+      c->gpu_unsynced = 0;
+    }
+  }
+}
+
 /** The texture an external chunk's canvas is drawn from, made current: a WebGL canvas's last
  *  IOSurface, or a 2D canvas's bitmap copied into a texture when it changed. Answers -1 when the
  *  canvas has none, and the chunk is rastered like any other. */
@@ -11811,6 +12187,11 @@ static int canvas_texture(CompBackend *b, const Cmd *cmd, CompRect *src, int *fl
       return -1;
     }
   }
+  // The textures are this backend's, so a later flush or readback uses it too.
+  cv->backend = b;
+  // Draws the fills the page queued straight into the texture, so the bitmap never has to hold
+  // them and no upload follows.
+  if (cv->gpu_dirty) canvas_gpu_flush(cv);
   if (cv->tex_cur < 0 || cv->tex_gen != cv->gen) {
     const unsigned char *data = CGBitmapContextGetData(cv->ctx);
     if (data == NULL) return -1;
