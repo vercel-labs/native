@@ -47,6 +47,9 @@ typedef struct {
   // The command draws a texture the host keeps up to date itself (a canvas's buffer): it is a
   // chunk of its own, which the host draws from that texture instead of rastering.
   int external;
+  // An effect whose filter shows the pixels behind it (a backdrop filter): what it draws depends
+  // on the frame around it, so a mask that holds one is not split.
+  int backdrop;
 } CompCmdView;
 
 /** How the walker reads a host's display list: the root is list -1, a layer its id. */
@@ -57,6 +60,13 @@ typedef struct {
 
 #define COMP_WALK_CLIPS 8
 #define COMP_WALK_STATES 128
+
+/** What a chunk is to a mask the walk split: its image, the content it masks, or neither. */
+typedef enum {
+  COMP_MASK_NONE = 0,   // not part of a mask
+  COMP_MASK_ALPHA = 1,  // paints the mask's image
+  COMP_MASK_CONTENT = 2,// the content the image masks
+} CompMaskRole;
 
 /** A clip a chunk sits inside: a device-space rect, rounded when `r` is above zero. */
 typedef struct {
@@ -83,6 +93,12 @@ typedef struct {
   double bx, by, bw, bh;
   int full; // a run whose commands move things the boxes don't describe: raster the whole frame
   int external; // one command the view marked external, which the host draws from its texture
+  // A chunk of a mask the walk split (comp_walk_mask_split): the role it plays in the mask, the
+  // mask's identity (the index of its push command in the list) and its device box, carried on
+  // every chunk of the group so a host can tell a group from its neighbour and size its surfaces.
+  int mask_role;
+  int mask_id;
+  CompRect mask_box;
 } CompWalkChunk;
 
 typedef struct {
@@ -102,6 +118,22 @@ int comp_walk(const CompCmdSource *src, void *ctx, double scale, CompWalk *walk)
  *  by its own commands, so an unchanged nested layer is kept while a sibling moves. A layer the
  *  walk can't express that way is one chunk, as comp_walk makes it. */
 int comp_walk_nested(const CompCmdSource *src, void *ctx, double scale, CompWalk *walk);
+
+/**
+ * Whether a nested walk splits a mask into the chunks that paint its image and the chunks that
+ * paint the content it masks, instead of collapsing the whole mask into one chunk (see
+ * CompMaskRole and CompWalkChunk's mask fields). Off by default, since a host that hasn't the
+ * means to composite the two groups itself must keep the mask whole; a host whose backend can
+ * draws the content onto a surface of the mask's box and composites it through the image. The
+ * environment's `NATIVE_MASK_SPLIT=1` turns it on, `NATIVE_MASK_SPLIT=0` off, and a host that
+ * knows its own backend sets it with comp_walk_set_mask_split.
+ */
+void comp_walk_set_mask_split(int on);
+int comp_walk_mask_split(void);
+
+/** How many masks one walk may split: past it a mask stays one chunk, which a host whose group
+ *  table is smaller can still draw. 8 by default. */
+void comp_walk_set_mask_max(int n);
 
 /**
  * The same walk, for a host that rasters a chunk by replaying its range of commands with every
