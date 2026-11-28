@@ -2,6 +2,7 @@
 // the event loop until it takes the `reftest-wait` class off the root element, as WPT's runner
 // does before it takes the screenshot.
 
+import { setClock } from "../animation.ts";
 import { document } from "../dom.ts";
 import { dispatchLoad, dispatchTestRendered, runFrameCallbacks, window } from "../window.ts";
 import { frame } from "./mount.ts";
@@ -31,6 +32,7 @@ export async function settlePage(): Promise<boolean> {
   dispatchLoad();
   // One task and one frame even without reftest-wait: a task the page scheduled at load has run by
   // the time a browser paints, and its change is in the snapshot.
+  setClock(performance.now());
   runFrameCallbacks(performance.now());
   frame();
   await nextTask();
@@ -40,13 +42,17 @@ export async function settlePage(): Promise<boolean> {
   const deadline = Date.now() + WAIT_LIMIT;
   let rounds = 0;
   while (root.classList.contains("reftest-wait") && rounds < MAX_ROUNDS && Date.now() < deadline) {
-    runFrameCallbacks(performance.now());
+    const t = performance.now();
+    setClock(t);
+    runFrameCallbacks(t);
     frame();
     await nextTask();
     rounds++;
   }
   // The final state's frame: the task that removed the class may also have changed the page.
-  runFrameCallbacks(performance.now());
+  const last = performance.now();
+  setClock(last);
+  runFrameCallbacks(last);
   frame();
   return !root.classList.contains("reftest-wait");
 }
