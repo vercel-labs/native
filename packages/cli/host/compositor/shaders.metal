@@ -55,23 +55,26 @@ fragment float4 quad_mask_fragment(VOut in [[stage_in]], texture2d<float> conten
   return c * a * u.params.x;
 }
 
-// A separable Gaussian blur: run it twice, once along x and once along y, with `flags.x/y` the
-// direction and `flags.z` the tap count, `params.w` the sigma in texels. It is the pass a blurred
-// line or a blurred backdrop runs on the GPU instead of three box passes over the CPU bitmap.
+// A separable box blur pass: `blur.x` picks the axis (0 across, 1 down), `blur.y` is the radius in
+// texels. Samples a texel exactly (nearest) and counts what falls outside the texture as
+// transparent black against the full width, which is what the replay's box passes do, so a chain
+// of three sizes on the GPU is the same blur the CPU rasterer makes.
 fragment float4 blur_fragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]],
                               constant Uniforms &u [[buffer(0)]]) {
-  constexpr sampler lin(coord::normalized, filter::linear, address::clamp_to_edge);
+  constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
   float2 texel = float2(1.0f / max(u.params.y, 1.0f), 1.0f / max(u.params.z, 1.0f));
   float2 dir = float2(1.0f - u.blur.x, u.blur.x);
-  float sigma = max(u.blur.z, 0.5f);
-  int taps = (int)u.blur.y;
-  if (taps < 1) return tex.sample(lin, in.uv);
+  int radius = (int)u.blur.y;
+  if (radius < 1) return tex.sample(s, in.uv);
+  int width = 2 * radius + 1;
   float4 sum = float4(0.0f);
-  float wsum = 0.0f;
-  for (int i = -taps; i <= taps; i++) {
-    float w = exp(-float(i * i) / (2.0f * sigma * sigma));
-    sum += tex.sample(lin, in.uv + dir * texel * float(i)) * w;
-    wsum += w;
+  for (int i = -radius; i <= radius; i++) {
+    float2 uv = in.uv + dir * texel * float(i);
+    if (uv.x < -0.5f * texel.x || uv.x > 1.0f + 0.5f * texel.x ||
+        uv.y < -0.5f * texel.y || uv.y > 1.0f + 0.5f * texel.y) {
+      continue;
+    }
+    sum += tex.sample(s, uv);
   }
-  return sum / wsum;
+  return sum / float(width);
 }

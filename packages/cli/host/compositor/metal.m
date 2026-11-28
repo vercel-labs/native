@@ -376,16 +376,64 @@ void mt_surface_end(CompBackend *backend) {
  */
 int mt_tex_blur(CompBackend *backend, id<MTLTexture> src, id<MTLTexture> tmp, id<MTLTexture> dst,
                 double sigma, int taps) {
+  (void)taps;
   if (backend == NULL) return 0;
   MtBackend *m = (__bridge MtBackend *)backend->impl;
   if (m == nil || m.blurPipeline == nil || src == nil || tmp == nil || dst == nil) return 0;
+  // The three box widths whose chain is the Gaussian of this sigma, picked the way the replay's
+  // rasterer picks them, so the GPU makes the same blur the CPU does rather than a true Gaussian
+  // of its own.
+  double ideal = sqrt((12.0 * sigma * sigma / 3.0) + 1.0);
+  int wl = (int)floor(ideal);
+  if (wl % 2 == 0) wl--;
+  if (wl < 1) wl = 1;
+  int wu = wl + 2;
+  double mIdeal = (12.0 * sigma * sigma - 3.0 * wl * wl - 12.0 * wl - 9.0) / (-4.0 * wl - 4.0);
+  int mI = (int)round(mIdeal);
   id<MTLCommandBuffer> cb = [m.queue commandBuffer];
   if (cb == nil) return 0;
-  for (int pass = 0; pass < 2; pass++) {
-    id<MTLTexture> from = pass == 0 ? src : tmp;
-    id<MTLTexture> to = pass == 0 ? tmp : dst;
+  int ran = 0;
+  for (int i = 0; i < 3; i++) {
+    int size = i < mI ? wl : wu;
+    int radius = (size - 1) / 2;
+    if (radius < 1) continue;
+    for (int pass = 0; pass < 2; pass++) {
+      id<MTLTexture> from = pass == 0 ? (ran == 0 ? src : dst) : tmp;
+      id<MTLTexture> to = pass == 0 ? tmp : dst;
+      MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+      rp.colorAttachments[0].texture = to;
+      rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+      rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+      rp.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+      id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+      if (enc == nil) return 0;
+      MTUniforms u;
+      memset(&u, 0, sizeof(u));
+      u.m[0] = 1.0f;
+      u.m[5] = 1.0f;
+      u.m[10] = 1.0f;
+      u.m[15] = 1.0f;
+      u.params[0] = 1.0f;
+      u.params[1] = (float)from.width;
+      u.params[2] = (float)from.height;
+      u.view[0] = (float)to.width;
+      u.view[1] = (float)to.height;
+      u.tint[0] = u.tint[1] = u.tint[2] = u.tint[3] = 1.0f;
+      u.blur[0] = pass == 0 ? 0.0f : 1.0f;
+      u.blur[1] = (float)radius;
+      [enc setRenderPipelineState:m.blurPipeline];
+      [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
+      [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
+      [enc setFragmentTexture:from atIndex:0];
+      [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+      [enc endEncoding];
+    }
+    ran = 1;
+  }
+  if (!ran) {
+    // A sigma too small for any box pass leaves the picture as it is, as the replay does.
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-    rp.colorAttachments[0].texture = to;
+    rp.colorAttachments[0].texture = dst;
     rp.colorAttachments[0].loadAction = MTLLoadActionClear;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     rp.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
@@ -398,18 +446,17 @@ int mt_tex_blur(CompBackend *backend, id<MTLTexture> src, id<MTLTexture> tmp, id
     u.m[10] = 1.0f;
     u.m[15] = 1.0f;
     u.params[0] = 1.0f;
-    u.params[1] = (float)from.width;
-    u.params[2] = (float)from.height;
-    u.view[0] = (float)to.width;
-    u.view[1] = (float)to.height;
+    u.params[1] = (float)src.width;
+    u.params[2] = (float)src.height;
+    u.view[0] = (float)dst.width;
+    u.view[1] = (float)dst.height;
     u.tint[0] = u.tint[1] = u.tint[2] = u.tint[3] = 1.0f;
-    u.blur[0] = pass == 0 ? 0.0f : 1.0f;
-    u.blur[1] = (float)taps;
-    u.blur[2] = (float)sigma;
+    u.blur[0] = 0.0f;
+    u.blur[1] = 0.0f;
     [enc setRenderPipelineState:m.blurPipeline];
     [enc setVertexBytes:&u length:sizeof(u) atIndex:0];
     [enc setFragmentBytes:&u length:sizeof(u) atIndex:0];
-    [enc setFragmentTexture:from atIndex:0];
+    [enc setFragmentTexture:src atIndex:0];
     [enc drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
     [enc endEncoding];
   }
