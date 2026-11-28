@@ -1001,7 +1001,8 @@ Native SDK supports a growing subset of the web platform. Anything outside it is
   `ready`, `registration.update()` and the browser's `updatefound`/`installing`/`waiting` shape (see [updates.md](updates.md)).
   The window's titlebar can be hidden, inset or transparent (`<meta name="native-window" content="titlebar=…">`,
   with `min-width`, `min-height` and `resizable=no`); `env(titlebar-area-x/-y/-width/-height)` and `env(safe-area-inset-top)`
-  give the area beside the traffic lights, and `app-region: drag`/`no-drag` (also `-webkit-app-region`) marks what drags the window;
+  give the area beside the traffic lights, `navigator.windowControlsOverlay` reports it as `visible` and
+  `getTitlebarAreaRect()` with `geometrychange` on a resize, and `app-region: drag`/`no-drag` (also `-webkit-app-region`) marks what drags the window;
   `env()` of any other name takes its fallback.
 - **Workers:** `new Worker(url, { type: "module" })`, where the URL is a source-relative
   `new URL("./worker.ts", import.meta.url)` or a page-relative path to a compiled module, starts a

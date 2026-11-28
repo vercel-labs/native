@@ -4786,29 +4786,153 @@ static BackdropImage *backdrop_find(int32_t serial, long bx, long by, long bw, l
   return NULL;
 }
 
-/** Draws a kept filtered backdrop where it came from, clipped to what the frame repaints. */
-static int backdrop_draw(Replay *r, BackdropImage *s) {
-  if (s->px == NULL) return 0;
-  cairo_surface_t *img = cairo_image_surface_create_for_data(s->px, CAIRO_FORMAT_ARGB32, (int)s->w,
-                                                             (int)s->h, (int)s->w * 4);
+/** Whether a rounded rect has any corner to cut. */
+static int radii_set(const double *r) {
+  if (r == NULL) return 0;
+  for (int k = 0; k < 8; k++) if (r[k] > 0) return 1;
+  return 0;
+}
+
+/** Adds a rounded rect to the current path, in the context's own space, y down: the corner order
+ *  is CSS's, top-left, top-right, bottom-right, bottom-left, horizontal radius then vertical. */
+static void add_round_path(cairo_t *cr, double x, double y, double w, double h, const double *r) {
+  if (w < 0) w = 0;
+  if (h < 0) h = 0;
+  double tlx = r[0] < 0 ? 0 : r[0], tly = r[1] < 0 ? 0 : r[1];
+  double trx = r[2] < 0 ? 0 : r[2], try_ = r[3] < 0 ? 0 : r[3];
+  double brx = r[4] < 0 ? 0 : r[4], bry = r[5] < 0 ? 0 : r[5];
+  double blx = r[6] < 0 ? 0 : r[6], bly = r[7] < 0 ? 0 : r[7];
+  if (tlx > w) tlx = w; if (trx > w) trx = w; if (brx > w) brx = w; if (blx > w) blx = w;
+  if (tly > h) tly = h; if (try_ > h) try_ = h; if (bry > h) bry = h; if (bly > h) bly = h;
+  static const double k = 0.5522847498307936;
+  cairo_new_path(cr);
+  cairo_move_to(cr, x + tlx, y);
+  cairo_line_to(cr, x + w - trx, y);
+  if (trx > 0 || try_ > 0) {
+    cairo_curve_to(cr, x + w - trx + k * trx, y, x + w, y + try_ - k * try_, x + w, y + try_);
+  }
+  cairo_line_to(cr, x + w, y + h - bry);
+  if (brx > 0 || bry > 0) {
+    cairo_curve_to(cr, x + w, y + h - bry + k * bry, x + w - brx + k * brx, y + h, x + w - brx, y + h);
+  }
+  cairo_line_to(cr, x + blx, y + h);
+  if (blx > 0 || bly > 0) {
+    cairo_curve_to(cr, x + blx - k * blx, y + h, x, y + h - bly + k * bly, x, y + h - bly);
+  }
+  cairo_line_to(cr, x, y + tly);
+  if (tlx > 0 || tly > 0) {
+    cairo_curve_to(cr, x, y + tly - k * tly, x + tlx - k * tlx, y, x + tlx, y);
+  }
+  cairo_close_path(cr);
+}
+
+/** Whether the replay's transform turns or skews the page, which a device-space rounded box
+ *  can't express: those keep the square rect. */
+static int replay_turns(const Replay *r) {
+  return fabs(r->base.xy) > 1e-6 || fabs(r->base.yx) > 1e-6;
+}
+
+/** Draws filtered backdrop pixels over the box they came from, in device pixels and clipped to
+ *  the box's border shape: a backdrop filter is cut by the element's border radius, so none of
+ *  it shows in the corners the element itself doesn't cover. */
+static void draw_backdrop_box(Replay *r, const unsigned char *px, long w, long h, size_t stride,
+                              long x, long y, const Cmd *clip, const double shape[4]) {
+  if (px == NULL || w <= 0 || h <= 0) return;
+  cairo_surface_t *img = cairo_image_surface_create_for_data((unsigned char *)px,
+                                                             CAIRO_FORMAT_ARGB32, (int)w, (int)h,
+                                                             (int)stride);
   if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
     cairo_surface_destroy(img);
-    return 0;
+    return;
   }
+  double scale = sqrt(fabs(r->base.xx * r->base.yy - r->base.xy * r->base.yx));
+  if (!(scale > 0)) scale = 1;
   cairo_save(r->cr);
   // Device pixels, so the image lands exactly where the filter cut it from whatever the page's
   // transform is; the context's clip keeps it inside the regions being repainted.
   cairo_identity_matrix(r->cr);
-  // The kept pixels are a copy of the box, edge to edge: a pixel-exact replace, no antialiased
-  // seam with the pixels around it.
-  cairo_set_antialias(r->cr, CAIRO_ANTIALIAS_NONE);
-  cairo_set_source_surface(r->cr, img, (double)s->x, (double)s->y);
+  if (clip != NULL && radii_set(clip->r) && shape != NULL && !replay_turns(r)) {
+    double rr[8];
+    for (int k = 0; k < 8; k++) rr[k] = clip->r[k] * scale;
+    add_round_path(r->cr, shape[0], shape[1], shape[2] - shape[0], shape[3] - shape[1], rr);
+    cairo_clip(r->cr);
+  } else {
+    // The kept pixels are a copy of the box, edge to edge: a pixel-exact replace, no antialiased
+    // seam with the pixels around it.
+    cairo_set_antialias(r->cr, CAIRO_ANTIALIAS_NONE);
+  }
+  cairo_set_source_surface(r->cr, img, (double)x, (double)y);
   cairo_set_operator(r->cr, CAIRO_OPERATOR_SOURCE);
-  cairo_rectangle(r->cr, (double)s->x, (double)s->y, (double)s->w, (double)s->h);
+  cairo_rectangle(r->cr, (double)x, (double)y, (double)w, (double)h);
   cairo_fill(r->cr);
   cairo_restore(r->cr);
   cairo_surface_destroy(img);
+}
+
+/** The box's border shape in device pixels, before the frame clips it: the effect box through the
+ *  replay's transform. */
+static void backdrop_shape_rect(const Replay *r, const Cmd *c, double shape[4]) {
+  double x0 = c->x, y0 = c->y, x1 = c->x + c->w, y1 = c->y + c->h;
+  cairo_matrix_transform_point(&r->base, &x0, &y0);
+  cairo_matrix_transform_point(&r->base, &x1, &y1);
+  // A mirroring transform (scaleX(-1) or scaleY(-1)) swaps the corners, and a path built without
+  // swapping them back has no area, which would drop the filter.
+  shape[0] = x0 < x1 ? x0 : x1;
+  shape[1] = y0 < y1 ? y0 : y1;
+  shape[2] = x0 < x1 ? x1 : x0;
+  shape[3] = y0 < y1 ? y1 : y0;
+}
+
+/** Draws a kept filtered backdrop where it came from, clipped to what the frame repaints. */
+static int backdrop_draw(Replay *r, BackdropImage *s, const Cmd *clip, const Cmd *eff) {
+  if (s->px == NULL) return 0;
+  double shape[4];
+  backdrop_shape_rect(r, eff, shape);
+  draw_backdrop_box(r, s->px, s->w, s->h, (size_t)s->w * 4, s->x, s->y, clip, shape);
   return 1;
+}
+
+/** The border radius the element an effect push belongs to paints its box with: the rounded clip
+ *  its background is painted under, in the effect's own range. NULL when the box has square
+ *  corners or the commands carry no rounded clip. */
+static const Cmd *effect_round_clip_list(const Cmd *cmds, size_t count, size_t first,
+                                         size_t last, const Cmd *eff, int layers);
+
+static const Cmd *effect_round_clip(size_t first, size_t last, const Cmd *eff) {
+  return effect_round_clip_list(g_list->cmds, g_list->count, first, last, eff, 1);
+}
+
+/** The same scan over a list the effect sits inside (a layer's own commands). A box with a layer of
+ *  its own (will-change: transform) paints its background, and the rounded clip under it, inside
+ *  that layer, so the shape is looked for there too. */
+static const Cmd *effect_round_clip_list(const Cmd *cmds, size_t count, size_t first, size_t last,
+                                         const Cmd *eff, int layers) {
+  int depth = 0;
+  for (size_t k = first; k < last && k < count; k++) {
+    const Cmd *q = &cmds[k];
+    if (q->kind == CMD_EFFECT_PUSH || q->kind == CMD_MASK_PUSH || q->kind == CMD_PERSPECTIVE_PUSH) {
+      depth++;
+      continue;
+    }
+    if (q->kind == CMD_EFFECT_POP || q->kind == CMD_MASK_POP || q->kind == CMD_PERSPECTIVE_POP) {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (q->kind == CMD_LAYER_REF && depth == 0 && layers && q->layer >= 0 && q->layer < g_layer_count) {
+      CmdList *inner = &g_layers[q->layer].list;
+      const Cmd *hit = effect_round_clip_list(inner->cmds, inner->count, 0, inner->count, eff, 0);
+      if (hit != NULL) return hit;
+      continue;
+    }
+    if (depth != 0) continue;
+    if (q->kind != CMD_CLIP_ROUND && q->kind != CMD_FILL_ROUND && q->kind != CMD_RING_ROUND) continue;
+    if (q->x < eff->x - 8 || q->y < eff->y - 8) continue;
+    if (q->x + q->w > eff->x + eff->w + 8 || q->y + q->h > eff->y + eff->h + 8) continue;
+    if (q->x > eff->x + 0.01 || q->y > eff->y + 0.01) continue;
+    if (q->x + q->w < eff->x + eff->w - 0.01 || q->y + q->h < eff->y + eff->h - 0.01) continue;
+    if (radii_set(q->r)) return q;
+  }
+  return NULL;
 }
 
 /** Keeps the filtered backdrop just written, for the frames that repaint only part of the box. */
@@ -4853,8 +4977,12 @@ static void backdrop_store(const Cmd *c, const unsigned char *base, size_t strid
  * the box (a negative backdrop count) — draws the result the last real filter left instead, so a
  * frame that repaints part of a blurred panel costs nothing to filter.
  */
-static void apply_backdrop(Replay *r, const Cmd *c, const EffectSpec *spec, double scale) {
+static void apply_backdrop(Replay *r, const Cmd *c, const EffectSpec *spec, double scale,
+                           const Cmd *clip) {
   if (!r->surface || spec->bcount == 0) return;
+  // The filter is part of the element's painting: an element faded to nothing paints nothing, and
+  // its backdrop filter must not leave the filtered backdrop behind.
+  if (!(spec->alpha > 0)) return;
   if (cairo_image_surface_get_format(r->surface) != CAIRO_FORMAT_ARGB32) return;
   int bcount = spec->bcount < 0 ? -spec->bcount : spec->bcount;
   int reuse = spec->bcount < 0;
@@ -4889,7 +5017,9 @@ static void apply_backdrop(Replay *r, const Cmd *c, const EffectSpec *spec, doub
   // the repainted regions get exactly the backdrop they would have filtered to.
   if (reuse) {
     BackdropImage *kept = backdrop_find(c->serial, bx, by, bw, bh, scale);
-    if (kept != NULL && backdrop_draw(r, kept)) return;
+    // The kept pixels are the clipped result, so drawing them back through the clip again would
+    // apply the shape's antialiasing twice.
+    if (kept != NULL && backdrop_draw(r, kept, NULL, c)) return;
   }
   // A blur samples past the box, and the backdrop beyond it isn't the box's to filter: the copy
   // is grown by however far the chain spreads and its edge pixels repeated into that margin.
@@ -4919,9 +5049,19 @@ static void apply_backdrop(Replay *r, const Cmd *c, const EffectSpec *spec, doub
     }
   }
   apply_filters(buf, (size_t)pw, (size_t)ph2, lstride, spec->bops, bcount, scale);
-  for (long y = 0; y < bh; y++) {
-    memcpy(base + (size_t)(mrow + y) * (size_t)stride + (size_t)bx * 4,
-           buf + (size_t)(y + pad) * lstride + (size_t)pad * 4, (size_t)bw * 4);
+  if (clip != NULL && radii_set(clip->r) && !replay_turns(r)) {
+    // The filter's result is the box, cut by the element's border shape: the backdrop in the
+    // corners the element itself doesn't paint stays as it was.
+    double shape[4];
+    backdrop_shape_rect(r, c, shape);
+    draw_backdrop_box(r, buf + (size_t)pad * lstride + (size_t)pad * 4, bw, bh, lstride,
+                      bx, by, clip, shape);
+    cairo_surface_flush(r->surface);
+  } else {
+    for (long y = 0; y < bh; y++) {
+      memcpy(base + (size_t)(mrow + y) * (size_t)stride + (size_t)bx * 4,
+             buf + (size_t)(y + pad) * lstride + (size_t)pad * 4, (size_t)bw * 4);
+    }
   }
   free(buf);
   backdrop_store(c, base, stride, bx, by, bw, bh, scale);
@@ -4989,7 +5129,10 @@ static size_t replay_effect(Replay *r, size_t i) {
     cairo_surface_mark_dirty(layer);
   }
   // What is behind the box is filtered in place before the layer paints over it.
-  if (spec.bcount != 0) apply_backdrop(r, c, &spec, scale);
+  if (spec.bcount != 0) {
+    // The box's own rounded clip, when it has one, is the shape the backdrop filter is cut by.
+    apply_backdrop(r, c, &spec, scale, effect_round_clip(i + 1, pop, c));
+  }
   cairo_destroy(lcr);
   cairo_save(r->cr);
   cairo_identity_matrix(r->cr);

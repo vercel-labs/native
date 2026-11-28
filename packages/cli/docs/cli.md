@@ -358,7 +358,8 @@ The same tag takes `min-width`, `min-height`, `resizable=no` and a `titlebar` st
 
 A page that draws into the titlebar lays out around the traffic lights with
 `env(titlebar-area-x)`, `env(titlebar-area-y)`, `env(titlebar-area-width)`, `env(titlebar-area-height)`
-and `env(safe-area-inset-top)`, and marks the areas that drag the window with `app-region: drag`
+and `env(safe-area-inset-top)`, reads the same area as `navigator.windowControlsOverlay.getTitlebarAreaRect()`
+(and hears `geometrychange` when a resize moves it), and marks the areas that drag the window with `app-region: drag`
 (`no-drag` keeps a control inside one clickable). Double-clicking a drag area zooms the window. These are the
 names the web's Window Controls Overlay uses:
 

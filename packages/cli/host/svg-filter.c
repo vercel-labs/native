@@ -104,16 +104,34 @@ static void from_working(uint8_t *px, int w, int h, int linear) {
 
 // --- Buffers -----------------------------------------------------------------
 
+/** Every surface one filter run makes shares this budget: a chain of up to 64 primitives each
+ *  holding a capture-sized result could otherwise ask for gigabytes from a small page. A run
+ *  that would exceed it stops, and the caller's pixels stay the source — the element paints
+ *  unfiltered — rather than a partial result. */
+#define SF_BUDGET_BYTES ((size_t)64 * 1024 * 1024)
+/** The largest a host canvas may be on either side; a bigger surface would be truncated. */
+#define SF_MAX_SIDE 16384
+
+static size_t g_budget_used = 0;
+
 static Buf buf_new(int w, int h) {
   Buf b;
   b.w = w;
   b.h = h;
-  b.px = (uint8_t *)calloc((size_t)w * (size_t)h * 4, 1);
+  b.px = NULL;
+  if (w <= 0 || h <= 0 || w > SF_MAX_SIDE || h > SF_MAX_SIDE) return b;
+  size_t bytes = (size_t)w * (size_t)h * 4;
+  if (bytes > SF_BUDGET_BYTES || g_budget_used > SF_BUDGET_BYTES - bytes) return b;
+  b.px = (uint8_t *)calloc(bytes, 1);
+  if (b.px != NULL) g_budget_used += bytes;
   return b;
 }
 
 static void buf_free(Buf *b) {
-  if (b->px) free(b->px);
+  if (b->px) {
+    free(b->px);
+    g_budget_used -= (size_t)b->w * (size_t)b->h * 4;
+  }
   b->px = NULL;
 }
 
@@ -153,9 +171,20 @@ static void clip_subregion(Buf *b, double x, double y, double w, double h) {
 
 // --- Blur --------------------------------------------------------------------
 
+/** How many values a box pass of width n can round: a sum of at most 255 * n bytes. */
+#define BOX_DIV_MAX 65536
+
+/** The pass's rounding, one entry per sum: (s + n / 2) / n, the same integer result a divide by n
+ *  gives, without a divide per pixel. */
+static void box_div_table(uint8_t *tbl, int n) {
+  int max = 255 * n;
+  if (max >= BOX_DIV_MAX) max = BOX_DIV_MAX - 1;
+  for (int s = 0; s <= max; s++) tbl[s] = (uint8_t)((s + n / 2) / n);
+}
+
 /** One box pass along a row (horizontal) or column, with the outside counting as transparent. */
-static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius, int horizontal) {
-  int n = radius * 2 + 1;
+static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius, int horizontal,
+                     const uint8_t *div) {
   if (horizontal) {
     for (int y = 0; y < h; y++) {
       const uint8_t *in = src + (size_t)y * (size_t)w * 4;
@@ -165,10 +194,10 @@ static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius,
         s0 += in[k * 4]; s1 += in[k * 4 + 1]; s2 += in[k * 4 + 2]; s3 += in[k * 4 + 3];
       }
       for (int x = 0; x < w; x++) {
-        out[x * 4] = (uint8_t)((s0 + n / 2) / n);
-        out[x * 4 + 1] = (uint8_t)((s1 + n / 2) / n);
-        out[x * 4 + 2] = (uint8_t)((s2 + n / 2) / n);
-        out[x * 4 + 3] = (uint8_t)((s3 + n / 2) / n);
+        out[x * 4] = div[s0];
+        out[x * 4 + 1] = div[s1];
+        out[x * 4 + 2] = div[s2];
+        out[x * 4 + 3] = div[s3];
         int drop = x - radius, add = x + radius + 1;
         if (drop >= 0 && drop < w) {
           s0 -= in[drop * 4]; s1 -= in[drop * 4 + 1]; s2 -= in[drop * 4 + 2]; s3 -= in[drop * 4 + 3];
@@ -180,27 +209,41 @@ static void box_pass(const uint8_t *src, uint8_t *dst, int w, int h, int radius,
     }
     return;
   }
+  // Columns go in blocks that fill whole cache lines, so a block's row is read once and the sums
+  // stay in registers: each column's arithmetic is the one a column-at-a-time pass has, in the
+  // same order, so the bytes are the same.
+  enum { BOX_BLOCK = 16 };
   size_t stride = (size_t)w * 4;
-  for (int x = 0; x < w; x++) {
-    int s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+  for (int xb = 0; xb < w; xb += BOX_BLOCK) {
+    int nc = w - xb < BOX_BLOCK ? w - xb : BOX_BLOCK;
+    int s0[BOX_BLOCK], s1[BOX_BLOCK], s2[BOX_BLOCK], s3[BOX_BLOCK];
+    for (int c = 0; c < nc; c++) { s0[c] = s1[c] = s2[c] = s3[c] = 0; }
     for (int k = 0; k <= radius && k < h; k++) {
-      const uint8_t *p = src + (size_t)k * stride + (size_t)x * 4;
-      s0 += p[0]; s1 += p[1]; s2 += p[2]; s3 += p[3];
+      const uint8_t *p = src + (size_t)k * stride + (size_t)xb * 4;
+      for (int c = 0; c < nc; c++) {
+        s0[c] += p[c * 4]; s1[c] += p[c * 4 + 1]; s2[c] += p[c * 4 + 2]; s3[c] += p[c * 4 + 3];
+      }
     }
     for (int y = 0; y < h; y++) {
-      uint8_t *out = dst + (size_t)y * stride + (size_t)x * 4;
-      out[0] = (uint8_t)((s0 + n / 2) / n);
-      out[1] = (uint8_t)((s1 + n / 2) / n);
-      out[2] = (uint8_t)((s2 + n / 2) / n);
-      out[3] = (uint8_t)((s3 + n / 2) / n);
+      uint8_t *out = dst + (size_t)y * stride + (size_t)xb * 4;
+      for (int c = 0; c < nc; c++) {
+        out[c * 4] = div[s0[c]];
+        out[c * 4 + 1] = div[s1[c]];
+        out[c * 4 + 2] = div[s2[c]];
+        out[c * 4 + 3] = div[s3[c]];
+      }
       int drop = y - radius, add = y + radius + 1;
       if (drop >= 0 && drop < h) {
-        const uint8_t *p = src + (size_t)drop * stride + (size_t)x * 4;
-        s0 -= p[0]; s1 -= p[1]; s2 -= p[2]; s3 -= p[3];
+        const uint8_t *p = src + (size_t)drop * stride + (size_t)xb * 4;
+        for (int c = 0; c < nc; c++) {
+          s0[c] -= p[c * 4]; s1[c] -= p[c * 4 + 1]; s2[c] -= p[c * 4 + 2]; s3[c] -= p[c * 4 + 3];
+        }
       }
       if (add >= 0 && add < h) {
-        const uint8_t *p = src + (size_t)add * stride + (size_t)x * 4;
-        s0 += p[0]; s1 += p[1]; s2 += p[2]; s3 += p[3];
+        const uint8_t *p = src + (size_t)add * stride + (size_t)xb * 4;
+        for (int c = 0; c < nc; c++) {
+          s0[c] += p[c * 4]; s1[c] += p[c * 4 + 1]; s2[c] += p[c * 4 + 2]; s3[c] += p[c * 4 + 3];
+        }
       }
     }
   }
@@ -223,16 +266,32 @@ static void blur_axis(uint8_t *px, int w, int h, double sigma, int horizontal) {
   int sizes[3];
   for (int i = 0; i < 3; i++) sizes[i] = i < m ? wl : wu;
   size_t n = (size_t)w * (size_t)h * 4;
-  uint8_t *tmp = (uint8_t *)malloc(n);
-  if (!tmp) return;
+  uint8_t *a = (uint8_t *)malloc(n);
+  uint8_t *b = (uint8_t *)malloc(n);
+  uint8_t *div = (uint8_t *)malloc(BOX_DIV_MAX);
+  if (!a || !b || !div) {
+    free(a);
+    free(b);
+    free(div);
+    return;
+  }
+  // Passes read the one before, so two buffers trade places and nothing is copied between them.
+  uint8_t *cur = px;
+  int slot = 0;
   for (int pass = 0; pass < 3; pass++) {
     int radius = (sizes[pass] - 1) / 2;
     if (radius < 1) continue;
     if (radius > 128) radius = 128;
-    box_pass(px, tmp, w, h, radius, horizontal);
-    memcpy(px, tmp, n);
+    box_div_table(div, radius * 2 + 1);
+    uint8_t *dst = slot == 0 ? a : b;
+    slot = slot == 0 ? 1 : 0;
+    box_pass(cur, dst, w, h, radius, horizontal, div);
+    cur = dst;
   }
-  free(tmp);
+  if (cur != px) memcpy(px, cur, n);
+  free(a);
+  free(b);
+  free(div);
 }
 
 static void blur_buf(Buf *b, double sigmaX, double sigmaY) {
@@ -433,6 +492,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
   memcpy(text, def, n);
   text[n] = 0;
 
+  g_budget_used = 0;
   Buf source = {rgba, w, h};
   Buf alpha = buf_new(w, h);
   size_t px = (size_t)w * (size_t)h;
@@ -453,6 +513,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
 
   Buf results[SF_MAX_OPS];
   int count = 0;
+  int failed = 0;
   const char *p = text;
 
   while (*p && count < SF_MAX_OPS) {
@@ -463,7 +524,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
     Buf out = buf_new(w, h);
     Buf *in1 = NULL, *in2 = NULL;
     int ok = out.px != NULL;
-    if (!ok) break;
+    if (!ok) { failed = 1; break; }
 
     if (kind == 't') { // pass-through
       int idx = (int)snum(&p);
@@ -548,8 +609,9 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
     count++;
   }
 
-  // The last primitive's output is the filter's result.
-  if (count > 0 && results[count - 1].px) {
+  // The last primitive's output is the filter's result; a chain that ran out of budget leaves
+  // the source as it was (still in working space here, converted back below).
+  if (!failed && count > 0 && results[count - 1].px) {
     memcpy(rgba, results[count - 1].px, (size_t)w * (size_t)h * 4);
   }
   for (int i = 0; i < count; i++) buf_free(&results[i]);

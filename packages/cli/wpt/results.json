@@ -110197,8 +110197,7 @@
   {
    "path": "css/css-variables/variable-exponential-blowup.html",
    "kind": "testharness",
-   "status": "crash",
-   "reason": "CRASH scriptc: out of memory"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-external-declaration-01.html",

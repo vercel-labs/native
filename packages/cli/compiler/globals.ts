@@ -366,6 +366,16 @@ export const GLOBALS: { file: string; values: string[]; types: string[] }[] = [
     ],
   },
   {
+    file: "window-controls.ts",
+    values: [
+      "WindowControlsOverlay",
+      "WindowControlsOverlayGeometryChangeEvent",
+    ],
+    types: [
+      "WindowControlsOverlayGeometryChangeEventInit",
+    ],
+  },
+  {
     file: "storage.ts",
     values: [
       "localStorage",

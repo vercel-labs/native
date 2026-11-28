@@ -14,6 +14,7 @@
 
 #include "backend.h"
 #include "metal.h"
+#include "shader_manifest.h"
 
 // A quad's uniform block. It must match the shader's `Uniforms` byte for byte.
 typedef struct {
@@ -49,6 +50,10 @@ typedef struct {
 @interface MtBackend : NSObject
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
+// Every pipeline shader_manifest.h names, in the manifest's order, built with the same
+// descriptors the build captured.
+@property(nonatomic, strong) NSMutableArray<id<MTLRenderPipelineState>> *pipelines;
+// The manifest's "quad" pipeline, the one every layer draws with.
 @property(nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> maskPipeline;
 @property(nonatomic, strong) id<MTLTexture> white;
@@ -895,62 +900,33 @@ static CompBackend *mt_backend_with_layer(void *layer) {
       return NULL;
     }
   }
-  // A library the build captured holds only the functions the pipeline it captured used: the
-  // mask pass is compiled from the source when the library has no such function, so the app never
-  // runs a pipeline that draws nothing.
-  if (library != nil && [library newFunctionWithName:@"quad_mask_fragment"] == nil) {
-    NSError *sourceError = nil;
-    id<MTLLibrary> full = [device newLibraryWithSource:[NSString stringWithUTF8String:native_quad_shader_source]
-                                               options:nil
-                                                 error:&sourceError];
-    if (full != nil) {
-      library = full;
-    } else {
-      fprintf(stderr, "native: the compositor's Metal shaders did not compile: %s\n",
-              sourceError == nil ? "unknown error" : [[sourceError description] UTF8String]);
+  // Every pipeline the manifest names, from the descriptors the build captured: a captured
+  // library holds every function the shaders declare, so the mask pass's function is there too.
+  // The textures hold premultiplied alpha, so a quad's source is taken as it is.
+  m.pipelines = [NSMutableArray arrayWithCapacity:NATIVE_SHADER_PIPELINE_COUNT];
+  for (size_t i = 0; i < NATIVE_SHADER_PIPELINE_COUNT; i++) {
+    MTLRenderPipelineDescriptor *pd = native_shader_descriptor(library, &kNativeShaderPipelines[i]);
+    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (state == nil) {
+      fprintf(stderr, "native: the compositor's %s Metal pipeline did not build: %s\n",
+              kNativeShaderPipelines[i].name,
+              error == nil ? "unknown error" : [[error description] UTF8String]);
+      return NULL;
     }
+    [m.pipelines addObject:state];
   }
-  MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
-  pd.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
-  pd.fragmentFunction = [library newFunctionWithName:@"quad_fragment"];
-  MTLRenderPipelineColorAttachmentDescriptor *att = pd.colorAttachments[0];
-  att.pixelFormat = MTLPixelFormatBGRA8Unorm;
-  // The textures hold premultiplied alpha, so the source is taken as it is.
-  att.blendingEnabled = YES;
-  att.rgbBlendOperation = MTLBlendOperationAdd;
-  att.alphaBlendOperation = MTLBlendOperationAdd;
-  att.sourceRGBBlendFactor = MTLBlendFactorOne;
-  att.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-  att.sourceAlphaBlendFactor = MTLBlendFactorOne;
-  att.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-  m.quadPipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
-  if (m.quadPipeline == nil) {
-    fprintf(stderr, "native: the compositor's Metal pipeline did not build: %s\n",
-            error == nil ? "unknown error" : [[error description] UTF8String]);
+  int quad = native_shader_pipeline_index("quad");
+  if (quad < 0) {
+    fprintf(stderr, "native: shader_manifest.h has no quad pipeline\n");
     return NULL;
   }
-  MTLRenderPipelineDescriptor *md = [[MTLRenderPipelineDescriptor alloc] init];
-  md.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
-  md.fragmentFunction = [library newFunctionWithName:@"quad_mask_fragment"];
-  if (md.fragmentFunction == nil) {
-    fprintf(stderr, "native: the Metal shaders have no quad_mask_fragment\n");
+  m.quadPipeline = m.pipelines[(NSUInteger)quad];
+  int mask = native_shader_pipeline_index("mask");
+  if (mask < 0) {
+    fprintf(stderr, "native: shader_manifest.h has no mask pipeline\n");
+    return NULL;
   }
-  MTLRenderPipelineColorAttachmentDescriptor *matt = md.colorAttachments[0];
-  matt.pixelFormat = MTLPixelFormatBGRA8Unorm;
-  // The content is premultiplied and the mask has cut it already, so it blends as a quad does.
-  matt.blendingEnabled = YES;
-  matt.rgbBlendOperation = MTLBlendOperationAdd;
-  matt.alphaBlendOperation = MTLBlendOperationAdd;
-  matt.sourceRGBBlendFactor = MTLBlendFactorOne;
-  matt.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-  matt.sourceAlphaBlendFactor = MTLBlendFactorOne;
-  matt.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-  m.maskPipeline = [device newRenderPipelineStateWithDescriptor:md error:&error];
-  if (m.maskPipeline == nil) {
-    // A mask the walk split falls back to the whole-mask path; the frame is still drawn.
-    fprintf(stderr, "native: the compositor's Metal mask pipeline did not build: %s\n",
-            error == nil ? "unknown error" : [[error description] UTF8String]);
-  }
+  m.maskPipeline = m.pipelines[(NSUInteger)mask];
   m.textures = [NSMutableArray array];
   m.freeSlots = [NSMutableIndexSet indexSet];
   id<MTLTexture> white = mt_make_texture(m, 1, 1, MTLTextureUsageShaderRead);

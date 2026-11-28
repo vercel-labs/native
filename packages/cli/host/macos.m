@@ -6688,31 +6688,103 @@ static BackdropImage *backdrop_find(int32_t serial, long bx, long by, long bw, l
   return NULL;
 }
 
-/** Draws a kept filtered backdrop where it came from, clipped to what the frame repaints. */
-static int backdrop_draw(CGContextRef ctx, BackdropImage *s) {
-  if (s->px == NULL) return 0;
+/** Whether a rounded rect has any corner to cut. */
+static int radii_set(const double *r) {
+  if (r == NULL) return 0;
+  for (int k = 0; k < 8; k++) if (r[k] > 0) return 1;
+  return 0;
+}
+
+/** The border shape an effect's box paints under, in device pixels: the element's border box
+ *  rounded like its background, through the transform that box sits in. NULL for a square box. */
+static CGPathRef backdrop_shape(const Cmd *c, const Cmd *clip, CGAffineTransform m) {
+  if (clip == NULL || !radii_set(clip->r)) return NULL;
+  CGPathRef p = round_path(c->x, c->y, c->w, c->h, clip->r);
+  CGPathRef out = CGPathCreateCopyByTransformingPath(p, &m);
+  CGPathRelease(p);
+  return out;
+}
+
+/** Draws filtered backdrop pixels over the box they came from, in device pixels and clipped to
+ *  the box's border shape: a backdrop filter is cut by the element's border radius, so none of
+ *  it shows in the corners the element itself doesn't cover. */
+static void draw_backdrop_box(CGContextRef ctx, const unsigned char *px, long w, long h,
+                              size_t stride, long x, long y, CGPathRef shape) {
+  if (px == NULL || w <= 0 || h <= 0) return;
   CGColorSpaceRef cs = CGBitmapContextGetColorSpace(ctx);
-  if (cs == NULL) return 0;
+  if (cs == NULL) return;
   CGBitmapInfo info = CGBitmapContextGetBitmapInfo(ctx);
-  CGDataProviderRef prov = CGDataProviderCreateWithData(NULL, s->px, (size_t)(s->w * s->h * 4), NULL);
-  if (prov == NULL) return 0;
-  CGImageRef img = CGImageCreate((size_t)s->w, (size_t)s->h, 8, 32, (size_t)s->w * 4, cs, info, prov, NULL,
+  CGDataProviderRef prov = CGDataProviderCreateWithData(NULL, px, (size_t)h * stride, NULL);
+  if (prov == NULL) return;
+  CGImageRef img = CGImageCreate((size_t)w, (size_t)h, 8, 32, stride, cs, info, prov, NULL,
                                  false, kCGRenderingIntentDefault);
   CGDataProviderRelease(prov);
-  if (img == NULL) return 0;
+  if (img == NULL) return;
   CGContextSaveGState(ctx);
   // Device pixels, so the image lands exactly where the filter cut it from whatever the page's
   // transform is; the context's clip keeps it inside the regions being repainted.
   CGContextConcatCTM(ctx, CGAffineTransformInvert(CGContextGetCTM(ctx)));
-  // The kept pixels are what the filter wrote over the backdrop: replace, don't blend, and don't
+  if (shape != NULL) {
+    CGContextSetShouldAntialias(ctx, true);
+    CGContextAddPath(ctx, shape);
+    CGContextClip(ctx);
+  }
+  // The pixels are what the filter wrote over the backdrop: replace, don't blend, and don't
   // resample — they land on the pixels they came from.
   CGContextSetBlendMode(ctx, kCGBlendModeCopy);
   CGContextSetInterpolationQuality(ctx, kCGInterpolationNone);
   CGContextSetShouldAntialias(ctx, false);
-  CGContextDrawImage(ctx, CGRectMake(s->x, s->y, s->w, s->h), img);
+  CGContextDrawImage(ctx, CGRectMake((double)x, (double)y, (double)w, (double)h), img);
   CGContextRestoreGState(ctx);
   CGImageRelease(img);
+}
+
+/** Draws a kept filtered backdrop where it came from, clipped to what the frame repaints. */
+static int backdrop_draw(CGContextRef ctx, BackdropImage *s, CGPathRef shape) {
+  if (s->px == NULL) return 0;
+  draw_backdrop_box(ctx, s->px, s->w, s->h, (size_t)s->w * 4, s->x, s->y, shape);
   return 1;
+}
+
+/** The border radius the element an effect push belongs to paints its box with: the rounded clip
+ *  its background is painted under, in the effect's own range. NULL when the box has square corners
+ *  or the commands carry no rounded clip. */
+static const Cmd *effect_round_clip_list(const Cmd *cmds, size_t count, size_t first, size_t last,
+                                         const Cmd *eff, int layers);
+
+static const Cmd *effect_round_clip(size_t first, size_t last, const Cmd *eff) {
+  return effect_round_clip_list(g_list->cmds, g_list->count, first, last, eff, 1);
+}
+
+/** The same scan over a list the effect sits inside (a layer's own commands). */
+static const Cmd *effect_round_clip_list(const Cmd *cmds, size_t count, size_t first, size_t last,
+                                         const Cmd *eff, int layers) {
+  int depth = 0;
+  for (size_t k = first; k < last && k < count; k++) {
+    const Cmd *q = &cmds[k];
+    if (q->kind == CMD_EFFECT_PUSH || q->kind == CMD_MASK_PUSH || q->kind == CMD_PERSPECTIVE_PUSH) {
+      depth++;
+      continue;
+    }
+    if (q->kind == CMD_EFFECT_POP || q->kind == CMD_MASK_POP || q->kind == CMD_PERSPECTIVE_POP) {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (q->kind == CMD_LAYER_REF && depth == 0 && layers && q->layer >= 0 && q->layer < g_layer_count) {
+      CmdList *inner = &g_layers[q->layer].list;
+      const Cmd *hit = effect_round_clip_list(inner->cmds, inner->count, 0, inner->count, eff, 0);
+      if (hit != NULL) return hit;
+      continue;
+    }
+    if (depth != 0) continue;
+    if (q->kind != CMD_CLIP_ROUND && q->kind != CMD_FILL_ROUND && q->kind != CMD_RING_ROUND) continue;
+    if (q->x < eff->x - 8 || q->y < eff->y - 8) continue;
+    if (q->x + q->w > eff->x + eff->w + 8 || q->y + q->h > eff->y + eff->h + 8) continue;
+    if (q->x > eff->x + 0.01 || q->y > eff->y + 0.01) continue;
+    if (q->x + q->w < eff->x + eff->w - 0.01 || q->y + q->h < eff->y + eff->h - 0.01) continue;
+    if (radii_set(q->r)) return q;
+  }
+  return NULL;
 }
 
 /** Keeps the filtered backdrop just written, for the frames that repaint only part of the box. */
@@ -6759,9 +6831,13 @@ static void backdrop_store(const Cmd *c, const unsigned char *base, size_t strid
  * the box (a negative backdrop count) — draws the result the last real filter left instead, so a
  * frame that repaints part of a blurred panel costs nothing to filter.
  */
-static void apply_backdrop(CGContextRef ctx, const Cmd *c, const EffectSpec *spec, double scale) {
+static void apply_backdrop(CGContextRef ctx, const Cmd *c, const EffectSpec *spec, double scale,
+                           const Cmd *clip) {
   unsigned char *base = CGBitmapContextGetData(ctx);
   if (!base || spec->bcount == 0) return;
+  // The filter is part of the element's painting: an element faded to nothing paints nothing, and
+  // its backdrop filter must not leave the filtered backdrop behind.
+  if (!(spec->alpha > 0)) return;
   int bcount = spec->bcount < 0 ? -spec->bcount : spec->bcount;
   int reuse = spec->bcount < 0 || g_reuse_backdrops;
   if (g_layer_images_on || g_reference_paint) reuse = 0;
@@ -6791,11 +6867,18 @@ static void apply_backdrop(CGContextRef ctx, const Cmd *c, const EffectSpec *spe
   // the device rect's top edge is the memory row fh - (by + bh).
   long mrow = (long)fh - (by + bh);
   if (mrow < 0) mrow = 0;
+  // The shape the box paints under, in the same device pixels the box was measured in.
+  CGPathRef shape = backdrop_shape(c, clip, m);
   // A frame that left the pixels behind the box alone draws the result the last real filter kept:
   // the repainted regions get exactly the backdrop they would have filtered to.
   if (reuse) {
     BackdropImage *kept = backdrop_find(c->serial, bx, by, bw, bh, scale);
-    if (kept != NULL && backdrop_draw(ctx, kept)) return;
+    // The kept pixels are the clipped result: their edge already carries the shape's coverage, so
+    // drawing them back through the same clip would apply the antialiasing a second time.
+    if (kept != NULL && backdrop_draw(ctx, kept, NULL)) {
+      if (shape != NULL) CGPathRelease(shape);
+      return;
+    }
   }
   // A blur samples past the box, and the backdrop beyond it isn't the box's to filter: the copy
   // is grown by however far the chain spreads and its edge pixels repeated into that margin, so
@@ -6813,7 +6896,10 @@ static void apply_backdrop(CGContextRef ctx, const Cmd *c, const EffectSpec *spe
   if ((double)pw * ph2 > 16.0 * 1024 * 1024) { pad = 0; pw = bw; ph2 = bh; }
   size_t lstride = (size_t)pw * 4;
   unsigned char *buf = malloc((size_t)ph2 * lstride);
-  if (!buf) return;
+  if (!buf) {
+    if (shape != NULL) CGPathRelease(shape);
+    return;
+  }
   for (long y = 0; y < ph2; y++) {
     long sy = y - pad;
     if (sy < 0) sy = 0;
@@ -6833,9 +6919,17 @@ static void apply_backdrop(CGContextRef ctx, const Cmd *c, const EffectSpec *spe
   b.h = (size_t)ph2;
   b.stride = lstride;
   apply_filters(&b, spec->bops, bcount, scale);
-  for (long y = 0; y < bh; y++) {
-    memcpy(base + (size_t)(mrow + y) * fstride + (size_t)bx * 4,
-      buf + (size_t)(y + pad) * lstride + (size_t)pad * 4, (size_t)bw * 4);
+  if (shape != NULL) {
+    // The filter's result is the box, cut by the element's border shape: the backdrop in the
+    // corners the element itself doesn't paint stays as it was.
+    draw_backdrop_box(ctx, buf + (size_t)pad * lstride + (size_t)pad * 4, bw, bh, lstride,
+                      bx, by, shape);
+    CGPathRelease(shape);
+  } else {
+    for (long y = 0; y < bh; y++) {
+      memcpy(base + (size_t)(mrow + y) * fstride + (size_t)bx * 4,
+        buf + (size_t)(y + pad) * lstride + (size_t)pad * 4, (size_t)bw * 4);
+    }
   }
   free(buf);
   if (!g_layer_images_on) backdrop_store(c, base, fstride, bx, by, mrow, bw, bh, scale);
@@ -6953,7 +7047,10 @@ static size_t replay_effect(CGContextRef ctx, size_t i) {
   b.stride = CGBitmapContextGetBytesPerRow(bctx);
   if (b.px && spec.count > 0) apply_filters(&b, spec.ops, spec.count, scale);
   // What is behind the box is filtered in place before the layer paints over it.
-  if (spec.bcount != 0) apply_backdrop(ctx, c, &spec, scale);
+  if (spec.bcount != 0) {
+    // The box's own rounded clip, when it has one, is the shape the backdrop filter is cut by.
+    apply_backdrop(ctx, c, &spec, scale, effect_round_clip(i + 1, pop, c));
+  }
   CGImageRef img = CGBitmapContextCreateImage(bctx);
   CGContextRelease(bctx);
   if (img) {
