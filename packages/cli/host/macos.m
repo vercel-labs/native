@@ -3118,16 +3118,24 @@ void host_canvas_begin_path(int32_t id) {
   c->havePoint = 0;
 }
 
-// A transform maps circles to circles when it is a rotation, a uniform scale, a flip or a
-// combination: equal lengths of the two axes with no skew between them.
-static int canvas_similarity(CGAffineTransform m, double *scale) {
+// A circle of user-space radius r, drawn under m, comes out as an ellipse whose semi-axes are
+// r times the transform's two singular values. It may be kept as a circle only when the longer
+// axis minus the shorter is under 1/255 of a pixel at that radius, so the two shapes cannot
+// differ by a visible coverage level. The returned radius uses the longer axis, which covers
+// the ellipse for the group boxes (they decide which circles share a fill, and a box that
+// covers its shape can only group shapes together, never apart).
+static int canvas_circle_transform(CGAffineTransform m, double r, double *radius) {
   double a2 = m.a * m.a + m.b * m.b, c2 = m.c * m.c + m.d * m.d;
   double dot = m.a * m.c + m.b * m.d;
-  double tol = 1e-9 * (a2 + c2 + 1);
-  if (fabs(a2 - c2) > tol || fabs(dot) > tol) return 0;
-  double s = sqrt(a2);
-  if (!(s > 0)) return 0;
-  *scale = s;
+  double half = (a2 - c2) / 2;
+  double mid = (a2 + c2) / 2;
+  double spread = sqrt(half * half + dot * dot);
+  double long2 = mid + spread;
+  double short2 = mid - spread > 0 ? mid - spread : 0;
+  if (!(long2 > 0)) return 0;
+  double longer = sqrt(long2), shorter = sqrt(short2);
+  if ((longer - shorter) * r > 1.0 / 255.0) return 0;
+  *radius = r * longer;
   return 1;
 }
 
@@ -3235,12 +3243,12 @@ void host_canvas_arc(int32_t id, double cx, double cy, double r, double start, d
   Canvas *c = canvas_at(id);
   if (!c || !(r >= 0)) return;
   // A full circle is kept in the circle list for the fill path, provided the segment adds no
-  // other geometry: the transform keeps circles circular, and the arc starts where the path
-  // already is (or opens the path).
+  // other geometry, the transform leaves it circular to within the pixel gate, and the arc
+  // starts where the path already is (or opens the path).
   int full = fabs(fabs(end - start) - 2 * M_PI) < 1e-6;
-  double scale = 1;
+  double radius = 0;
   CGAffineTransform m = CGContextGetCTM(c->ctx);
-  if (full && r > 0 && canvas_similarity(m, &scale)) {
+  if (full && r > 0 && canvas_circle_transform(m, r, &radius)) {
     CGPoint sp = canvas_point(c, cx + r * cos(start), cy + r * sin(start));
     CGPoint cp = canvas_point(c, cx, cy);
     if (!c->havePoint || (fabs(sp.x - c->curX) < 1e-6 && fabs(sp.y - c->curY) < 1e-6)) {
@@ -3251,7 +3259,7 @@ void host_canvas_arc(int32_t id, double cx, double cy, double r, double start, d
       Circle circle = {0};
       circle.cx = cp.x;
       circle.cy = cp.y;
-      circle.r = r * scale;
+      circle.r = radius;
       int hadElements = canvas_read_circle(d, &circle);
       canvas_add_path(c, p, 1);
       CGPathRelease(p);
