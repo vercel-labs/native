@@ -1,6 +1,6 @@
 // Compiled app tables, mounting them as a DOM, and the style/layout/paint frame pipeline.
 
-import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, resetInput, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, type Listener, type Event } from "../dom.ts";
+import { DocumentType, HTMLElement, adoptImageSource, adoptMediaSource, HTMLInputElement, HTMLCanvasElement, HTMLTemplateElement, Node, ProcessingInstruction, Text, adoptDeclarativeIn, document, dirty, elementNamespace, invalidateStyle, newElementFor, setElementNamespace, setFocus, resetInput, dropFocusIfUnrendered, pendingScrollIntoView, deliverResizeObservers, resetSelection, clearTopLayer, flushAutofocus, queueInitialAutofocus, type Listener, type Event } from "../dom.ts";
 import { setDocumentMode } from "../quirk.ts";
 import { setPageCharset } from "../dom.ts";
 import { clearPaintDamage, layoutEpoch, stateUsage, takeStyleRoots, paintMarkTrace } from "../invalidation.ts";
@@ -692,6 +692,9 @@ export function mount(t: AppTables): void {
   invalidateStyle();
   // The fragment the app was opened with names a stretch of text to paint as the target.
   readTargetText();
+  // The autofocus attributes the page begins with are candidates from the start, in tree order:
+  // one a script inserts later joins behind them.
+  queueInitialAutofocus();
 }
 
 // ---------------------------------------------------------------------------
@@ -811,6 +814,9 @@ export function resetPage(): void {
 
 export function frame(): void {
   const started = frameClock();
+  // A page's autofocus candidates take focus in this rendering update, before scroll and animation
+  // callbacks observe the frame, as a browser's do.
+  flushAutofocus();
   // A layout that moves boxes moves the accessibility tree with them.
   const moves = dirty.layout || dirty.style;
   flushStyleAndLayout();
