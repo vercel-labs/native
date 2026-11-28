@@ -5,6 +5,7 @@
 
 import { parseDeclarationBlock } from "../../shared/css/declarations.ts";
 import { parseSelector, setStrictListArguments, splitTopLevel } from "../../shared/css/selectors.ts";
+import { customPropertyName, validDeclarationValue } from "../../shared/css/vars.ts";
 
 /** Splits on a top-level keyword (`and`, `or`): outside parentheses and between spaces. */
 function splitKeyword(s: string, word: string): string[] {
@@ -44,10 +45,26 @@ function topColon(s: string): number {
   return -1;
 }
 
-/** Does native compile this declaration? A custom property's value is always valid. */
+/**
+ * Does native compile this declaration? A custom property takes any <declaration-value>, empty
+ * included, as long as its name is a dashed identifier and the value has no top-level `;` or
+ * `!`; one trailing `!important` is the declaration's flag, not part of the value.
+ */
 function declarationSupported(prop: string, value: string): boolean {
-  if (prop === "" || value === "") return false;
-  if (prop.startsWith("--")) return true;
+  if (prop === "") return false;
+  if (prop.startsWith("--")) {
+    if (customPropertyName(prop) === null) return false;
+    let v = value.trim();
+    const important = /!\s*important\s*$/i.exec(v);
+    if (important !== null) v = v.slice(0, important.index).trim();
+    return validDeclarationValue(v);
+  }
+  // The value has to be one <declaration-value>: a `;` outside any function ends it, and a
+  // trailing `!important` is the declaration's flag rather than part of the value.
+  let v = value.trim();
+  const important = /!\s*important\s*$/i.exec(v);
+  if (important !== null) v = v.slice(0, important.index).trim();
+  if (v === "" || !validDeclarationValue(v)) return false;
   let any = false;
   for (const d of parseDeclarationBlock(`${prop}: ${value}`)) {
     if (d.error !== null) return false;
