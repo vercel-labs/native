@@ -16044,15 +16044,89 @@ export class Document extends Node {
 
   // The tags whose own class the runtime builds (and whose own APIs they carry) name it in the
   // return type, as lib.dom's overloads do; every other tag is a plain HTMLElement.
-  createElement(tag: "input"): HTMLInputElement;
+  createElement(tag: "a"): HTMLAnchorElement;
+  createElement(tag: "area"): HTMLAreaElement;
+  createElement(tag: "base"): HTMLBaseElement;
+  createElement(tag: "body"): HTMLBodyElement;
+  createElement(tag: "br"): HTMLBRElement;
+  createElement(tag: "button"): HTMLButtonElement;
   createElement(tag: "canvas"): HTMLCanvasElement;
+  createElement(tag: "caption"): HTMLTableCaptionElement;
+  createElement(tag: "col"): HTMLTableColElement;
+  createElement(tag: "colgroup"): HTMLTableColElement;
+  createElement(tag: "datalist"): HTMLDataListElement;
+  createElement(tag: "details"): HTMLDetailsElement;
+  createElement(tag: "dialog"): HTMLDialogElement;
+  createElement(tag: "div"): HTMLDivElement;
+  createElement(tag: "fieldset"): HTMLFieldSetElement;
+  createElement(tag: "form"): HTMLFormElement;
+  createElement(tag: "h1"): HTMLHeadingElement;
+  createElement(tag: "h2"): HTMLHeadingElement;
+  createElement(tag: "h3"): HTMLHeadingElement;
+  createElement(tag: "h4"): HTMLHeadingElement;
+  createElement(tag: "h5"): HTMLHeadingElement;
+  createElement(tag: "h6"): HTMLHeadingElement;
+  createElement(tag: "head"): HTMLHeadElement;
+  createElement(tag: "html"): HTMLHtmlElement;
+  createElement(tag: "iframe"): HTMLIFrameElement;
   createElement(tag: "img"): HTMLImageElement;
+  createElement(tag: "input"): HTMLInputElement;
+  createElement(tag: "label"): HTMLLabelElement;
+  createElement(tag: "legend"): HTMLLegendElement;
+  createElement(tag: "li"): HTMLLIElement;
+  createElement(tag: "menu"): HTMLMenuElement;
+  createElement(tag: "meta"): HTMLMetaElement;
+  createElement(tag: "meter"): HTMLMeterElement;
+  createElement(tag: "ol"): HTMLOListElement;
+  createElement(tag: "optgroup"): HTMLOptGroupElement;
+  createElement(tag: "option"): HTMLOptionElement;
+  createElement(tag: "output"): HTMLOutputElement;
+  createElement(tag: "p"): HTMLParagraphElement;
+  createElement(tag: "pre"): HTMLPreElement;
+  createElement(tag: "progress"): HTMLProgressElement;
+  createElement(tag: "script"): HTMLScriptElement;
+  createElement(tag: "select"): HTMLSelectElement;
+  createElement(tag: "slot"): HTMLSlotElement;
+  createElement(tag: "span"): HTMLSpanElement;
+  createElement(tag: "style"): HTMLStyleElement;
+  createElement(tag: "summary"): HTMLSummaryElement;
+  createElement(tag: "table"): HTMLTableElement;
+  createElement(tag: "tbody"): HTMLTableSectionElement;
+  createElement(tag: "thead"): HTMLTableSectionElement;
+  createElement(tag: "tfoot"): HTMLTableSectionElement;
+  createElement(tag: "td"): HTMLTableCellElement;
+  createElement(tag: "th"): HTMLTableCellElement;
   createElement(tag: "template"): HTMLTemplateElement;
+  createElement(tag: "textarea"): HTMLTextAreaElement;
+  createElement(tag: "time"): HTMLTimeElement;
+  createElement(tag: "title"): HTMLTitleElement;
+  createElement(tag: "tr"): HTMLTableRowElement;
+  createElement(tag: "ul"): HTMLUListElement;
+  createElement(tag: "audio"): HTMLAudioElement;
+  createElement(tag: "video"): HTMLVideoElement;
+  createElement(tag: "data"): HTMLDataElement;
+  createElement(tag: "dir"): HTMLDirectoryElement;
+  createElement(tag: "dl"): HTMLDListElement;
+  createElement(tag: "embed"): HTMLEmbedElement;
+  createElement(tag: "font"): HTMLFontElement;
+  createElement(tag: "frame"): HTMLFrameElement;
+  createElement(tag: "frameset"): HTMLFrameSetElement;
+  createElement(tag: "hr"): HTMLHRElement;
+  createElement(tag: "link"): HTMLLinkElement;
+  createElement(tag: "map"): HTMLMapElement;
+  createElement(tag: "del"): HTMLModElement;
+  createElement(tag: "ins"): HTMLModElement;
+  createElement(tag: "object"): HTMLObjectElement;
+  createElement(tag: "param"): HTMLParamElement;
+  createElement(tag: "q"): HTMLQuoteElement;
+  createElement(tag: "blockquote"): HTMLQuoteElement;
+  createElement(tag: "source"): HTMLSourceElement;
+  createElement(tag: "track"): HTMLTrackElement;
   createElement(tag: string): HTMLElement;
   // The implementation names the element type its callers get from the overloads above. Typed
   // rather than untyped so a value crossing to a Node island carries the element's own class
   // (exact-class selection), rather than an untyped dynamic value keyed as HTMLElement.
-  createElement(tag: string): HTMLElement {
+  createElement(tag: string): any {
     // An XML document keeps the name as given; an HTML document lowercases it.
     const name = this.xmlDocument ? tag : tag.toLowerCase();
     // A defined name makes an element of its class here, as a creation context does in a browser.

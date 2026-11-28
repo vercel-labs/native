@@ -31,11 +31,11 @@
     "prepack": "node scripts/build.ts"
   },
   "dependencies": {
-    "@scriptc/experimental": "^0.4.16",
-    "@scriptc/node": "^0.4.16",
-    "@scriptc/types": "^0.4.16",
+    "@scriptc/experimental": "^0.4.17",
+    "@scriptc/node": "^0.4.17",
+    "@scriptc/types": "^0.4.17",
     "esbuild": "^0.27.7",
-    "scriptc": "^0.4.16"
+    "scriptc": "^0.4.17"
   },
   "optionalDependencies": {
     "@native-sdk/angle-win32-x64": "workspace:*",
@@ -44,10 +44,10 @@
     "@native-sdk/dev-host-linux-arm64": "workspace:*",
     "@native-sdk/dev-host-linux-x64": "workspace:*",
     "@native-sdk/dev-host-win32-x64": "workspace:*",
-    "@scriptc/libnode-darwin-arm64": "^0.4.16",
-    "@scriptc/libnode-darwin-x64": "^0.4.16",
-    "@scriptc/libnode-linux-arm64-gnu": "^0.4.16",
-    "@scriptc/libnode-linux-x64-gnu": "^0.4.16"
+    "@scriptc/libnode-darwin-arm64": "^0.4.17",
+    "@scriptc/libnode-darwin-x64": "^0.4.17",
+    "@scriptc/libnode-linux-arm64-gnu": "^0.4.17",
+    "@scriptc/libnode-linux-x64-gnu": "^0.4.17"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
