@@ -1432,13 +1432,21 @@ export class StyleDeclaration {
     const err = compileValue(prop, value, out, fonts, undefined, getSheetContent());
     // An invalid value leaves the property as it was, as in a browser.
     if (err !== null) return;
+    // The value written may spell the declaration the object already holds another way — a
+    // settled `scale(1.0000)` against `scale(1)` — so the block the write leaves decides, in its
+    // order: it is applied, then compared with the block before it. A write that leaves the block
+    // as it was changed nothing; one that puts a declaration back after a later one (`all`, a
+    // shorthand) moved it in the cascade and invalidates.
+    const before = out.length > 0 ? this.declBlockText() : null;
     for (const d of out) {
       // A CSS-wide keyword compiles to a declaration kept as text, which the style pass resolves
       // against the parent and the initial value once it has the property's longhands in hand.
       if (d.prop !== undefined) this.putText(d.prop, d.value === undefined ? "" : d.value, important);
       else this.put(d.p, d.v, d.u, important);
     }
-    if (out.length > 0) invalidateStyleOf(this.el, true, this.compositesOnly(out));
+    if (out.length === 0) return;
+    if (before !== null && before === this.declBlockText()) return;
+    invalidateStyleOf(this.el, true, this.compositesOnly(out));
   }
 
   /**
@@ -1458,6 +1466,20 @@ export class StyleDeclaration {
       if (!hasTransform(this.el)) return false;
     }
     return true;
+  }
+
+  /**
+   * The whole declaration block as text, in order: what a write that leaves it unchanged writes
+   * back is this same string, and any re-ordering, removal or new declaration makes it differ.
+   */
+  private declBlockText(): string {
+    let out = "";
+    for (const d of this.decls) {
+      if (d.prop !== undefined) out += d.prop + ":" + (d.value === undefined ? "" : d.value);
+      else out += "#" + d.p + "=" + d.v + "/" + d.u;
+      out += d.important === true ? "!" : ";";
+    }
+    return out;
   }
 
   private put(p: number, v: number, u: number, important: boolean): void {
