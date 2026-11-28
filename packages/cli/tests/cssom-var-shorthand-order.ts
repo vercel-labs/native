@@ -45,6 +45,25 @@ c.style.marginTop = "10px";
 c.style.margin = "8px";
 c.style.marginTop = "20px";
 log("c " + margins(c));
+
+// A scripted shorthand write replaces the important longhand it covers, priority included.
+const d = mk();
+d.style.marginTop = "10px";
+d.style.setProperty("margin-top", "10px", "important");
+d.style.margin = "8px";
+log("d " + margins(d) + " " + JSON.stringify(d.style.getPropertyPriority("margin-top")));
+
+const e = mk();
+e.style.marginTop = "10px";
+e.style.setProperty("margin-top", "10px", "important");
+e.style.margin = "var(--m)";
+log("e " + margins(e) + " " + JSON.stringify(e.style.getPropertyPriority("margin-top")));
+
+const f = mk();
+f.style.marginTop = "10px";
+f.style.setProperty("margin-top", "10px", "important");
+f.style.setProperty("margin", "8px", "important");
+log("f " + margins(f) + " " + JSON.stringify(f.style.getPropertyPriority("margin-top")));
 `;
 
 const EXPECTED_LOG = [
@@ -54,6 +73,11 @@ const EXPECTED_LOG = [
   "b 10px 8px",
   "b-write 20px 8px",
   "c 20px 8px",
+  // Chrome: one normal shorthand, computed 8px on every side, no priority left.
+  'd 8px 8px ""',
+  'e 8px 8px ""',
+  // An important shorthand write keeps its own priority.
+  'f 8px 8px "important"',
 ];
 
 let failed = 0;
