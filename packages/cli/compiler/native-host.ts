@@ -245,6 +245,9 @@ export function prepareMetalShaders(hostDir: string, buildDir: string,
   const source = readFileSync(shaderPath, "utf8");
   const helperPath = join(hostDir, "compositor", "capture-shaders.m");
   const helperSource = readFileSync(helperPath, "utf8");
+  // The helper archives the pipelines shader_manifest.h names, so a change to the manifest is a
+  // change to what the build captures.
+  const manifestSource = readFileSync(join(hostDir, "compositor", "shader_manifest.h"), "utf8");
   const headerPath = join(buildDir, METAL_SHADER_HEADER);
   const metallibPath = join(buildDir, "native-metal-shaders.metallib");
   const keyPath = headerPath + ".key";
@@ -253,6 +256,7 @@ export function prepareMetalShaders(hostDir: string, buildDir: string,
   // one is installed, since the app then carries the shaders instead of compiling them.
   const key = createHash("sha256")
     .update(source).update("\0").update(helperSource).update("\0")
+    .update(manifestSource).update("\0")
     .update(tools ? "xcrun" : "capture")
     .digest("hex");
   if (existsSync(headerPath) && existsSync(keyPath) && readFileSync(keyPath, "utf8") === key) {

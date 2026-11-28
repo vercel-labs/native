@@ -14,6 +14,7 @@
 
 #include "backend.h"
 #include "metal.h"
+#include "shader_manifest.h"
 
 // A quad's uniform block. It must match the shader's `Uniforms` byte for byte.
 typedef struct {
@@ -49,6 +50,10 @@ typedef struct {
 @interface MtBackend : NSObject
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
+// Every pipeline shader_manifest.h names, in the manifest's order, built with the same
+// descriptors the build captured.
+@property(nonatomic, strong) NSMutableArray<id<MTLRenderPipelineState>> *pipelines;
+// The manifest's "quad" pipeline, the one every layer draws with.
 @property(nonatomic, strong) id<MTLRenderPipelineState> quadPipeline;
 @property(nonatomic, strong) id<MTLTexture> white;
 // Untyped: a destroyed texture's slot holds NSNull, which a generic array would reject.
@@ -725,25 +730,26 @@ static CompBackend *mt_backend_with_layer(void *layer) {
       return NULL;
     }
   }
-  MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
-  pd.vertexFunction = [library newFunctionWithName:@"quad_vertex"];
-  pd.fragmentFunction = [library newFunctionWithName:@"quad_fragment"];
-  MTLRenderPipelineColorAttachmentDescriptor *att = pd.colorAttachments[0];
-  att.pixelFormat = MTLPixelFormatBGRA8Unorm;
-  // The textures hold premultiplied alpha, so the source is taken as it is.
-  att.blendingEnabled = YES;
-  att.rgbBlendOperation = MTLBlendOperationAdd;
-  att.alphaBlendOperation = MTLBlendOperationAdd;
-  att.sourceRGBBlendFactor = MTLBlendFactorOne;
-  att.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-  att.sourceAlphaBlendFactor = MTLBlendFactorOne;
-  att.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
-  m.quadPipeline = [device newRenderPipelineStateWithDescriptor:pd error:&error];
-  if (m.quadPipeline == nil) {
-    fprintf(stderr, "native: the compositor's Metal pipeline did not build: %s\n",
-            error == nil ? "unknown error" : [[error description] UTF8String]);
+  // Every pipeline the manifest names, from the descriptors the build captured. The textures hold
+  // premultiplied alpha, so a quad's source is taken as it is.
+  m.pipelines = [NSMutableArray arrayWithCapacity:NATIVE_SHADER_PIPELINE_COUNT];
+  for (size_t i = 0; i < NATIVE_SHADER_PIPELINE_COUNT; i++) {
+    MTLRenderPipelineDescriptor *pd = native_shader_descriptor(library, &kNativeShaderPipelines[i]);
+    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:pd error:&error];
+    if (state == nil) {
+      fprintf(stderr, "native: the compositor's %s Metal pipeline did not build: %s\n",
+              kNativeShaderPipelines[i].name,
+              error == nil ? "unknown error" : [[error description] UTF8String]);
+      return NULL;
+    }
+    [m.pipelines addObject:state];
+  }
+  int quad = native_shader_pipeline_index("quad");
+  if (quad < 0) {
+    fprintf(stderr, "native: shader_manifest.h has no quad pipeline\n");
     return NULL;
   }
+  m.quadPipeline = m.pipelines[(NSUInteger)quad];
   m.textures = [NSMutableArray array];
   m.freeSlots = [NSMutableIndexSet indexSet];
   id<MTLTexture> white = mt_make_texture(m, 1, 1, MTLTextureUsageShaderRead);
