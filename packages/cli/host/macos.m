@@ -11582,6 +11582,15 @@ static uint64_t mask_alpha_key(const MaskGroup *g, const CompWalk *walk) {
     if (walk->chunks[i].mask_role != COMP_MASK_ALPHA) continue;
     if (i >= g_win_count || g_win_chunks[i].pending || g_win_keys[i] == 0) return 0;
     h = key_mix(h, g_win_keys[i]);
+    // A chunk's key is its commands and the space it is rastered in; where the layer sits in the
+    // frame is applied at draw, so a retained descendant that only moves keeps its key. The image
+    // surface is drawn in device pixels, so the chunk's device matrix and the group's box are part
+    // of what it is a picture of.
+    for (int k = 0; k < 16; k++) h = key_double(h, walk->chunks[i].m.m[k]);
+    h = key_double(h, g->box.x);
+    h = key_double(h, g->box.y);
+    h = key_double(h, g->box.w);
+    h = key_double(h, g->box.h);
     // The chunk key leaves a plain clip out (it is the scissor the tiles are drawn under), so the
     // clips go into the surface's key here: a clip that moves redraws the image.
     for (int k = 0; k < walk->chunks[i].clip_count; k++) {
