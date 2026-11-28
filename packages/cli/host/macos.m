@@ -2574,9 +2574,25 @@ static void gradient_parse(Gradient *g, const uint8_t *def, size_t n);
 
 #define FILTER_MAX 8
 
+// One full circle of the current path, kept as the elements it became in device space: the move
+// and the four curves an arc turns into. A fill of the circles can replay them exactly.
+typedef struct {
+  double cx, cy, r;
+  CGPoint move;
+  CGPoint curve[4][3];
+} Circle;
+
 typedef struct {
   CGContextRef ctx;
   CGMutablePathRef path;
+  // While the path holds nothing but full circles, the circles are also kept here in device
+  // space: the canvas statistics count them, and a fill of them can be drawn without
+  // re-tessellating the arcs. Anything else in the path turns pathKind into 2 for good.
+  int pathKind; // 0 nothing drawn yet, 1 full circles only, 2 other geometry
+  int circleCount, circleCap;
+  Circle *circles;
+  double curX, curY; // the path's current point, device space
+  int havePoint;
   double w, h; // bitmap pixels
   CGImageRef image; // cached bitmap for the display list; dropped when the canvas changes
   CGAffineTransform base;
@@ -2685,6 +2701,9 @@ static void canvas_reset(Canvas *c) {
   c->ctx = NULL;
   c->scratch = NULL;
   c->path = CGPathCreateMutable();
+  c->pathKind = 0;
+  c->circleCount = 0;
+  c->havePoint = 0;
   c->alpha = 1;
   c->composite = 0;
   c->filterCount = 0;
@@ -3094,6 +3113,71 @@ void host_canvas_begin_path(int32_t id) {
   if (!c) return;
   CGPathRelease(c->path);
   c->path = CGPathCreateMutable();
+  c->pathKind = 0;
+  c->circleCount = 0;
+  c->havePoint = 0;
+}
+
+// A transform maps circles to circles when it is a rotation, a uniform scale, a flip or a
+// combination: equal lengths of the two axes with no skew between them.
+static int canvas_similarity(CGAffineTransform m, double *scale) {
+  double a2 = m.a * m.a + m.b * m.b, c2 = m.c * m.c + m.d * m.d;
+  double dot = m.a * m.c + m.b * m.d;
+  double tol = 1e-9 * (a2 + c2 + 1);
+  if (fabs(a2 - c2) > tol || fabs(dot) > tol) return 0;
+  double s = sqrt(a2);
+  if (!(s > 0)) return 0;
+  *scale = s;
+  return 1;
+}
+
+static void canvas_path_other(Canvas *c) {
+  c->pathKind = 2;
+}
+
+static void canvas_record_circle(Canvas *c, const Circle *circle) {
+  if (c->circleCount == c->circleCap) {
+    int cap = c->circleCap ? c->circleCap * 2 : 64;
+    Circle *p = realloc(c->circles, (size_t)cap * sizeof(Circle));
+    if (!p) {
+      canvas_path_other(c);
+      return;
+    }
+    c->circles = p;
+    c->circleCap = cap;
+  }
+  c->circles[c->circleCount++] = *circle;
+  if (c->pathKind == 0) c->pathKind = 1;
+}
+
+// Reads a path that must be one move and four curves, the shape CGPathAddArc makes of a full
+// circle, into the circle record. Anything else leaves the path ineligible for the split.
+typedef struct {
+  Circle *circle;
+  int move;
+  int curves;
+} CircleWalk;
+
+static void canvas_circle_element(void *info, const CGPathElement *el) {
+  CircleWalk *w = info;
+  CGPoint *p = el->points;
+  if (el->type == kCGPathElementMoveToPoint && w->move == 0 && w->curves == 0) {
+    w->circle->move = p[0];
+    w->move = 1;
+  } else if (el->type == kCGPathElementAddCurveToPoint && w->move == 1 && w->curves < 4) {
+    w->circle->curve[w->curves][0] = p[0];
+    w->circle->curve[w->curves][1] = p[1];
+    w->circle->curve[w->curves][2] = p[2];
+    w->curves++;
+  } else {
+    w->curves = -1;
+  }
+}
+
+static int canvas_read_circle(CGPathRef path, Circle *circle) {
+  CircleWalk w = { circle, 0, 0 };
+  CGPathApply(path, &w, canvas_circle_element);
+  return w.move == 1 && w.curves == 4;
 }
 
 void host_canvas_move_to(int32_t id, double x, double y) {
@@ -3101,6 +3185,9 @@ void host_canvas_move_to(int32_t id, double x, double y) {
   if (!c) return;
   CGPoint p = canvas_point(c, x, y);
   CGPathMoveToPoint(c->path, NULL, p.x, p.y);
+  c->curX = p.x;
+  c->curY = p.y;
+  c->havePoint = 1;
 }
 
 void host_canvas_line_to(int32_t id, double x, double y) {
@@ -3108,6 +3195,10 @@ void host_canvas_line_to(int32_t id, double x, double y) {
   if (!c) return;
   CGPoint p = canvas_point(c, x, y);
   CGPathAddLineToPoint(c->path, NULL, p.x, p.y);
+  canvas_path_other(c);
+  c->curX = p.x;
+  c->curY = p.y;
+  c->havePoint = 1;
 }
 
 void host_canvas_quadratic_to(int32_t id, double cx, double cy, double x, double y) {
@@ -3115,6 +3206,10 @@ void host_canvas_quadratic_to(int32_t id, double cx, double cy, double x, double
   if (!c) return;
   CGPoint cp = canvas_point(c, cx, cy), p = canvas_point(c, x, y);
   CGPathAddQuadCurveToPoint(c->path, NULL, cp.x, cp.y, p.x, p.y);
+  canvas_path_other(c);
+  c->curX = p.x;
+  c->curY = p.y;
+  c->havePoint = 1;
 }
 
 void host_canvas_bezier_to(int32_t id, double c1x, double c1y, double c2x, double c2y, double x, double y) {
@@ -3122,26 +3217,71 @@ void host_canvas_bezier_to(int32_t id, double c1x, double c1y, double c2x, doubl
   if (!c) return;
   CGPoint a = canvas_point(c, c1x, c1y), b = canvas_point(c, c2x, c2y), p = canvas_point(c, x, y);
   CGPathAddCurveToPoint(c->path, NULL, a.x, a.y, b.x, b.y, p.x, p.y);
+  canvas_path_other(c);
+  c->curX = p.x;
+  c->curY = p.y;
+  c->havePoint = 1;
 }
 
 void host_canvas_close_path(int32_t id) {
   Canvas *c = canvas_at(id);
-  if (c) CGPathCloseSubpath(c->path);
+  if (!c) return;
+  CGPathCloseSubpath(c->path);
+  canvas_path_other(c);
 }
 
 // Arcs and rects go through a user-space path, so the transform applies to them exactly.
 void host_canvas_arc(int32_t id, double cx, double cy, double r, double start, double end, int32_t ccw) {
   Canvas *c = canvas_at(id);
   if (!c || !(r >= 0)) return;
+  // A full circle is kept in the circle list for the fill path, provided the segment adds no
+  // other geometry: the transform keeps circles circular, and the arc starts where the path
+  // already is (or opens the path).
+  int full = fabs(fabs(end - start) - 2 * M_PI) < 1e-6;
+  double scale = 1;
+  CGAffineTransform m = CGContextGetCTM(c->ctx);
+  if (full && r > 0 && canvas_similarity(m, &scale)) {
+    CGPoint sp = canvas_point(c, cx + r * cos(start), cy + r * sin(start));
+    CGPoint cp = canvas_point(c, cx, cy);
+    if (!c->havePoint || (fabs(sp.x - c->curX) < 1e-6 && fabs(sp.y - c->curY) < 1e-6)) {
+      CGMutablePathRef p = CGPathCreateMutable();
+      CGPathAddArc(p, NULL, cx, cy, r, start, end, ccw ? true : false);
+      CGAffineTransform ctm = CGContextGetCTM(c->ctx);
+      CGMutablePathRef d = CGPathCreateMutableCopyByTransformingPath(p, &ctm);
+      Circle circle = {0};
+      circle.cx = cp.x;
+      circle.cy = cp.y;
+      circle.r = r * scale;
+      int hadElements = canvas_read_circle(d, &circle);
+      canvas_add_path(c, p, 1);
+      CGPathRelease(p);
+      CGPathRelease(d);
+      if (hadElements) {
+        canvas_record_circle(c, &circle);
+      } else {
+        canvas_path_other(c);
+      }
+      c->curX = sp.x;
+      c->curY = sp.y;
+      c->havePoint = 1;
+      return;
+    }
+  }
+  canvas_path_other(c);
   CGMutablePathRef p = CGPathCreateMutable();
   CGPathAddArc(p, NULL, cx, cy, r, start, end, ccw ? true : false);
   canvas_add_path(c, p, 1);
   CGPathRelease(p);
+  CGPoint ep = canvas_point(c, cx + r * cos(end), cy + r * sin(end));
+  c->curX = ep.x;
+  c->curY = ep.y;
+  c->havePoint = 1;
 }
 
 void host_canvas_arc_to(int32_t id, double x1, double y1, double x2, double y2, double r) {
   Canvas *c = canvas_at(id);
   if (!c) return;
+  canvas_path_other(c);
   // The arc connects to the path's current point, which only the host can see. Carry it back to
   // user space, build the arc there, and bake the transform in as every other segment does.
   if (CGPathIsEmpty(c->path)) {
@@ -3149,6 +3289,10 @@ void host_canvas_arc_to(int32_t id, double x1, double y1, double x2, double y2, 
     CGPathMoveToPoint(p, NULL, x1, y1);
     canvas_add_path(c, p, 0);
     CGPathRelease(p);
+    CGPoint p1 = canvas_point(c, x1, y1);
+    c->curX = p1.x;
+    c->curY = p1.y;
+    c->havePoint = 1;
     return;
   }
   CGAffineTransform m = CGContextGetCTM(c->ctx);
@@ -3158,6 +3302,9 @@ void host_canvas_arc_to(int32_t id, double x1, double y1, double x2, double y2, 
   CGPathAddArcToPoint(p, NULL, x1, y1, x2, y2, r);
   canvas_add_path(c, p, 1);
   CGPathRelease(p);
+  c->curX = CGPathGetCurrentPoint(c->path).x;
+  c->curY = CGPathGetCurrentPoint(c->path).y;
+  c->havePoint = 1;
 }
 
 void host_canvas_rect(int32_t id, double x, double y, double w, double h) {
@@ -3167,23 +3314,231 @@ void host_canvas_rect(int32_t id, double x, double y, double w, double h) {
   CGPathAddRect(p, NULL, CGRectMake(x, y, w, h));
   canvas_add_path(c, p, 0);
   CGPathRelease(p);
+  canvas_path_other(c);
+  CGPoint p1 = canvas_point(c, x, y);
+  c->curX = p1.x;
+  c->curY = p1.y;
+  c->havePoint = 1;
+}
+
+// --- Fill statistics (NATIVE_CANVAS_STATS=1) ------------------------------------------
+
+typedef struct {
+  double x0, y0, x1, y1;
+  int i;
+} CanvasStatBox;
+
+static int canvas_stats_enabled(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("NATIVE_CANVAS_STATS") != NULL;
+  return on;
+}
+
+static int canvas_stat_box_cmp(const void *a, const void *b) {
+  const CanvasStatBox *p = a, *q = b;
+  double d = p->x0 - q->x0;
+  return d < 0 ? -1 : d > 0 ? 1 : 0;
+}
+
+static int canvas_stat_int_cmp(const void *a, const void *b) {
+  int p = *(const int *)a, q = *(const int *)b;
+  return p < q ? -1 : p > q ? 1 : 0;
+}
+
+// One line per fill that carries circles: how many, their radii and spread, how many boxes and
+// discs overlap, and how long CoreGraphics took to rasterise the path.
+static void canvas_stats_fill(Canvas *c, int evenodd, int groups, double ms) {
+  if (!canvas_stats_enabled()) return;
+  CGRect bb = CGPathGetBoundingBox(c->path);
+  double bx = bb.origin.x, by = c->h - (bb.origin.y + bb.size.height);
+  int n = c->circleCount;
+  double rmin = 0, rmax = 0;
+  int distinct = 0;
+  int bbox_pairs = 0, disc_pairs = 0;
+  double area = 0;
+  CanvasStatBox *boxes = NULL;
+  int *radii = NULL;
+  if (n > 0) {
+    boxes = malloc((size_t)n * sizeof(CanvasStatBox));
+    radii = malloc((size_t)n * sizeof(int));
+  }
+  if (boxes && radii) {
+    for (int i = 0; i < n; i++) {
+      double cx = c->circles[i].cx, cy = c->circles[i].cy;
+      double r = c->circles[i].r;
+      double y = c->h - cy;
+      if (i == 0 || r < rmin) rmin = r;
+      if (i == 0 || r > rmax) rmax = r;
+      radii[i] = (int)lround(r * 64);
+      boxes[i].x0 = cx - r;
+      boxes[i].x1 = cx + r;
+      boxes[i].y0 = y - r;
+      boxes[i].y1 = y + r;
+      boxes[i].i = i;
+      double xa = fmax(0, boxes[i].x0), xb = fmin(c->w, boxes[i].x1);
+      double ya = fmax(0, boxes[i].y0), yb = fmin(c->h, boxes[i].y1);
+      if (xb > xa && yb > ya) area += (xb - xa) * (yb - ya);
+    }
+    qsort(radii, (size_t)n, sizeof(int), canvas_stat_int_cmp);
+    for (int i = 0; i < n; i++) if (i == 0 || radii[i] != radii[i - 1]) distinct++;
+    qsort(boxes, (size_t)n, sizeof(CanvasStatBox), canvas_stat_box_cmp);
+    for (int i = 0; i < n; i++) {
+      for (int j = i + 1; j < n && boxes[j].x0 < boxes[i].x1; j++) {
+        if (boxes[j].y0 < boxes[i].y1 && boxes[j].y1 > boxes[i].y0) {
+          bbox_pairs++;
+          int a = boxes[i].i, b = boxes[j].i;
+          double dx = c->circles[a].cx - c->circles[b].cx;
+          double dy = c->circles[a].cy - c->circles[b].cy;
+          double rr = c->circles[a].r + c->circles[b].r;
+          if (dx * dx + dy * dy < rr * rr) disc_pairs++;
+        }
+      }
+    }
+  }
+  fprintf(stderr,
+          "native: canvas fill kind=%d rule=%d circles=%d groups=%d r=%.2f..%.2f radii64=%d "
+          "bbox=%.1f,%.1f %.1fx%.1f pixarea=%.0f bboxpairs=%d discpairs=%d fill=%.3fms\n",
+          c->pathKind, evenodd ? 1 : 0, n, groups, rmin, rmax, distinct,
+          bx, by, bb.size.width, bb.size.height, area, bbox_pairs, disc_pairs, ms);
+  free(boxes);
+  free(radii);
+}
+
+static int canvas_group_find(int *parent, int i) {
+  while (parent[i] != i) {
+    parent[i] = parent[parent[i]];
+    i = parent[i];
+  }
+  return i;
+}
+
+static void canvas_group_join(int *parent, int a, int b) {
+  a = canvas_group_find(parent, a);
+  b = canvas_group_find(parent, b);
+  if (a != b) parent[a] = b;
+}
+
+// Fills the circles recorded for the current path: a circle whose box, widened by a pixel,
+// touches no other circle is filled on its own, and circles whose boxes do touch are filled
+// together in one path, so winding and coverage stay those of the path the page built. Splitting
+// the fill this way gives CoreGraphics a short edge list per call instead of one huge path.
+// Two circles in different groups cover no common pixel, so the drawing is the same as one fill
+// of the whole path. Returns the number of fills made, or -1 when the bookkeeping could not be
+// allocated.
+static int canvas_fill_circles(Canvas *c, int evenodd) {
+  int n = c->circleCount;
+  int *parent = malloc((size_t)n * sizeof(int));
+  int *count = calloc((size_t)n, sizeof(int));
+  int *start = malloc(((size_t)n + 1) * sizeof(int));
+  int *cursor = malloc((size_t)n * sizeof(int));
+  int *items = malloc((size_t)n * sizeof(int));
+  CanvasStatBox *boxes = malloc((size_t)n * sizeof(CanvasStatBox));
+  int ok = parent && count && start && cursor && items && boxes;
+  int groups = 0;
+  if (ok) {
+    for (int i = 0; i < n; i++) {
+      double cx = c->circles[i].cx, cy = c->circles[i].cy;
+      double r = c->circles[i].r;
+      parent[i] = i;
+      // One antialiased pixel of reach beyond the circle: a circle in another group must not
+      // cover any pixel this one covers.
+      boxes[i].x0 = cx - r - 1;
+      boxes[i].x1 = cx + r + 1;
+      boxes[i].y0 = cy - r - 1;
+      boxes[i].y1 = cy + r + 1;
+      boxes[i].i = i;
+    }
+    qsort(boxes, (size_t)n, sizeof(CanvasStatBox), canvas_stat_box_cmp);
+    for (int a = 0; a < n; a++) {
+      for (int b = a + 1; b < n && boxes[b].x0 <= boxes[a].x1; b++) {
+        if (boxes[b].y0 <= boxes[a].y1 && boxes[b].y1 >= boxes[a].y0)
+          canvas_group_join(parent, boxes[a].i, boxes[b].i);
+      }
+    }
+    for (int i = 0; i < n; i++) count[canvas_group_find(parent, i)]++;
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+      start[i] = total;
+      cursor[i] = total;
+      total += count[i];
+      if (count[i] > 0) groups++;
+    }
+    start[n] = total;
+    for (int i = 0; i < n; i++) items[cursor[canvas_group_find(parent, i)]++] = i;
+    CGContextRef ctx = c->ctx;
+    for (int i = 0; i < n; i++) {
+      int members = count[i];
+      if (members == 0) continue;
+      CGMutablePathRef p = CGPathCreateMutable();
+      for (int k = start[i]; k < start[i] + members; k++) {
+        const Circle *circle = &c->circles[items[k]];
+        CGPathMoveToPoint(p, NULL, circle->move.x, circle->move.y);
+        for (int e = 0; e < 4; e++) {
+          CGPathAddCurveToPoint(p, NULL, circle->curve[e][0].x, circle->curve[e][0].y,
+                                circle->curve[e][1].x, circle->curve[e][1].y,
+                                circle->curve[e][2].x, circle->curve[e][2].y);
+        }
+      }
+      CGContextAddPath(ctx, p);
+      if (evenodd) CGContextEOFillPath(ctx);
+      else CGContextFillPath(ctx);
+      CGPathRelease(p);
+    }
+  }
+  free(parent);
+  free(count);
+  free(start);
+  free(cursor);
+  free(items);
+  free(boxes);
+  return ok ? groups : -1;
+}
+
+// The fewest circles worth splitting a fill for; below this the single path is as cheap.
+#define CANVAS_FILL_SPLIT_MIN 16
+
+// NATIVE_CANVAS_SPLIT=0 draws the single path fill, for comparing the two rasterisations.
+static int canvas_split_enabled(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("NATIVE_CANVAS_SPLIT");
+    on = v == NULL || strcmp(v, "0") != 0;
+  }
+  return on;
 }
 
 // Fills a device-space path with the current fill style.
-static void canvas_fill_device(Canvas *c, CGPathRef device, int evenodd) {
+static void canvas_fill_device(Canvas *c, CGPathRef device, int evenodd, int from_path) {
   CGContextRef ctx = c->ctx;
   CGAffineTransform m = CGContextGetCTM(ctx);
+  int stats = from_path && canvas_stats_enabled();
+  struct timespec t0, t1;
+  if (stats) clock_gettime(CLOCK_MONOTONIC, &t0);
   CGContextSaveGState(ctx);
   context_set_ctm(ctx, CGAffineTransformIdentity);
-  CGContextAddPath(ctx, device);
-  if (c->fillKind == 1) {
-    gradient_paint(ctx, &c->fillGrad, m);
-  } else {
+  int groups = -1;
+  if (from_path && c->fillKind == 0 && c->pathKind == 1 && c->circleCount >= CANVAS_FILL_SPLIT_MIN &&
+      canvas_split_enabled()) {
     set_fill(ctx, c->fillColor);
-    if (evenodd) CGContextEOFillPath(ctx);
-    else CGContextFillPath(ctx);
+    groups = canvas_fill_circles(c, evenodd);
+  }
+  if (groups < 0) {
+    CGContextAddPath(ctx, device);
+    if (c->fillKind == 1) {
+      gradient_paint(ctx, &c->fillGrad, m);
+    } else {
+      set_fill(ctx, c->fillColor);
+      if (evenodd) CGContextEOFillPath(ctx);
+      else CGContextFillPath(ctx);
+    }
   }
   CGContextRestoreGState(ctx);
+  if (stats) {
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0 +
+                (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
+    canvas_stats_fill(c, evenodd, groups, ms);
+  }
 }
 
 // Sets the pen: width, ends, corners and the dash pattern. `scale` is the transform the stroke
@@ -3601,7 +3956,7 @@ static void canvas_filtered(Canvas *c, CanvasOp *op) {
 static void canvas_do(Canvas *c, CanvasOp *op) {
   switch (op->kind) {
     case OP_FILL:
-      canvas_fill_device(c, c->path, op->flag != 0);
+      canvas_fill_device(c, c->path, op->flag != 0, 1);
       break;
     case OP_STROKE:
       canvas_stroke_device(c, c->path);
@@ -3610,7 +3965,7 @@ static void canvas_do(Canvas *c, CanvasOp *op) {
       if (c->fillKind == 1) {
         CGMutablePathRef p = NULL;
         CGPathRef device = canvas_device_rect(c, &p, op->x, op->y, op->w, op->h);
-        canvas_fill_device(c, device, 0);
+        canvas_fill_device(c, device, 0, 0);
         CGPathRelease(p);
       } else {
         set_fill(c->ctx, c->fillColor);
