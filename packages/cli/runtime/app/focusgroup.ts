@@ -1,8 +1,10 @@
 // Focusgroup: an element with a `focusgroup` attribute is one segment of a keyboard navigation
 // group. A segment is a single tab stop — Tab enters at the item it last held and leaves past the
 // whole segment — and the arrow keys move along the segment's axis, as Chrome ships them: a
-// toolbar and a tablist move inline, a listbox block; a tablist wraps at its ends by default, and
-// the `wrap` token makes any segment wrap while `nomemory` stops it remembering its item.
+// toolbar, a tablist, a menubar and a radiogroup move inline, a listbox and a menu block; a
+// tablist, a menubar, a menu and a radiogroup wrap at their ends by default, while the `wrap`
+// token makes any segment wrap and `nomemory` stops it remembering its item. `grid` and `feed` are
+// not shipped (a Chrome 158 probe moves focus nowhere in either), so they name no behaviour here.
 
 import { Element, Node, isRenderedForFocus, setFocusMovedHook } from "../dom.ts";
 
@@ -21,17 +23,33 @@ export function focusgroupBehavior(el: Element): SegmentBehavior | null {
   let axis = "";
   let wrap = false;
   let memory = true;
+  // `inline` and `block` choose the axis whatever the behaviour token said, and `nowrap` turns the
+  // behaviour token's default wrapping off, as Chrome's probes show.
+  let axisOverride = "";
+  let noWrap = false;
   for (const token of tokens) {
+    // The behaviour tokens, each with the axis it moves along and whether it wraps at its ends
+    // without being asked, as a Chrome 158 probe measures them.
     if (token === "toolbar") axis = "inline";
-    else if (token === "tablist") {
-      // A tablist wraps at its ends without being asked, as Chrome's does.
+    else if (token === "radiogroup") {
+      // A radiogroup moves whichever way an arrow points, and wraps in both axes.
+      axis = "both";
+      wrap = true;
+    } else if (token === "tablist" || token === "menubar") {
       axis = "inline";
       wrap = true;
-    } else if (token === "listbox") axis = "block";
-    else if (token === "wrap") wrap = true;
+    } else if (token === "listbox" || token === "menu") {
+      axis = "block";
+      if (token === "menu") wrap = true;
+    } else if (token === "wrap") wrap = true;
+    else if (token === "nowrap") noWrap = true;
+    else if (token === "inline") axisOverride = "inline";
+    else if (token === "block") axisOverride = "block";
     else if (token === "nomemory") memory = false;
   }
-  return axis === "" ? null : { axis, wrap, memory };
+  // A token that only chooses an axis, with no behaviour token beside it, makes no segment.
+  if (axis === "") return null;
+  return { axis: axisOverride !== "" ? axisOverride : axis, wrap: !noWrap && wrap, memory };
 }
 
 /** The segment an element takes part in: the nearest ancestor, or the element itself. */
@@ -92,8 +110,9 @@ export function moveInSegment(segment: Element, from: Element, key: string): Ele
   if (key === "home") return items[0];
   if (key === "end") return items[items.length - 1];
   const inline = key === "left" || key === "right";
-  const want = behavior.axis === "inline";
-  if (inline !== want) return null;
+  // An inline segment follows Left and Right, a block one Up and Down, and a both-axes segment
+  // (a radiogroup) follows every arrow, in tree order either way.
+  if (behavior.axis !== "both" && inline !== (behavior.axis === "inline")) return null;
   const i = items.indexOf(from);
   if (i < 0) return null;
   const step = key === "right" || key === "down" ? 1 : -1;
