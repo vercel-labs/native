@@ -2181,9 +2181,12 @@ function appendChecked(parent: Node, node: Node): void {
   // What a detached tree holds has no box to style yet: the insertion that puts it in the
   // document styles the subtree then.
   if (!parent.isConnected) return;
+  // An insertion's own effects come before any styling shortcut, which only decides how much
+  // restyling is due.
+  noteDetailsInserted(node);
+  noteRadiosInserted(node);
   if (styleInsertedText(parent, node) || styleAppendedBox(parent, node)) return;
   noteStructureChange(parent);
-  noteDetailsInserted(node);
   invalidateStyleOf(parent);
 }
 
@@ -3253,6 +3256,10 @@ export class Node extends EventTarget {
     noteChildList(this, [node], [], node.previousSibling, before);
     refreshAdded(node);
     if (!this.isConnected) return node;
+    // An insertion's own effects — a details element joining the page, a radio joining a
+    // group — come before any styling shortcut, which only decides how much restyling is due.
+    noteDetailsInserted(node);
+    noteRadiosInserted(node);
     if (styleInsertedText(this, node)) return node;
     noteStructureChange(this);
     invalidateStyleOf(this);
@@ -7958,13 +7965,47 @@ function radioGroup(el: HTMLInputElement, out: HTMLInputElement[]): void {
     out.push(el);
     return;
   }
+  // The group is the radios of the element's own tree: a radio taken out of the document forms
+  // a group with the radios of the tree it sits in, not with the page's.
+  const root = el.getRootNode() as Node;
   const all: Element[] = [];
-  collectElements(document.documentElement, all);
+  if (root.isElementNode) {
+    all.push(root as Element);
+    collectElements(root, all);
+  } else {
+    collectElements(root, all);
+  }
   const owner = formOwnerFor(el);
+  let found = false;
   for (const e of all) {
     if (!(e instanceof HTMLInputElement) || controlKind(e.type) !== CONTROL_RADIO) continue;
-    if (e.name === name && formOwnerFor(e) === owner) out.push(e);
+    if (e.name === name && formOwnerFor(e) === owner) {
+      out.push(e);
+      if (e === el) found = true;
+    }
   }
+  if (!found) out.push(el);
+}
+
+/** Unchecks the groups of any checked radios at or under `node`, after an insertion. */
+function noteRadiosInserted(node: Node): void {
+  const radios: HTMLInputElement[] = [];
+  collectRadios(node, radios);
+  for (const r of radios) if (r.checked) uncheckRadioGroup(r);
+}
+
+/** The radio inputs at or under `node`, in tree order. */
+function collectRadios(node: Node, out: HTMLInputElement[]): void {
+  if (node instanceof HTMLInputElement && controlKind(node.type) === CONTROL_RADIO) out.push(node);
+  for (const c of node.kids) collectRadios(c, out);
+}
+
+/** Unchecks the other radios of the group `el` is in, as checking it does. */
+function uncheckRadioGroup(el: HTMLInputElement): void {
+  if (controlKind(el.type) !== CONTROL_RADIO || !el.checked) return;
+  const group: HTMLInputElement[] = [];
+  radioGroup(el, group);
+  for (const other of group) if (other !== el && other.checked) other.checked = false;
 }
 
 /**
@@ -13163,6 +13204,8 @@ export class HTMLInputElement extends HTMLElement {
   set checked(v: boolean) {
     if (this.checkedFlag === v) return;
     this.checkedFlag = v;
+    // A radio checked with a script unchecks the rest of its group, as a click does.
+    if (v) uncheckRadioGroup(this);
     noteControlChange(this);
   }
   get indeterminate(): boolean {
@@ -13669,9 +13712,21 @@ export class HTMLInputElement extends HTMLElement {
         this.val = sanitizeUrlText(this.val);
         noteControlChange(this);
       }
+      // A field that becomes a radio or a checkbox takes its checked attribute as its
+      // checkedness, which unchecks the group it joins.
+      const nextType = String(value).trim().toLowerCase();
+      if ((nextType === "radio" || nextType === "checkbox") && this.hasAttribute("checked")) {
+        this.checkedFlag = true;
+        if (nextType === "radio") uncheckRadioGroup(this);
+        noteControlChange(this);
+      }
       // A field that becomes a text field while focused starts showing the ring a text field
       // has, and one that stops being one loses it: :focus-visible follows the type change.
       if (focusState.el === this) refreshFocusVisible();
+    } else if (name === "form") {
+      super.setAttribute(name, value);
+      // Joining a form puts a checked radio in that form's group.
+      uncheckRadioGroup(this);
     } else if (name === "multiple") {
       super.setAttribute(name, value);
       if (this.type.toLowerCase() === "email") {
@@ -13693,6 +13748,8 @@ export class HTMLInputElement extends HTMLElement {
   removeAttribute(name: string): void {
     super.removeAttribute(name);
     if (name === "disabled") this.disabledFlag = false;
+    // Leaving a form owner moves a checked radio into the ownerless group.
+    if (name === "form") uncheckRadioGroup(this);
   }
 
   /**
