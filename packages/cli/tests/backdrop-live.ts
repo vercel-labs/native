@@ -63,9 +63,15 @@ if (runLive.status !== 0 || runFlat.status !== 0) {
   process.exit(1);
 }
 
-ok("the live run composited a frame with a backdrop filter",
-  /native: composite \d/.test(runLive.stderr || ""),
-  (runLive.stderr || "").split("\n").filter((l) => l.includes("native: ")).slice(0, 3).join(" | "));
+// The frame log is the macOS host's; the composited picture exists on every host, and the
+// comparison below is what holds the frame to the replay there.
+if (process.platform === "darwin") {
+  ok("the live run composited a frame with a backdrop filter",
+    /native: composite \d/.test(runLive.stderr || ""),
+    (runLive.stderr || "").split("\n").filter((l) => l.includes("native: ")).slice(0, 3).join(" | "));
+} else {
+  console.log(`ok   skipped: the composited frame log is macOS's (this is ${process.platform})`);
+}
 
 if (!existsSync(live) || !existsSync(flat)) {
   ok("both runs wrote a picture", false, `${existsSync(live)} ${existsSync(flat)}`);
