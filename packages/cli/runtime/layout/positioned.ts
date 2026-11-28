@@ -525,8 +525,13 @@ function takeBackTransformGrowth(el: Node): void {
  * then holds nothing back, and the page's scroll range is the one that grows.
  */
 function clipsForOverflow(el: Node, x: boolean): boolean {
-  const root = document.documentElement;
-  if (el === document.body && el.parentElement === root && (x ? !clipsX(root) : !clipsY(root))) return false;
+  // document.body is a getter that walks the root's children and compares tag and namespace
+  // strings, and this runs twice for every box a page level walk visits. Only a box whose own
+  // name says it is a body or a frameset can be that element, so the rest never ask.
+  if (el.localName === "body" || el.localName === "frameset") {
+    const root = document.documentElement;
+    if (el === document.body && el.parentElement === root && (x ? !clipsX(root) : !clipsY(root))) return false;
+  }
   return x ? clipsX(el) : clipsY(el);
 }
 
