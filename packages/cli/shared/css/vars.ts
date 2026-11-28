@@ -181,6 +181,10 @@ export function customPropertyName(text: string): string | null {
  */
 export function substituteVars(value: string, lookup: (name: string) => string | undefined): string | null {
   let out = "";
+  // A value may name another custom property twice, so 31 levels of `--v1: var(--v0) var(--v0)`
+  // double into gigabytes. Past this much text the value is invalid at computed-value time, as a
+  // browser treats a substitution it won't try to finish.
+  const tooBig = (): boolean => out.length > 1 << 20;
   let i = 0;
   // Whether the last text appended came from a var()'s value, so text after it needs a separator
   // wherever the two would otherwise merge into one token.
@@ -196,6 +200,7 @@ export function substituteVars(value: string, lookup: (name: string) => string |
     seam = text !== "";
   };
   while (i < value.length) {
+    if (tooBig()) return null;
     const ch = value[i];
     if (ch === '"' || ch === "'") {
       const end = skipString(value, i);
@@ -251,7 +256,7 @@ export function substituteVars(value: string, lookup: (name: string) => string |
     appendText(ch);
     i++;
   }
-  return out;
+  return out.length > (1 << 20) ? null : out;
 }
 
 /** Is `s[from..to)` a <declaration-value>: balanced, with no top-level `;` or `!`? */
