@@ -1,8 +1,8 @@
 // A box that paints through a backdrop filter (a blurred header, say) samples the pixels behind
 // it. An animation inside it — the pulsing "Live" dot the dashboard carries — changes pixels the
-// filter shows, but only near the dot: the frame repaints the dot and the filter's reach around
-// it, not the whole box and not the page. The damage it hands the host is that region, so with
-// the compositor off the present stays small too.
+// filter shows, and the filter reads the pixels under its whole box: the frame repaints the box's
+// filter-expanded bounds, grown by the blur's reach on every side, not the page. The damage it
+// hands the host is that region, so with the compositor off the present stays small too.
 //   npm test
 
 import { spawnSync } from "node:child_process";
@@ -110,11 +110,14 @@ ok("a change inside the box paints frames", frames.length >= 3, `${frames.length
 const unlimited = frames.filter((s) => !s.limited);
 ok("a change inside the box is damage-limited", unlimited.length === 0,
   `${unlimited.length} of ${frames.length} painted the page`);
-// The dot is 6px and the damage the paint records for it carries the painter's slack and the
-// blur's reach around it: that region is well under the header. Repainting the filter's whole box
-// is the header; the page is many times that.
-const wide = frames.filter((s) => s.area > HEADER_AREA / 2);
-ok("a change inside the box repaints only the dot's region around the filter", wide.length === 0,
+// The header carries blur(6px): the filter reads the pixels under its whole box, so a damaged
+// frame repaints the box's filter-expanded bounds — the header grown by the filters' region and
+// the blur's reach, a few times the header — and the page, many times that, is never repainted.
+const small = frames.filter((s) => s.area < HEADER_AREA);
+ok("a change inside the box repaints the whole box's filter region", small.length === 0,
+  small.map((s) => `${s.area}px² over ${s.rects} rects`).join(", "));
+const wide = frames.filter((s) => s.area > 200000);
+ok("a change inside the box does not repaint the page", wide.length === 0,
   wide.map((s) => `${s.area}px² over ${s.rects} rects`).join(", "));
 const heavy = frames.filter((s) => s.painted >= opening);
 ok("a change inside the box walks less of the page than the opening", heavy.length === 0,

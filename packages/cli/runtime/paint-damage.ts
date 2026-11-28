@@ -86,10 +86,11 @@ function within(el: Node, box: Node): boolean {
 
 /**
  * Adds what the backdrop filters on screen have to repaint for a frame's damage. A change inside
- * such a box is painted with the filter's sample region around it — the changed rectangle grown by
- * how far the filter spreads, clipped to the box — so an animation inside a blurred panel repaints
- * only what moved. A change that isn't inside the box (one behind it, or damage the DOM couldn't
- * name) can change what the filter shows anywhere in it, so the whole box repaints.
+ * such a box repaints the box's filter-expanded bounds — the box grown by how far its filter
+ * spreads — so the blur always samples the page behind the whole box: a smaller region, rastered
+ * by a compositor patch from the damaged rectangles alone, would leave the blur reading the
+ * region's edge instead. A change that isn't inside the box (one behind it, or damage the DOM
+ * couldn't name) can change what the filter shows anywhere in it, so the whole box repaints.
  */
 export function addBackdropDamage(rects: number[][], changed: Node[], explicit: number[][]): void {
   if (backdropBoxes.length === 0) return;
@@ -108,15 +109,7 @@ export function addBackdropDamage(rects: number[][], changed: Node[], explicit: 
       rects.push(b.box);
       continue;
     }
-    for (let i = 0; i < count; i++) {
-      const r = rects[i];
-      if (!overlaps(r, b.box)) continue;
-      const x0 = Math.max(b.box[0], r[0] - b.pad);
-      const y0 = Math.max(b.box[1], r[1] - b.pad);
-      const x1 = Math.min(b.box[0] + b.box[2], r[0] + r[2] + b.pad);
-      const y1 = Math.min(b.box[1] + b.box[3], r[1] + r[3] + b.pad);
-      if (x1 > x0 && y1 > y0) rects.push([x0, y0, x1 - x0, y1 - y0]);
-    }
+    rects.push([b.box[0] - b.pad, b.box[1] - b.pad, b.box[2] + 2 * b.pad, b.box[3] + 2 * b.pad]);
   }
 }
 
