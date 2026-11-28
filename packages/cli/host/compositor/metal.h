@@ -45,4 +45,24 @@ int mt_draw_quad_masked(CompBackend *backend, int content, int mask, CompRect sr
 @class MTLTexture;
 #endif
 
+/** One shape of a canvas batch, as sdf_vertex and sdf_fragment read it. Local space is the space
+ *  the shape's numbers are in; the matrix takes a local point to device pixels. */
+typedef struct {
+  float m[4];      // a, b, c, d: x' = a*x + c*y + tx, y' = b*x + d*y + ty
+  float origin[4]; // tx, ty, kind (1 rect, 2 oval), unused
+  float box[4];    // x, y, w, h in local space
+  float radii[4];  // oval: rx, ry; rect: unused
+  float color[4];  // premultiplied colour
+} MtSdfShape;
+
+/** Draws a batch of canvas shapes into texture `dst`, copying `src` in first unless `clear`. The
+ *  batch starts from transparent when there is nothing to copy. Answers 0 when the texture is
+ *  gone. A later frame on the backend's queue reads `dst` after this work. */
+int mt_canvas_batch(CompBackend *b, int dst, int src, int clear, const MtSdfShape *shapes, int count,
+                    int width, int height);
+
+/** Waits for the batch that last wrote `tex`, then copies its pixels into `dst` at `stride`
+ *  bytes a row. Answers 0 when the texture is gone. */
+int mt_tex_readback(CompBackend *b, int tex, void *dst, size_t stride);
+
 #endif

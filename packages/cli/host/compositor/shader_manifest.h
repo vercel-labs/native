@@ -39,11 +39,15 @@ typedef struct {
 } NativeShaderPipeline;
 
 static const NativeShaderPipeline kNativeShaderPipelines[] = {
+  // Every layer, drawn from its texture into the window's picture.
   { "quad", "quad_vertex", "quad_fragment", MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid, 1,
     NativeShaderBlendPremultiplied },
   // A mask the walk split: the content's texels cut by the mask image's alpha, each already
   // premultiplied, blended as a quad is.
   { "mask", "quad_vertex", "quad_mask_fragment", MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid, 1,
+    NativeShaderBlendPremultiplied },
+  // A 2D canvas's fills, drawn straight into the canvas texture.
+  { "canvas_sdf", "sdf_vertex", "sdf_fragment", MTLPixelFormatRGBA8Unorm, MTLPixelFormatInvalid, 1,
     NativeShaderBlendPremultiplied },
 };
 
