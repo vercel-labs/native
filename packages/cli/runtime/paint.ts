@@ -14,7 +14,7 @@ import { layoutPasses } from "./layout/box.ts";
 import { paintControl, paintMeter, paintProgress } from "./controls.ts";
 import { paintDatePicker } from "./date-picker.ts";
 import { borderBottom, borderLeft, borderPx, borderRight, borderTop, clipMargin, display, clipsX, clipsY, flattenContents, isBfcRoot, isFloat, isReplaced, isSvgElement, len, objectSize, propagatesBodyOverflow, viewportOverflowX, viewportOverflowY, viewportScrollsX, viewportScrollsY } from "./layout/box-model.ts";
-import { paintSvg } from "./svg.ts";
+import { paintSvg, setSvgDirty } from "./svg.ts";
 import { contentRect, smoothImage } from "./image-fit.ts";
 import { isEmptyCell, isVoidTablePart } from "./layout/table.ts";
 import { paintBackgroundImages, paintCanvasImages, hasBackgroundImage, backgroundClipBox, backgroundClipRadii, boxRect, scrollsWithContents } from "./background.ts";
@@ -34,7 +34,7 @@ import { compositableBits } from "./animation.ts";
 import { LAYER_TRANSFORM, willChangeBits } from "./layers.ts";
 import { setPointHitsHook } from "./point-hook.ts";
 import { backdropReuses, damage, damageSerialsText, damageVerify, lastInkHitsDamage,noteScrollThumb, onDamagePath, paintBoundsOf, recordFullInk } from "./paint-damage.ts";
-import { setPaintBoundsHook } from "./invalidation.ts";
+import { paintDamage, setPaintBoundsHook } from "./invalidation.ts";
 import { flushLayoutHook } from "./layout-flush-hook.ts";
 import { elementFilter, elementBackdropFilter } from "./filters.ts";
 import type { FilterOp } from "./filters.ts";
@@ -3526,7 +3526,9 @@ export function paintRootDamage(root: Node, rects: number[][]): void {
   canvasEl = canvasSource(root);
   for (const r of rects) hostFillRect(r[0], r[1], r[2], r[3], 0, background);
   if (canvasEl !== null) paintCanvasImages(canvasEl, root, canvasEl.sv[P.P_OPACITY]);
+  setSvgDirty(paintDamage.nodes, paintDamage.nodes.length > 0);
   paintContext(root, root.x, root.y, 1, true);
+  setSvgDirty([], false);
   paintViewportScrollbar(root as Element);
   paintEditableCaret();
   paintTopLayer();
@@ -3617,11 +3619,14 @@ function recordFull(root: Node, present: boolean): void {
   if (canvasEl !== null) {
     paintCanvasImages(canvasEl, root, canvasEl.sv[P.P_OPACITY]);
   }
+  // An inline SVG whose own shapes changed redraws just their box into the bitmap it kept.
+  setSvgDirty(paintDamage.nodes, paintDamage.nodes.length > 0);
   // The root's (or body's) background has already been used for the whole canvas.
   paintContext(root, root.x, root.y, 1, true);
   paintViewportScrollbar(root as Element);
   paintEditableCaret();
   paintTopLayer();
+  setSvgDirty([], false);
   // A date or time field's picker paints above everything, as a browser's own popup does, and so
   // does a select's open picker.
   paintDatePicker();
