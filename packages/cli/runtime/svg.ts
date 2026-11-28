@@ -40,7 +40,9 @@ import {
   hostCanvasSetLineJoin, hostCanvasSetLineDash, hostCanvasSave, hostCanvasRestore, hostCanvasClip,
   hostCanvasDraw, hostMeasureText, hostCanvasSetFont, hostCanvasFillText, hostCanvasStrokeText,
   hostCanvasSetAlpha, hostCanvasSetComposite, hostCanvasDrawCanvas, hostCanvasSvgFilter,
+  hostCanvasFillTile,
 } from "./host.ts";
+import { createContext, type CanvasRenderingContext2D as NativeCanvasContext } from "./canvas.ts";
 import { svgDetach } from "./svg-detach.ts";
 import type { Element, Node } from "./dom.ts";
 import {
@@ -392,10 +394,21 @@ function patternFor(el: Element, vw: number, vh: number): SvgPatternTile | null 
   };
 }
 
+// One scratch canvas for pattern cells: a pattern fill renders its tile once at the pattern's
+// device resolution and the host repeats that bitmap. A pattern nested inside another pattern's
+// content falls back to drawing tiles, since the cell canvas is in use.
+let patternCell: { ctx: NativeCanvasContext; w: number; h: number } | null = null;
+let patternCellBusy = false;
+// A cell larger than this (in device pixels) falls back to drawing its tiles: at that size
+// rendering the cell once costs more than the repeats it saves.
+const PATTERN_CELL_MAX = 4 * 1024 * 1024;
+const patternTileOn = (process.env.NATIVE_PATTERN_TILE ?? "") !== "0";
+
 /**
- * Fills the path in `canvas` with a pattern: the tile drawn again at every repeat across the
- * shape, each copy of the content clipped to its tile. `bbox` is the shape's bounding box in user
- * space and `m` the transform from there into the canvas.
+ * Fills the path in `canvas` with a pattern: the tile rendered once and repeated as an image, or,
+ * where the host has no tiled fill, drawn again at every repeat with each copy clipped to its
+ * tile. `bbox` is the shape's bounding box in user space and `m` the transform from there into
+ * the canvas.
  */
 function drawPatternFill(canvas: number, pat: SvgPatternTile, bbox: number[], m: number[],
   alpha: number, rule: number, vw: number, vh: number, depth: number): void {
@@ -423,6 +436,54 @@ function drawPatternFill(canvas: number, pat: SvgPatternTile, bbox: number[], m:
     : pat.viewBox === null ? IDENTITY : viewMatrix(pat.viewBox, pat.w, pat.h, pat.par[0], pat.par[1]);
   const base = mul(m, toUser);
   const tilePath = rectPath(0, 0, pat.w, pat.h, 0, 0);
+  if (patternTileOn && !patternCellBusy) {
+    // The tile in device pixels. The cell is only used when the tile grid is axis aligned and its
+    // device size is a whole number of pixels: then its bitmap maps one pixel to one pixel when
+    // the host repeats it, and the drawing is the same as drawing every tile. A rotated, skewed
+    // or fractional grid keeps the per-tile path, where the content is rasterised in place.
+    const sx = Math.hypot(base[0], base[1]);
+    const sy = Math.hypot(base[2], base[3]);
+    const tileW = pat.w * sx, tileH = pat.h * sy;
+    const axis = Math.abs(base[1]) <= 1e-9 * sx && Math.abs(base[2]) <= 1e-9 * sy;
+    const whole = Math.abs(tileW - Math.round(tileW)) < 1e-6 && Math.abs(tileH - Math.round(tileH)) < 1e-6;
+    const cellW = Math.round(tileW), cellH = Math.round(tileH);
+    if (axis && whole && cellW > 0 && cellH > 0 && cellW * cellH <= PATTERN_CELL_MAX) {
+      patternCellBusy = true;
+      try {
+        let cell = patternCell;
+        if (cell === null) {
+          cell = { ctx: createContext(cellW, cellH), w: cellW, h: cellH };
+          patternCell = cell;
+        } else if (cell.w !== cellW || cell.h !== cellH) {
+          cell.ctx.resize(cellW, cellH);
+          cell.w = cellW;
+          cell.h = cellH;
+        } else {
+          hostCanvasSetTransform(cell.ctx.hostId, 1, 0, 0, 1, 0, 0);
+          hostCanvasClearRect(cell.ctx.hostId, 0, 0, cellW, cellH);
+        }
+        // The content into the cell: the tile's own space, scaled to the cell's pixels. The
+        // tile's corner reaches the pattern space through the fill matrix, not here.
+        const cellM = mul([cellW / pat.w, 0, 0, cellH / pat.h, 0, 0], content);
+        drawChildren(pat.content, cell.ctx.hostId, cellM, vw, vh, alpha, null, depth + 1, []);
+        const tileM = mul(base, [1, 0, 0, 1, pat.x, pat.y]);
+        // The tiles cover the grid around the shape's bounds, as drawing every tile does; the
+        // fill is clipped to that grid, and the canvas's own clip applies as well.
+        hostCanvasSave(canvas);
+        hostCanvasSetTransform(canvas, tileM[0], tileM[1], tileM[2], tileM[3], tileM[4], tileM[5]);
+        hostCanvasBeginPath(canvas);
+        sinkId = canvas;
+        emitPath(rectPath(i0 * pat.w, j0 * pat.h, (i1 - i0) * pat.w, (j1 - j0) * pat.h, 0, 0), sink);
+        hostCanvasClip(canvas, 0);
+        const filled = hostCanvasFillTile(canvas, cell.ctx.hostId, tileM[0], tileM[1], tileM[2], tileM[3],
+          tileM[4], tileM[5], pat.w, pat.h, rule);
+        hostCanvasRestore(canvas);
+        if (filled !== 0) return;
+      } finally {
+        patternCellBusy = false;
+      }
+    }
+  }
   for (let j = j0; j < j1; j++) {
     for (let i = i0; i < i1; i++) {
       const tile = mul(base, [1, 0, 0, 1, pat.x + i * pat.w, pat.y + j * pat.h]);

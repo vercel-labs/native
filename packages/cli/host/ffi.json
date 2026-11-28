@@ -254,6 +254,7 @@
     { "name": "hostCanvasArcTo", "symbol": "host_canvas_arc_to", "params": ["i32", "f64", "f64", "f64", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasRect", "symbol": "host_canvas_rect", "params": ["i32", "f64", "f64", "f64", "f64"], "returns": "void" },
     { "name": "hostCanvasFill", "symbol": "host_canvas_fill", "params": ["i32", "i32"], "returns": "void" },
+    { "name": "hostCanvasFillTile", "symbol": "host_canvas_fill_tile", "params": ["i32", "i32", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "f64", "i32"], "returns": "i32" },
     { "name": "hostCanvasStroke", "symbol": "host_canvas_stroke", "params": ["i32"], "returns": "void" },
     { "name": "hostCanvasClip", "symbol": "host_canvas_clip", "params": ["i32", "i32"], "returns": "void" },
     { "name": "hostCanvasFillRect", "symbol": "host_canvas_fill_rect", "params": ["i32", "f64", "f64", "f64", "f64"], "returns": "void" },

@@ -7988,6 +7988,14 @@ void host_canvas_fill(int32_t id, int32_t rule) {
   path->Release();
 }
 
+// Tiled fills are the macOS host's path for now: the SVG layer draws each pattern tile here.
+int32_t host_canvas_fill_tile(int32_t id, int32_t sourceId, double a, double b, double c, double d,
+                              double e, double f, double w, double h, int32_t rule) {
+  (void)id; (void)sourceId; (void)a; (void)b; (void)c; (void)d; (void)e; (void)f;
+  (void)w; (void)h; (void)rule;
+  return 0;
+}
+
 void host_canvas_stroke(int32_t id) {
   Canvas *c = canvas_at(id);
   if (!c || c->seg_count == 0) return;

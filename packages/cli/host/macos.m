@@ -3594,6 +3594,43 @@ void host_canvas_fill(int32_t id, int32_t rule) {
   canvas_op(c, &op);
 }
 
+// Draws a source canvas's bitmap repeated as a tile over the current clip: the matrix maps the
+// tile's square (0,0,w,h) to the bitmap's pixels, and the source canvas is the cell at that
+// resolution. Returns 1 when the fill was drawn. The caller clips the tile grid first, so the
+// canvas path stays for a stroke that follows.
+int32_t host_canvas_fill_tile(int32_t id, int32_t sourceId, double ma, double mb, double mc, double md,
+                              double me, double mf, double w, double h, int32_t rule) {
+  Canvas *c = canvas_at(id);
+  Canvas *src = canvas_at(sourceId);
+  if (!c || !c->ctx || !src || !src->ctx) return 0;
+  (void)rule;
+  if (!(w > 0) || !(h > 0)) return 0;
+  CGContextFlush(src->ctx);
+  CGImageRef img = src->image;
+  int created = 0;
+  if (!img) {
+    img = CGBitmapContextCreateImage(src->ctx);
+    created = 1;
+  }
+  if (!img) return 0;
+  CGContextRef ctx = c->ctx;
+  CGContextSaveGState(ctx);
+  // The caller has already clipped the tile grid (and any canvas clip is in the state).
+  // The tile's space is the caller's device space: its y runs down, which the base transform
+  // turns into CoreGraphics' y up. The image is drawn upright in that space, so the tile's top
+  // edge is where the cell's first row goes.
+  CGAffineTransform tile = CGAffineTransformMake(ma, mb, mc, md, me, mf);
+  context_set_ctm(ctx, CGAffineTransformConcat(tile, c->base));
+  CGContextTranslateCTM(ctx, 0, h);
+  CGContextScaleCTM(ctx, 1, -1);
+  CGContextSetInterpolationQuality(ctx, kCGInterpolationNone);
+  CGContextDrawTiledImage(ctx, CGRectMake(0, 0, w, h), img);
+  CGContextRestoreGState(ctx);
+  if (created) CGImageRelease(img);
+  canvas_changed(c);
+  return 1;
+}
+
 void host_canvas_stroke(int32_t id) {
   Canvas *c = canvas_at(id);
   if (!c) return;
