@@ -294,6 +294,54 @@ function declarationValue(s: string, from: number, to: number): boolean {
 }
 
 /**
+ * `text` without its comments: a comment is no token of the value, so `1px /* hello *\/ red`
+ * stands for `1px red` when a var() substitutes it. A string's own `/*` stays as text.
+ */
+export function stripComments(text: string): string {
+  if (text.indexOf("/*") < 0) return text;
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"' || ch === "'") {
+      const end = skipString(text, i);
+      out += text.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "\\") {
+      out += text.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    // An unquoted url() is one token: what looks like a comment inside it is part of the URL.
+    // A quoted url() is walked normally, its string skipped whole.
+    if ((ch === "u" || ch === "U") && text.slice(i, i + 4).toLowerCase() === "url(" &&
+      (i === 0 || !nameChar(text[i - 1]))) {
+      let k = i + 4;
+      while (k < text.length && /\s/.test(text[k])) k++;
+      if (k >= text.length || (text[k] !== '"' && text[k] !== "'")) {
+        const close = text.indexOf(")", k);
+        const end = close < 0 ? text.length : close + 1;
+        out += text.slice(i, end);
+        i = end;
+        continue;
+      }
+    }
+    if (text.startsWith("/*", i)) {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) break;
+      out += " ";
+      i = end + 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+/**
  * Does `value` meet the <declaration-value> grammar a custom property's value, or a var()'s
  * fallback, needs? A `!` or `;` outside a function, or an unbalanced bracket, makes the whole
  * declaration invalid, so a browser drops it at parse time rather than at computed-value time.

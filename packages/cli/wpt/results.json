@@ -110298,8 +110298,7 @@
   {
    "path": "css/css-variables/variable-substitution-shadow-properties.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "box-shadow-with-comment: assert_equals: Expected Value should match actual value: expected \"rgb(0, 128, 0) 1px 1px 1px 1px\", got \"none\""
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-substitution-shorthands.html",

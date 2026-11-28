@@ -20,7 +20,7 @@ import { gradientCss } from "../shared/css/gradients.ts";
 import { colorText, systemColorText } from "./system-colors.ts";
 import { evalExpr, exprHasCq, exprHasPercent } from "../shared/css/length-exprs.ts";
 import { longhandIds } from "../shared/css/shorthands.ts";
-import { hasVar, substituteVars, wideKeyword } from "../shared/css/vars.ts";
+import { hasVar, stripComments, substituteVars, wideKeyword } from "../shared/css/vars.ts";
 import { fitsSyntax } from "../shared/css/syntax.ts";
 import { buttonInputType, document, Element, Text, materializeText, newElementFor, refreshFormState, isInTopLayer, langOf, slotAssignedNodes, slotsIn, ShadowRoot } from "./dom.ts";
 import { textRunDependence } from "./text-runs.ts";
@@ -969,7 +969,9 @@ function isCustom(prop: string): boolean {
  */
 function setCustom(out: Map<string, string>, prop: string, value: string,
   parent: Map<string, string> | null): void {
-  const text = value.trim();
+  // A comment is no token of the value: "--foo: 1px /* hello */ red" stands for "1px red" when a
+  // var() substitutes it.
+  const text = stripComments(value).trim();
   const keyword = wideKeyword(text);
   const reg = registeredProperty(prop);
   if (keyword === "inherit" || keyword === "unset") {
