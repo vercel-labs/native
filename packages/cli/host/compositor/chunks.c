@@ -584,6 +584,18 @@ static int walk_list(const CompCmdSource *src, void *ctx, int list_id, double sc
           fprintf(stderr, "native: blur %d inner ok=%d chunks=%d fail=%d kind=%d\n", i, ok,
                   w->count - at, g_walk_fail, g_walk_fail_kind);
         }
+        // The GPU blur works on the chunk's pixels where they are; a chunk the frame scales or
+        // turns is resampled as it is drawn, and blurring a device picture of it then reads a
+        // little differently from the replay blurring the layer before that resampling. Those
+        // keep the replay.
+        if (ok && w->count > at) {
+          const CompWalkChunk *chunk = &w->chunks[at];
+          double sx = chunk->m.m[0] / scale, sy = chunk->m.m[5] / scale;
+          if (fabs(sx - 1.0) > 1e-4 || fabs(sy - 1.0) > 1e-4 ||
+              fabs(chunk->m.m[1]) > 1e-6 || fabs(chunk->m.m[4]) > 1e-6) {
+            ok = 0;
+          }
+        }
         // Several chunks inside the filter are one unblurred chunk of its content carrying the
         // radius, since the host blurs the chunk's pixels as a whole.
         if (ok && w->count - at != 1) {
