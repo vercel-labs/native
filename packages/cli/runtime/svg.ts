@@ -41,6 +41,7 @@ import {
   hostCanvasDraw, hostMeasureText, hostCanvasSetFont, hostCanvasFillText, hostCanvasStrokeText,
   hostCanvasSetAlpha, hostCanvasSetComposite, hostCanvasDrawCanvas, hostCanvasSvgFilter,
 } from "./host.ts";
+import { svgDetach } from "./svg-detach.ts";
 import type { Element, Node } from "./dom.ts";
 import {
   applyPoint, emitPath, IDENTITY, invert, localName, mul, num, parseAspectRatio, parseSvgOrigin, parseTransform,
@@ -62,7 +63,7 @@ import { evalExpr } from "../shared/css/length-exprs.ts";
 import { compileValue } from "../shared/css/declarations.ts";
 import type { Decl } from "../shared/css/types.ts";
 import { drawGradient, paintUrlAt, resolveGradient } from "./svg-paint.ts";
-import { compileSvgFilter } from "./svg-filters.ts";
+import { compileSvgFilter, shiftFilterDef } from "./svg-filters.ts";
 import { elementFilter } from "./filters.ts";
 import { containerBasis, declaresProperty, fontKey } from "./style.ts";
 import { viewport } from "./viewport.ts";
@@ -1165,53 +1166,157 @@ function drawChildren(el: Node, id: number, m: number[], vw: number, vh: number,
 // ---------------------------------------------------------------------------
 // Layers
 
-// A filtered element is drawn into a bitmap of its own the size of the root SVG's bitmap, then
-// composited over its parent. The bitmaps are kept between paints and reused by nesting depth,
-// so an animating filter allocates nothing after its first frame.
-let layerCanvases: number[] = [];
-/** Each layer bitmap's size as of its last use, so only a resized root costs a resize. */
-let layerSizes: number[] = [];
-let layerDepth = 0;
-/** The root bitmap's size in device pixels, set by paintSvg for the layers drawn into it. */
-let svgPixelW = 0, svgPixelH = 0;
+// A filtered element is drawn into a bitmap of its own, the size of its filter region rather
+// than the whole SVG, and composited over its parent. The bitmaps are kept between paints and
+// reused by nesting depth, so an animating filter allocates nothing after its first frame.
+//
+// The memory a page can make the painter take is bounded: filtering more than
+// FILTER_LAYER_MAX_DEPTH groups deep, or keeping more than FILTER_LAYER_MAX_BYTES of layer
+// bitmaps, paints the element unfiltered instead, which is Chrome's fallback when it can't build
+// a filter. A pooled bitmap that isn't in use is shrunk to 1x1, which frees its pixels on every
+// host, when a deeper layer needs the room or when the SVG that owned the pool is unmounted.
+const FILTER_LAYER_MAX_DEPTH = 16;
+const FILTER_LAYER_MAX_BYTES = 64 * 1024 * 1024;
 
-/** A bitmap's size as one key: the host clamps a canvas to 16384 pixels on a side. */
-function layerSizeKey(): number {
-  return svgPixelW * 16384 + svgPixelH;
+let layerCanvases: number[] = [];
+/** The bytes each pooled bitmap holds, and its pixel size as one key, by nesting depth. */
+let layerBytes: number[] = [];
+let layerSizes: number[] = [];
+let layerPoolBytes = 0;
+let layerDepth = 0;
+/** The filter layers the paint in progress has open, and the most it has held at once. */
+let layerActiveBytes = 0;
+let layerPeakBytes = 0;
+let layerMaxDepth = 0;
+/** The SVG whose paint last used the pool, so unmounting it can release the bitmaps. */
+let layerOwner: Element | null = null;
+/** The root bitmap's size in device pixels, set by paintSvg for the regions clamped to it. */
+let svgPixelW = 0, svgPixelH = 0;
+/** The bitmap size of each open layer; a nested region is clamped to the layer it paints into,
+ *  whose own origin is that region's corner, not to the root viewport in this local space. */
+let targetWs: number[] = [];
+let targetHs: number[] = [];
+/** The bound each nesting level's filter region was clamped to, in that level's local pixels. */
+let layerClampW: number[] = [];
+let layerClampH: number[] = [];
+/** The furthest edge each nesting level's filter region reached, in that level's local space. */
+let layerEdgesW: number[] = [];
+let layerEdgesH: number[] = [];
+
+function targetW(): number { return targetWs.length > 0 ? targetWs[targetWs.length - 1] : svgPixelW; }
+function targetH(): number { return targetHs.length > 0 ? targetHs[targetHs.length - 1] : svgPixelH; }
+
+function layerSizeKey(w: number, h: number): number {
+  return w * 16384 + h;
 }
 
-function layerCanvas(at: number): number {
+/** Shrinks a pooled bitmap to 1x1: every host frees its pixels on a resize, and the id stays. */
+function releaseLayerCanvas(at: number): void {
+  const id = layerCanvases[at];
+  if (id === undefined) return;
+  const held = layerBytes[at] ?? 0;
+  if (held > 0) {
+    hostCanvasResize(id, 1, 1);
+    layerPoolBytes -= held;
+    layerBytes[at] = 0;
+    layerSizes[at] = -1;
+  }
+}
+
+/** Releases every pooled layer, for an SVG that has been unmounted. */
+function releaseLayers(): void {
+  for (let i = 0; i < layerCanvases.length; i++) releaseLayerCanvas(i);
+  layerPoolBytes = 0;
+}
+
+/** Frees the room a deeper layer needs out of the pooled bitmaps that aren't open. */
+function shrinkLayersBeyond(at: number): void {
+  for (let i = layerCanvases.length - 1; i > at; i--) releaseLayerCanvas(i);
+}
+
+/**
+ * A bitmap for one element's filter region, whose origin is the region's corner. -1 when the
+ * nesting or memory bound refuses it; the caller then paints the element unfiltered.
+ */
+function acquireLayer(w: number, h: number): number {
+  const iw = Math.max(1, Math.ceil(w)), ih = Math.max(1, Math.ceil(h));
+  const need = iw * ih * 4;
+  if (layerDepth >= FILTER_LAYER_MAX_DEPTH ||
+      layerActiveBytes + need > FILTER_LAYER_MAX_BYTES) return -1;
+  const at = layerDepth;
+  const key = layerSizeKey(iw, ih);
   let id = layerCanvases[at];
   if (id === undefined) {
-    id = hostCanvasCreate(svgPixelW, svgPixelH);
+    id = hostCanvasCreate(iw, ih);
     layerCanvases[at] = id;
-    layerSizes[at] = layerSizeKey();
-  } else if (layerSizes[at] !== layerSizeKey()) {
-    hostCanvasResize(id, svgPixelW, svgPixelH);
-    layerSizes[at] = layerSizeKey();
+    layerBytes[at] = need;
+    layerSizes[at] = key;
+    layerPoolBytes += need;
+  } else if (layerSizes[at] !== key) {
+    if (layerPoolBytes - (layerBytes[at] ?? 0) + need > FILTER_LAYER_MAX_BYTES) shrinkLayersBeyond(at);
+    if (layerPoolBytes - (layerBytes[at] ?? 0) + need > FILTER_LAYER_MAX_BYTES) return -1;
+    hostCanvasResize(id, iw, ih);
+    layerPoolBytes += need - (layerBytes[at] ?? 0);
+    layerBytes[at] = need;
+    layerSizes[at] = key;
   }
-  return id;
-}
-
-function acquireLayer(): number {
-  const id = layerCanvas(layerDepth++);
+  layerDepth++;
+  targetWs.push(iw);
+  targetHs.push(ih);
+  layerActiveBytes += need;
+  if (layerActiveBytes > layerPeakBytes) layerPeakBytes = layerActiveBytes;
+  if (layerDepth > layerMaxDepth) layerMaxDepth = layerDepth;
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
   hostCanvasSetAlpha(id, 1);
   hostCanvasSetComposite(id, 0);
-  hostCanvasClearRect(id, 0, 0, svgPixelW, svgPixelH);
+  hostCanvasClearRect(id, 0, 0, iw, ih);
   return id;
 }
 
 function releaseLayer(): void {
-  if (layerDepth > 0) layerDepth--;
+  if (layerDepth <= 0) return;
+  layerDepth--;
+  const at = layerDepth;
+  targetWs.pop();
+  targetHs.pop();
+  const held = layerBytes[at];
+  layerActiveBytes -= held === undefined ? 0 : held;
 }
+
+/**
+ * An <svg> left the document: its root bitmap, and the layer bitmaps the painter pooled for it,
+ * are released. Another SVG on the page rebuilds what it needs; the caps keep the rebuild bounded.
+ */
+function releaseSvgOnDetach(removed: Node): void {
+  let found = false;
+  const walk = (n: Node): void => {
+    if (!n.isElementNode) return;
+    const el = n as Element;
+    if (svgName(el) === "svg") {
+      found = true;
+      if (el.svgCanvas >= 0) {
+        hostCanvasResize(el.svgCanvas, 1, 1);
+        el.svgPixelsW = 0;
+        el.svgPixelsH = 0;
+      }
+    }
+    for (const kid of el.kids) walk(kid);
+  };
+  walk(removed);
+  if (found) {
+    releaseLayers();
+    layerOwner = null;
+  }
+}
+
+svgDetach.fn = (removed) => releaseSvgOnDetach(removed as unknown as Node);
 
 /**
  * Draws a layer over its paint target, in device pixels: the whole bitmap, or the rect a filter
  * wrote, with the opacity the element's group carries.
  */
 function compositeLayer(id: number, layer: number, x: number, y: number, w: number, h: number,
-  alpha: number, clips: Clip[] = []): void {
+  alpha: number, clips: Clip[] = [], sx: number = 0, sy: number = 0): void {
   if (!(w > 0) || !(h > 0) || !(alpha > 0)) return;
   hostCanvasSave(id);
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
@@ -1221,8 +1326,9 @@ function compositeLayer(id: number, layer: number, x: number, y: number, w: numb
   for (const clip of clips) clipTo(id, clip);
   hostCanvasSetAlpha(id, alpha);
   hostCanvasSetComposite(id, 0);
-  // A 1:1 blit of bitmap pixels: nearest sampling keeps the layer exactly as it was drawn.
-  hostCanvasDrawCanvas(id, layer, x, y, w, h, x, y, w, h, 0);
+  // A 1:1 blit of the layer's own pixels from (sx, sy): the region inside the capture rect, or
+  // the whole layer when the capture is the region.
+  hostCanvasDrawCanvas(id, layer, x, y, w, h, sx, sy, w, h, 0);
   hostCanvasRestore(id);
   // The host keeps global alpha and the blend mode beside its saved state, not in it: a Windows
   // or Linux canvas comes back with the composite's alpha still set. The painter always draws at
@@ -1254,16 +1360,38 @@ function drawNode(el: Node, id: number, m: number[], vw: number, vh: number, alp
     drawElement(node, name, id, m2, vw, vh, a, inh, depth, inner);
     return;
   }
-  // The filter reads the element unclipped, so the clip applies to its result (see below).
-  const layer = acquireLayer();
-  drawElement(node, name, layer, m2, vw, vh, 1, inh, depth, []);
-  // The filtered result replaces the paint within the filter region and nowhere else.
+  // The region is known before anything is allocated: a layer for the whole root would cost
+  // megabytes per nesting level however small the painted part is.
   const row = compileSvgFilter(filter, node, filterBBox(node, name, vw, vh), m2, vw, vh,
-    svgPixelW, svgPixelH, (ref) => (ids === null ? undefined : ids.get(ref)));
-  if (row !== null) {
-    hostCanvasSvgFilter(layer, row.def, row.linear ? 1 : 0, row.x, row.y, row.w, row.h);
-    compositeLayer(id, layer, row.x, row.y, row.w, row.h, a, inner);
+    targetW(), targetH(), (ref) => (ids === null ? undefined : ids.get(ref)));
+  if (row === null) return;
+  if (row.sw > 16384 || row.sh > 16384) {
+    // Even the region is past the host's surface: paint the element as it is, never nothing.
+    drawElement(node, name, id, m2, vw, vh, a, inh, depth, inner);
+    return;
   }
+  const at = layerDepth;
+  layerClampW[at] = targetW();
+  layerClampH[at] = targetH();
+  if (row.x + row.w > (layerEdgesW[at] ?? 0)) layerEdgesW[at] = row.x + row.w;
+  if (row.y + row.h > (layerEdgesH[at] ?? 0)) layerEdgesH[at] = row.y + row.h;
+  const layer = acquireLayer(row.sw, row.sh);
+  if (layer < 0) {
+    // Over the nesting or memory bound: paint the element unfiltered, as Chrome does when it
+    // cannot allocate the filter's result.
+    drawElement(node, name, id, m2, vw, vh, a, inh, depth, inner);
+    return;
+  }
+  // The filter reads the element unclipped, so the clip applies to its result (see below). The
+  // layer is the source's capture rect, which holds the region and what the primitives can pull
+  // into it, so the element is drawn shifted to that rect's corner.
+  const off = mul([1, 0, 0, 1, -row.sx, -row.sy], m2);
+  drawElement(node, name, layer, off, vw, vh, 1, inh, depth, []);
+  const dx = row.x - row.sx, dy = row.y - row.sy;
+  hostCanvasSvgFilter(layer, shiftFilterDef(row.def, dx, dy), row.linear ? 1 : 0,
+    0, 0, row.sw, row.sh);
+  // Only the region shows: the capture around it is what the primitives read.
+  compositeLayer(id, layer, row.x, row.y, row.w, row.h, a, inner, dx, dy);
   releaseLayer();
 }
 
@@ -1434,10 +1562,30 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   el.svgPixelsW = pw;
   el.svgPixelsH = ph;
   const id = el.svgCanvas;
+  // An SVG that left the document releases the root bitmap and the layer pool the next time
+  // another SVG paints; a still-attached one keeps them, so a page of several doesn't thrash.
+  if (layerOwner !== null && layerOwner !== el && !layerOwner.isConnected) {
+    releaseLayers();
+    if (layerOwner.svgCanvas >= 0) {
+      hostCanvasResize(layerOwner.svgCanvas, 1, 1);
+      layerOwner.svgPixelsW = 0;
+      layerOwner.svgPixelsH = 0;
+    }
+  }
+  layerOwner = el;
   // A paint pass draws one SVG at a time, and its group layers nest within it.
   svgPixelW = pw;
   svgPixelH = ph;
   layerDepth = 0;
+  layerActiveBytes = 0;
+  layerPeakBytes = 0;
+  layerMaxDepth = 0;
+  layerEdgesW = [];
+  layerEdgesH = [];
+  layerClampW = [];
+  layerClampH = [];
+  targetWs = [];
+  targetHs = [];
   // The clear is in canvas space, so the identity transform restores it after the last pass's
   // per-shape transforms.
   hostCanvasSetTransform(id, 1, 0, 0, 1, 0, 0);
@@ -1456,4 +1604,8 @@ export function paintSvg(el: Element, x: number, y: number, w: number, h: number
   drawChildren(el, id, m, vw, vh, 1, null, 0, []);
   ids = null;
   hostCanvasDraw(id, x, y, w, h, alpha, 1);
+  if (process.env.NATIVE_SVG_FILTER_STATS !== undefined && process.env.NATIVE_SVG_FILTER_STATS !== "0") {
+    const which = el.getAttribute("id") ?? "";
+    console.log(`native: svg filter layers svg=${which} peak=${layerPeakBytes} depth=${layerMaxDepth} pool=${layerPoolBytes} nested=${layerEdgesW[1] ?? 0}x${layerEdgesH[1] ?? 0} clamp=${layerClampW[1] ?? 0}x${layerClampH[1] ?? 0}`);
+  }
 }

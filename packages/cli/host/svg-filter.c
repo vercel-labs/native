@@ -104,16 +104,34 @@ static void from_working(uint8_t *px, int w, int h, int linear) {
 
 // --- Buffers -----------------------------------------------------------------
 
+/** Every surface one filter run makes shares this budget: a chain of up to 64 primitives each
+ *  holding a capture-sized result could otherwise ask for gigabytes from a small page. A run
+ *  that would exceed it stops, and the caller's pixels stay the source — the element paints
+ *  unfiltered — rather than a partial result. */
+#define SF_BUDGET_BYTES ((size_t)64 * 1024 * 1024)
+/** The largest a host canvas may be on either side; a bigger surface would be truncated. */
+#define SF_MAX_SIDE 16384
+
+static size_t g_budget_used = 0;
+
 static Buf buf_new(int w, int h) {
   Buf b;
   b.w = w;
   b.h = h;
-  b.px = (uint8_t *)calloc((size_t)w * (size_t)h * 4, 1);
+  b.px = NULL;
+  if (w <= 0 || h <= 0 || w > SF_MAX_SIDE || h > SF_MAX_SIDE) return b;
+  size_t bytes = (size_t)w * (size_t)h * 4;
+  if (bytes > SF_BUDGET_BYTES || g_budget_used > SF_BUDGET_BYTES - bytes) return b;
+  b.px = (uint8_t *)calloc(bytes, 1);
+  if (b.px != NULL) g_budget_used += bytes;
   return b;
 }
 
 static void buf_free(Buf *b) {
-  if (b->px) free(b->px);
+  if (b->px) {
+    free(b->px);
+    g_budget_used -= (size_t)b->w * (size_t)b->h * 4;
+  }
   b->px = NULL;
 }
 
@@ -474,6 +492,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
   memcpy(text, def, n);
   text[n] = 0;
 
+  g_budget_used = 0;
   Buf source = {rgba, w, h};
   Buf alpha = buf_new(w, h);
   size_t px = (size_t)w * (size_t)h;
@@ -494,6 +513,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
 
   Buf results[SF_MAX_OPS];
   int count = 0;
+  int failed = 0;
   const char *p = text;
 
   while (*p && count < SF_MAX_OPS) {
@@ -504,7 +524,7 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
     Buf out = buf_new(w, h);
     Buf *in1 = NULL, *in2 = NULL;
     int ok = out.px != NULL;
-    if (!ok) break;
+    if (!ok) { failed = 1; break; }
 
     if (kind == 't') { // pass-through
       int idx = (int)snum(&p);
@@ -589,8 +609,9 @@ void svg_filter_apply(uint8_t *rgba, int w, int h, const char *def, size_t n, in
     count++;
   }
 
-  // The last primitive's output is the filter's result.
-  if (count > 0 && results[count - 1].px) {
+  // The last primitive's output is the filter's result; a chain that ran out of budget leaves
+  // the source as it was (still in working space here, converted back below).
+  if (!failed && count > 0 && results[count - 1].px) {
     memcpy(rgba, results[count - 1].px, (size_t)w * (size_t)h * 4);
   }
   for (int i = 0; i < count; i++) buf_free(&results[i]);
