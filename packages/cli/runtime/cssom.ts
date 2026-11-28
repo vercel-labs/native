@@ -1382,7 +1382,7 @@ export class StyleDeclaration {
     this.present = true;
     for (const d of parseDeclarationBlock(text, fonts, undefined, getSheetContent())) {
       for (const c of d.decls) {
-        if (c.prop !== undefined) this.putText(c.prop, c.value === undefined ? "" : c.value, d.important, true);
+        if (c.prop !== undefined) this.putText(c.prop, c.value === undefined ? "" : c.value, d.important);
         else this.put(c.p, c.v, c.u, d.important);
       }
     }
@@ -1469,22 +1469,43 @@ export class StyleDeclaration {
       const d = this.decls[i];
       if (d.prop !== undefined && d.prop === name) this.decls.splice(i, 1);
     }
-    for (const d of this.decls) {
-      if (d.p === p) {
-        d.v = v;
-        d.u = u;
-        d.important = important;
-        return;
-      }
+    let at = -1;
+    for (let i = 0; i < this.decls.length; i++) {
+      if (this.decls[i].p === p) { at = i; break; }
+    }
+    // A write that lands before a shorthand covering it would be put back by the shorthand's
+    // expansion, so it is written after that shorthand instead: "margin: var(--m)" then
+    // "margin-top: 20px" keeps the 20px.
+    if (at >= 0 && this.textCoversAfter(p, at)) {
+      this.decls.splice(at, 1);
+      at = -1;
+    }
+    if (at >= 0) {
+      const d = this.decls[at];
+      d.v = v;
+      d.u = u;
+      d.important = important;
+      return;
     }
     this.decls.push({ p, v, u, important });
+  }
+
+  /** Whether a text shorthand after `at` covers the longhand `p`. */
+  private textCoversAfter(p: number, at: number): boolean {
+    for (let i = at + 1; i < this.decls.length; i++) {
+      const d = this.decls[i];
+      if (d.prop === undefined) continue;
+      const ids = longhandIds(d.prop);
+      if (ids !== null && ids.indexOf(p) >= 0) return true;
+    }
+    return false;
   }
 
   /**
    * Sets a declaration kept as text. It replaces a numeric declaration of the same property, and
    * a shorthand replaces every longhand it covers, as a shorthand declaration does.
    */
-  private putText(prop: string, value: string, important: boolean, parsed: boolean = false): void {
+  private putText(prop: string, value: string, important: boolean): void {
     this.present = true;
     const ids = longhandIds(prop);
     for (let i = this.decls.length - 1; i >= 0; i--) {
@@ -1495,10 +1516,9 @@ export class StyleDeclaration {
         if (d.prop === prop) this.decls.splice(i, 1);
         continue;
       }
-      // A parsed block keeps every declaration it lists: "margin-top: 10px !important; margin:
-      // 8px" is two declarations, and the cascade decides. A single setProperty() replaces the
-      // longhands its shorthand covers.
-      if (!parsed && ids !== null && ids.indexOf(d.p) >= 0) this.decls.splice(i, 1);
+      // A shorthand replaces the longhands it covers, but not an !important declaration: the
+      // cascade lets that one win, so "margin-top: 10px !important; margin: var(--m)" keeps 10px.
+      if (ids !== null && ids.indexOf(d.p) >= 0 && !d.important) this.decls.splice(i, 1);
     }
     this.decls.push({ p: -1, v: 0, u: 0, important, prop, value });
   }
