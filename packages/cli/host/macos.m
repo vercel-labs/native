@@ -11614,9 +11614,14 @@ static int mask_blur_chunk(CompBackend *b, const MaskGroup *g, const CompWalk *w
   // What the picture is of: the chunk's own key, the radius (which the chunk's commands do not
   // carry, since the filter's push stays out of the range) and the alpha it was made at.
   uint64_t key = g_win_keys[index] == 0 ? 0 : key_double(g_win_keys[index], c->blur_sigma);
-  // The picture is made in device pixels, so where the chunk sits is part of what it is a picture
-  // of: a layer that only moves would otherwise keep the picture where it used to be.
+  // The picture is made in device pixels, so the chunk's whole device transform is part of what it
+  // is a picture of: a layer that only moves, scales or turns would otherwise keep the picture it
+  // had before, at the old place or the old size.
   if (key != 0) {
+    key = key_double(key, c->m.m[0]);
+    key = key_double(key, c->m.m[1]);
+    key = key_double(key, c->m.m[4]);
+    key = key_double(key, c->m.m[5]);
     key = key_double(key, c->m.m[12]);
     key = key_double(key, c->m.m[13]);
   }
