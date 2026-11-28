@@ -2754,8 +2754,10 @@ function paintBox(el: Node, x: number, y: number, parentOpacity: number, skipBg:
       if (effect !== 0) {
         // A floats-only pass paints into a layer of its own, after the box's content has been
         // composited. The backdrop was filtered by the first pass, so filtering it again here
-        // would invert (or blur) it twice.
-        const backdrop = mode === 2 ? [] : elementBackdropFilter(el);
+        // would invert (or blur) it twice. A hidden box paints nothing, and its backdrop filter
+        // shows nothing with it: filtering the page behind it would leave the filtered rectangle.
+        const backdrop = mode === 2 || el.sv[P.P_VISIBILITY] !== P.VIS_VISIBLE
+          ? [] : elementBackdropFilter(el);
         const spec = filterSpec(el, elementFilter(el), backdrop, damage.limited && backdropReuses(el));
         // An opacity group alone can fade in place; filters, blend modes and backdrops are part
         // of the recorded spec and need the page painted for a new value.
