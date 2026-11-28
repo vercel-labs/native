@@ -1034,6 +1034,7 @@ function shorthandIds(name: string): number[] | null {
   if (name === "margin") return [P.P_MARGIN_TOP, P.P_MARGIN_RIGHT, P.P_MARGIN_BOTTOM, P.P_MARGIN_LEFT];
   if (name === "padding") return [P.P_PADDING_TOP, P.P_PADDING_RIGHT, P.P_PADDING_BOTTOM, P.P_PADDING_LEFT];
   if (name === "inset") return [P.P_TOP, P.P_RIGHT, P.P_BOTTOM, P.P_LEFT];
+  if (name === "border-spacing") return [P.P_BORDER_SPACING_H, P.P_BORDER_SPACING_V];
   if (name === "animation") {
     return [P.P_ANIMATION_DURATION, P.P_ANIMATION_TIMING_FUNCTION, P.P_ANIMATION_DELAY,
       P.P_ANIMATION_ITERATION_COUNT, P.P_ANIMATION_DIRECTION, P.P_ANIMATION_FILL_MODE,
@@ -1706,6 +1707,8 @@ export class StyleDeclaration {
       if (texts[1] === "auto") return texts[0];
       return texts[0] === "nowrap" ? texts[0] + " " + texts[1] : texts[1];
     }
+    // border-spacing writes its vertical value only when it differs from the horizontal one.
+    if (name === "border-spacing") return texts[0] === texts[1] ? texts[0] : texts[0] + " " + texts[1];
     // Outlines serialize in CSS's order: color, style, width.
     if (name === "outline") return texts[2] + " " + texts[0] + " " + texts[1];
     // A decoration writes its line, then the thickness, style and colour that aren't initial, in

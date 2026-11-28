@@ -110280,8 +110280,7 @@
   {
    "path": "css/css-variables/variable-substitution-basic.html",
    "kind": "testharness",
-   "status": "fail",
-   "reason": "Multiple variable references in a single property: assert_equals: Expected Value should match actual value: expected \"19px 47px\", got \"19px\" (+3 more)"
+   "status": "pass"
   },
   {
    "path": "css/css-variables/variable-substitution-filters.html",
