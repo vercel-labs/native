@@ -314,6 +314,20 @@ export function stripComments(text: string): string {
       i += 2;
       continue;
     }
+    // An unquoted url() is one token: what looks like a comment inside it is part of the URL.
+    // A quoted url() is walked normally, its string skipped whole.
+    if ((ch === "u" || ch === "U") && text.slice(i, i + 4).toLowerCase() === "url(" &&
+      (i === 0 || !nameChar(text[i - 1]))) {
+      let k = i + 4;
+      while (k < text.length && /\s/.test(text[k])) k++;
+      if (k >= text.length || (text[k] !== '"' && text[k] !== "'")) {
+        const close = text.indexOf(")", k);
+        const end = close < 0 ? text.length : close + 1;
+        out += text.slice(i, end);
+        i = end;
+        continue;
+      }
+    }
     if (text.startsWith("/*", i)) {
       const end = text.indexOf("*/", i + 2);
       if (end < 0) break;

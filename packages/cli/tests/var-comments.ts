@@ -11,6 +11,7 @@ const PAGE = `<!doctype html>
 <html><head><title>var-comments</title></head><body>
 <div id="t1" style="--foo: 1px /* hello */ rgb(0, 128, 0); box-shadow: 1px 1px 1px var(--foo)"></div>
 <div id="t2" style="--c: rgb(0, 128, 0) /* tail */; color: var(--c)"></div>
+<div id="t3" style="--i: url(/*icons*/green.png); background-image: var(--i)"></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -19,12 +20,15 @@ const log = (s: string): void => { console.log(s); };
 const cs = (id: string): CSSStyleDeclaration => getComputedStyle(document.getElementById(id) as HTMLElement);
 log("shadow " + cs("t1").boxShadow);
 log("colour " + cs("t2").color);
+log("url " + JSON.stringify(cs("t3").getPropertyValue("--i")));
 `;
 
 const EXPECTED_LOG = [
   "shadow rgb(0, 128, 0) 1px 1px 1px 1px",
   // A trailing comment goes the same way, and the colour after it still parses.
   "colour rgb(0, 128, 0)",
+  // An unquoted url() is one token, so the comment in it is part of the URL and stays.
+  'url "url(/*icons*/green.png)"',
 ];
 
 let failed = 0;
