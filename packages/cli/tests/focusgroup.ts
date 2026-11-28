@@ -23,6 +23,13 @@ const PAGE = `<!doctype html>
 <div id="d" focusgroup="toolbar"><span id="d1" tabindex="0">d1</span><span id="d2" tabindex="0" style="display:none">d2</span><span id="d3" tabindex="0">d3</span></div>
 <button id="after_d">after hidden</button>
 <div id="q" focusgroup="toolbar"><span id="q1" tabindex="0">q1</span><span id="q2" tabindex="0" style="visibility:hidden">q2</span><span id="q3" tabindex="0">q3</span></div>
+<div id="b" focusgroup="menubar"><span id="b1" tabindex="0">b1</span><span id="b2" tabindex="0">b2</span><span id="b3" tabindex="0">b3</span></div>
+<div id="nm" focusgroup="menu"><span id="nm1" tabindex="0">nm1</span><span id="nm2" tabindex="0">nm2</span><span id="nm3" tabindex="0">nm3</span></div>
+<div id="r" focusgroup="radiogroup"><span id="r1" tabindex="0">r1</span><span id="r2" tabindex="0">r2</span></div>
+<div id="gr" focusgroup="grid"><span id="gr1" tabindex="0">gr1</span><span id="gr2" tabindex="0">gr2</span></div>
+<div id="tb" focusgroup="tablist block"><span id="tb1" tabindex="0">tb1</span><span id="tb2" tabindex="0">tb2</span></div>
+<div id="tw" focusgroup="tablist nowrap"><span id="tw1" tabindex="0">tw1</span><span id="tw2" tabindex="0">tw2</span></div>
+<div id="li" focusgroup="listbox inline"><span id="li1" tabindex="0">li1</span><span id="li2" tabindex="0">li2</span></div>
 <script src="app.ts"></script>
 </body></html>`;
 
@@ -58,6 +65,19 @@ const STEPS = [
   "click #after_d", "key Shift+Tab", "click #d1", "key ArrowRight",
   // nor is a visibility: hidden one
   "click #q1", "key ArrowRight",
+  // menubar: inline arrows, wraps at both ends
+  "click #b1", "key ArrowRight", "key ArrowRight", "key ArrowRight", "key ArrowLeft",
+  // menu: block arrows, wraps; a horizontal arrow does nothing
+  "click #nm1", "key ArrowDown", "key ArrowDown", "key ArrowDown", "key ArrowUp", "key ArrowRight",
+  // radiogroup: both axes, wraps either way
+  "click #r1", "key ArrowRight", "key ArrowRight", "click #r1", "key ArrowDown", "key ArrowUp",
+  // grid is not a token Chrome ships: its items are ordinary tab stops and its arrows do nothing
+  "click #gr1", "key ArrowRight",
+  // block overrides a tablist's inline default; nowrap turns its wrapping off
+  "click #tb1", "key ArrowDown", "key ArrowRight",
+  "click #tw2", "key ArrowRight",
+  // inline overrides a listbox's block default
+  "click #li1", "key ArrowRight", "key ArrowDown",
 ].join(" | ");
 
 const EXPECTED = [
@@ -86,6 +106,25 @@ const EXPECTED = [
   "key Tab -> d1",
   "key ArrowRight -> d3",
   "key ArrowRight -> q3",
+  "key ArrowRight -> b2",
+  "key ArrowRight -> b3",
+  "key ArrowRight -> b1",
+  "key ArrowLeft -> b3",
+  "key ArrowDown -> nm2",
+  "key ArrowDown -> nm3",
+  "key ArrowDown -> nm1",
+  "key ArrowUp -> nm3",
+  "key ArrowRight -> nm3",
+  "key ArrowRight -> r2",
+  "key ArrowRight -> r1",
+  "key ArrowDown -> r2",
+  "key ArrowUp -> r1",
+  "key ArrowRight -> gr1",
+  "key ArrowDown -> tb2",
+  "key ArrowRight -> tb2",
+  "key ArrowRight -> tw2",
+  "key ArrowRight -> li2",
+  "key ArrowDown -> li2",
 ];
 
 const dir = mkdtempSync(join(tmpdir(), "native-focusgroup-"));
